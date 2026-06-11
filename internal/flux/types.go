@@ -1,0 +1,175 @@
+// Package flux provides types and parsing for Flux GitOps resources.
+package flux
+
+// Supported Flux API versions and kinds.
+const (
+	KindKustomization  = "Kustomization"
+	KindHelmRelease    = "HelmRelease"
+	KindHelmRepository = "HelmRepository"
+	KindGitRepository  = "GitRepository"
+
+	GroupSourceToolkitFluxHelmIO    = "source.toolkit.fluxcd.io"
+	GroupKustomizeToolkitFluxHelmIO = "kustomize.toolkit.fluxcd.io"
+	GroupHelmToolkitFluxHelmIO      = "helm.toolkit.fluxcd.io"
+)
+
+// ObjectMeta holds the standard Kubernetes metadata fields used across all
+// Flux resource types. Named type to avoid repeating anonymous structs.
+type ObjectMeta struct {
+	Name      string `yaml:"name"`
+	Namespace string `yaml:"namespace"`
+}
+
+// Kustomization represents a Flux Kustomization resource.
+type Kustomization struct {
+	APIVersion string            `yaml:"apiVersion"`
+	Kind       string            `yaml:"kind"`
+	Metadata   ObjectMeta        `yaml:"metadata"`
+	Spec       KustomizationSpec `yaml:"spec"`
+}
+
+// KustomizationSpec holds the spec for a Flux Kustomization.
+type KustomizationSpec struct {
+	// SourceRef references a GitRepository or other source.
+	SourceRef KustomizationSourceRef `yaml:"sourceRef"`
+	// Path is the path within the source to run kustomize build on.
+	Path string `yaml:"path,omitempty"`
+	// Prune enables pruning.
+	Prune bool `yaml:"prune,omitempty"`
+	// Interval is the reconciliation interval (e.g. "5m").
+	Interval interface{} `yaml:"interval,omitempty"`
+	// RetryInterval is the retry interval (e.g. "1m").
+	RetryInterval interface{} `yaml:"retryInterval,omitempty"`
+	// Timeout is the timeout for reconciliation.
+	Timeout interface{} `yaml:"timeout,omitempty"`
+	// Wait enables waiting for health checks.
+	Wait bool `yaml:"wait,omitempty"`
+	// DependsOn lists dependencies.
+	DependsOn []DependsOnEntry `yaml:"dependsOn,omitempty"`
+	// PostBuild contains post-build substitutions.
+	PostBuild *PostBuild `yaml:"postBuild,omitempty"`
+	// Patches lists patches to apply.
+	Patches interface{} `yaml:"patches,omitempty"`
+	// Images lists image overrides.
+	Images interface{} `yaml:"images,omitempty"`
+	// Suspend indicates if the resource is suspended.
+	Suspend bool `yaml:"suspend,omitempty"`
+	// HealthChecks lists health check references.
+	HealthChecks interface{} `yaml:"healthChecks,omitempty"`
+	// Decryption configures SOPS decryption.
+	Decryption interface{} `yaml:"decryption,omitempty"`
+	// Force enables force reconciliation.
+	Force bool `yaml:"force,omitempty"`
+}
+
+// DependsOnEntry represents a dependency reference.
+type DependsOnEntry struct {
+	Name      string `yaml:"name"`
+	Namespace string `yaml:"namespace,omitempty"`
+}
+
+// PostBuild contains post-build substitution configuration.
+type PostBuild struct {
+	Substitute        map[string]string `yaml:"substitute,omitempty"`
+	SubstituteFrom    interface{}       `yaml:"substituteFrom,omitempty"`
+	AllowInsecure     bool              `yaml:"allowInsecure,omitempty"`
+	DisableSubstitute bool              `yaml:"disableSubstitute,omitempty"`
+}
+
+// KustomizationSourceRef references the source for a Kustomization.
+type KustomizationSourceRef struct {
+	APIVersion string `yaml:"apiVersion"`
+	Kind       string `yaml:"kind"`
+	Name       string `yaml:"name"`
+	Namespace  string `yaml:"namespace,omitempty"`
+}
+
+// HelmRelease represents a Flux HelmRelease resource.
+type HelmRelease struct {
+	APIVersion string          `yaml:"apiVersion"`
+	Kind       string          `yaml:"kind"`
+	Metadata   ObjectMeta      `yaml:"metadata"`
+	Spec       HelmReleaseSpec `yaml:"spec"`
+}
+
+// HelmReleaseSpec holds the spec for a Flux HelmRelease.
+type HelmReleaseSpec struct {
+	Chart    HelmReleaseChart `yaml:"chart"`
+	Interval interface{}      `yaml:"interval,omitempty"`
+	// Values holds the values to pass to helm template.
+	Values map[string]interface{} `yaml:"values,omitempty"`
+	// ValuesFrom references ConfigMaps/Secrets with values.
+	ValuesFrom interface{} `yaml:"valuesFrom,omitempty"`
+	// Suspend indicates if the resource is suspended.
+	Suspend bool `yaml:"suspend,omitempty"`
+	// TargetNamespace overrides the release namespace.
+	TargetNamespace string `yaml:"targetNamespace,omitempty"`
+	// Install holds install-specific configuration.
+	Install interface{} `yaml:"install,omitempty"`
+	// Upgrade holds upgrade-specific configuration.
+	Upgrade interface{} `yaml:"upgrade,omitempty"`
+	// DependsOn lists dependencies.
+	DependsOn []DependsOnEntry `yaml:"dependsOn,omitempty"`
+}
+
+// HelmReleaseChart references the Helm chart to use.
+type HelmReleaseChart struct {
+	Spec HelmReleaseChartSpec `yaml:"spec"`
+}
+
+// HelmReleaseChartSpec specifies the chart source.
+type HelmReleaseChartSpec struct {
+	Chart     string `yaml:"chart"`
+	Version   string `yaml:"version,omitempty"`
+	SourceRef struct {
+		Kind      string `yaml:"kind"`
+		Name      string `yaml:"name"`
+		Namespace string `yaml:"namespace,omitempty"`
+	} `yaml:"sourceRef"`
+	Interval          interface{} `yaml:"interval,omitempty"`
+	ReconcileStrategy string      `yaml:"reconcileStrategy,omitempty"`
+}
+
+// HelmRepository represents a Flux HelmRepository resource.
+type HelmRepository struct {
+	APIVersion string             `yaml:"apiVersion"`
+	Kind       string             `yaml:"kind"`
+	Metadata   ObjectMeta         `yaml:"metadata"`
+	Spec       HelmRepositorySpec `yaml:"spec"`
+}
+
+// HelmRepositorySpec holds the spec for a Flux HelmRepository.
+type HelmRepositorySpec struct {
+	URL       string      `yaml:"url"`
+	Interval  interface{} `yaml:"interval,omitempty"`
+	SecretRef *struct {
+		Name string `yaml:"name"`
+	} `yaml:"secretRef,omitempty"`
+	Type string `yaml:"type,omitempty"`
+}
+
+// GitRepository represents a Flux GitRepository resource.
+type GitRepository struct {
+	APIVersion string            `yaml:"apiVersion"`
+	Kind       string            `yaml:"kind"`
+	Metadata   ObjectMeta        `yaml:"metadata"`
+	Spec       GitRepositorySpec `yaml:"spec"`
+}
+
+// GitRepositorySpec holds the spec for a Flux GitRepository.
+type GitRepositorySpec struct {
+	URL       string      `yaml:"url"`
+	Ref       interface{} `yaml:"ref,omitempty"`
+	Interval  interface{} `yaml:"interval,omitempty"`
+	SecretRef *struct {
+		Name string `yaml:"name"`
+	} `yaml:"secretRef,omitempty"`
+}
+
+// ConfigMap represents a Kubernetes ConfigMap resource.
+type ConfigMap struct {
+	APIVersion string            `yaml:"apiVersion"`
+	Kind       string            `yaml:"kind"`
+	Metadata   ObjectMeta        `yaml:"metadata"`
+	Data       map[string]string `yaml:"data,omitempty"`
+}

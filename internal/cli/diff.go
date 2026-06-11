@@ -1,0 +1,664 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	diffpkg "github.com/banschikovde/fluxview/internal/diff"
+	"github.com/banschikovde/fluxview/internal/flux"
+	"github.com/banschikovde/fluxview/internal/git"
+	"github.com/banschikovde/fluxview/internal/helm"
+	"github.com/banschikovde/fluxview/internal/kustomize"
+	"gopkg.in/yaml.v3"
+)
+
+// DiffFlags holds flags for the diff command.
+type DiffFlags struct {
+	Path       string
+	Namespace  string
+	Color      string
+	BranchOrig string
+	Unified    int
+	SkipCRDs   bool
+	StripAttrs bool
+}
+
+func newDiffCmd() *cobra.Command {
+	flags := &DiffFlags{}
+
+	cmd := &cobra.Command{
+		Use:   "diff <resource> [name] [flags]",
+		Short: "Compare Flux resources against another git revision",
+		Long: `Compare Flux Kustomization or HelmRelease resources against another
+git revision/branch and show the differences.
+
+Supported resource types:
+  ks — Flux Kustomization: diffs kustomize build output
+  hr — Flux HelmRelease: diffs helm template output
+
+Examples:
+  fluxview diff ks --path clusters/prod/
+  fluxview diff hr podinfo --path clusters/prod/
+  fluxview diff ks --path clusters/dev/ --branch-orig main --strip-attrs --skip-crds`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runDiff(cmd.Context(), args, flags)
+		},
+	}
+
+	cmd.Flags().StringVarP(&flags.Path, "path", "p", "", "Path to the cluster directory in the repository")
+	cmd.Flags().StringVarP(&flags.Namespace, "namespace", "n", "", "Filter output resources by namespace")
+	cmd.Flags().StringVar(&flags.Color, "color", "auto", "Color mode: auto, always, never")
+	cmd.Flags().StringVar(&flags.BranchOrig, "branch-orig", "", "Branch/revision to compare against (default: auto-detect default branch)")
+	cmd.Flags().IntVar(&flags.Unified, "unified", 3, "Number of context lines in diff output")
+	cmd.Flags().BoolVar(&flags.SkipCRDs, "skip-crds", false, "Skip CustomResourceDefinition resources in diff")
+	cmd.Flags().BoolVar(&flags.StripAttrs, "strip-attrs", false, "Strip noisy metadata attrs (creationTimestamp, status, uid, etc.)")
+	return cmd
+}
+
+func runDiff(ctx context.Context, args []string, flags *DiffFlags) error {
+	resourceType := args[0]
+	var name string
+	if len(args) > 1 {
+		name = args[1]
+	}
+
+	// Determine the cluster path.
+	clusterPath := flags.Path
+	if clusterPath == "" {
+		clusterPath = "."
+	}
+
+	// Resolve to absolute path.
+	absClusterPath, err := filepath.Abs(clusterPath)
+	if err != nil {
+		return NewExitError(fmt.Errorf("resolving path %s: %w", clusterPath, err), ExitCodeError)
+	}
+
+	// Verify the cluster path exists.
+	if _, err := os.Stat(absClusterPath); os.IsNotExist(err) {
+		return NewExitError(fmt.Errorf("path %s does not exist", clusterPath), ExitCodeError)
+	}
+
+	// Determine the repository root from the cluster path (not CWD).
+	repoRoot, err := git.FindRepoRoot(absClusterPath)
+	if err != nil {
+		return NewExitError(fmt.Errorf("finding git repo root for %s: %w", clusterPath, err), ExitCodeError)
+	}
+
+	// Resolve the branch/revision to compare against.
+	gitOps, err := git.NewOperations(repoRoot)
+	if err != nil {
+		return NewExitError(fmt.Errorf("initializing git operations: %w", err), ExitCodeError)
+	}
+
+	compareRevision := flags.BranchOrig
+	if compareRevision == "" {
+		// Auto-detect the default branch.
+		compareRevision, err = gitOps.DefaultBranch(ctx)
+		if err != nil {
+			return NewExitError(fmt.Errorf("could not determine default branch (use --branch): %w", err), ExitCodeError)
+		}
+		fmt.Fprintf(os.Stderr, "Comparing against auto-detected default branch: %s\n", compareRevision)
+	} else {
+		fmt.Fprintf(os.Stderr, "Comparing against revision: %s\n", compareRevision)
+	}
+
+	// Resolve revision to a commit hash.
+	compareCommit, err := gitOps.ResolveRevision(ctx, compareRevision)
+	if err != nil {
+		return NewExitError(fmt.Errorf("resolving revision %s: %w", compareRevision, err), ExitCodeError)
+	}
+
+	switch resourceType {
+	case "ks", "kustomization":
+		return runDiffKS(ctx, gitOps, absClusterPath, repoRoot, name, compareCommit, flags)
+	case "hr", "helmrelease":
+		return runDiffHR(ctx, gitOps, absClusterPath, repoRoot, name, compareCommit, flags)
+	default:
+		return NewExitError(fmt.Errorf("unsupported resource type %q (use 'ks' or 'hr')", resourceType), ExitCodeError)
+	}
+}
+
+// buildResult holds the output from building one diff state.
+type buildResult struct {
+	output []byte
+	err    error
+}
+
+func runDiffKS(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, compareCommit string, flags *DiffFlags) error {
+	currentCh := make(chan buildResult, 1)
+	compareCh := make(chan buildResult, 1)
+
+	// Build current and revision states in parallel.
+	go func() {
+		output, err := buildKSOutput(ctx, clusterPath, repoRoot, name)
+		currentCh <- buildResult{output, err}
+	}()
+	go func() {
+		output, err := buildKSOutputAtRevision(ctx, gitOps, clusterPath, repoRoot, name, compareCommit)
+		compareCh <- buildResult{output, err}
+	}()
+
+	current := <-currentCh
+	if current.err != nil {
+		return NewExitError(fmt.Errorf("building current state: %w", current.err), ExitCodeError)
+	}
+
+	compare := <-compareCh
+	if compare.err != nil {
+		return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, compare.err), ExitCodeError)
+	}
+
+	return computeAndOutputDiff(compare.output, current.output, flags)
+}
+
+func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, compareCommit string, flags *DiffFlags) error {
+	if name == "" {
+		return NewExitError(fmt.Errorf("HelmRelease name is required for 'diff hr' command"), ExitCodeError)
+	}
+
+	currentCh := make(chan buildResult, 1)
+	compareCh := make(chan buildResult, 1)
+
+	go func() {
+		output, err := buildHROutput(ctx, clusterPath, name)
+		currentCh <- buildResult{output, err}
+	}()
+	go func() {
+		output, err := buildHROutputAtRevision(ctx, gitOps, clusterPath, repoRoot, name, compareCommit)
+		compareCh <- buildResult{output, err}
+	}()
+
+	current := <-currentCh
+	if current.err != nil {
+		return NewExitError(fmt.Errorf("building current state: %w", current.err), ExitCodeError)
+	}
+
+	compare := <-compareCh
+	if compare.err != nil {
+		return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, compare.err), ExitCodeError)
+	}
+
+	return computeAndOutputDiff(compare.output, current.output, flags)
+}
+
+// buildKSOutput builds the Kustomization output for the current working tree.
+func buildKSOutput(ctx context.Context, clusterPath, repoRoot, name string) ([]byte, error) {
+	parser := flux.NewParser(clusterPath)
+	kustomizations, err := parser.ParseKustomizations(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("parsing Kustomization resources: %w", err)
+	}
+
+	if name != "" {
+		kustomizations = filterKustomizations(kustomizations, name)
+	}
+
+	// Resolve ConfigMaps for postBuild substitution.
+	configMaps, _ := resolveConfigMaps(ctx, clusterPath)
+
+	builder := kustomize.NewBuilder()
+	return buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, false, false)
+}
+
+// buildKSOutputAtRevision builds the Kustomization output at a specific git revision.
+func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, revision string) ([]byte, error) {
+	// Create a git worktree at the target revision.
+	worktreePath, err := gitOps.CloneToDir(ctx, revision)
+	if err != nil {
+		return nil, fmt.Errorf("creating worktree at %s: %w", revision, err)
+	}
+	defer gitOps.RemoveWorktree(ctx, worktreePath)
+
+	// Determine the cluster path within the worktree.
+	relPath, err := filepath.Rel(repoRoot, clusterPath)
+	if err != nil {
+		relPath = clusterPath
+	}
+	worktreeClusterPath := filepath.Join(worktreePath, relPath)
+
+	// Check if the path exists in the worktree.
+	if _, err := os.Stat(worktreeClusterPath); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Warning: path %s does not exist at revision %s\n", relPath, revision)
+		return nil, nil
+	}
+
+	parser := flux.NewParser(worktreeClusterPath)
+	kustomizations, err := parser.ParseKustomizations(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("parsing Kustomization resources at %s: %w", revision, err)
+	}
+
+	if name != "" {
+		kustomizations = filterKustomizations(kustomizations, name)
+	}
+
+	// Resolve ConfigMaps for postBuild substitution from the worktree.
+	configMaps, _ := resolveConfigMaps(ctx, worktreeClusterPath)
+
+	builder := kustomize.NewBuilder()
+	// Use worktreePath as repoRoot so that recursive discovery and postBuild
+	// substitution work identically to the current state. External GitRepository
+	// resolution is disabled for diff (too expensive — clones remote repos).
+	return buildKSContent(ctx, builder, kustomizations, worktreePath, worktreeClusterPath, configMaps, false, true)
+}
+
+// buildHROutput builds the HelmRelease output for the current working tree.
+func buildHROutput(ctx context.Context, clusterPath, name string) ([]byte, error) {
+	parser := flux.NewParser(clusterPath)
+	helmReleases, err := parser.ParseHelmReleases(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("parsing HelmRelease resources: %w", err)
+	}
+
+	helmReleases = filterHelmReleases(helmReleases, name)
+	if len(helmReleases) == 0 {
+		return nil, fmt.Errorf("HelmRelease %q not found", name)
+	}
+
+	helmRepos, _ := parser.ParseHelmRepositories(ctx)
+
+	inflater, err := helm.NewInflater()
+	if err != nil {
+		return nil, fmt.Errorf("initializing helm: %w", err)
+	}
+
+	return inflateAllHelmReleases(ctx, inflater, helmReleases, helmRepos)
+}
+
+// buildHROutputAtRevision builds the HelmRelease output at a specific git revision.
+func buildHROutputAtRevision(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, revision string) ([]byte, error) {
+	// Create a git worktree at the target revision.
+	worktreePath, err := gitOps.CloneToDir(ctx, revision)
+	if err != nil {
+		return nil, fmt.Errorf("creating worktree at %s: %w", revision, err)
+	}
+	defer gitOps.RemoveWorktree(ctx, worktreePath)
+
+	relPath, err := filepath.Rel(repoRoot, clusterPath)
+	if err != nil {
+		relPath = clusterPath
+	}
+	worktreeClusterPath := filepath.Join(worktreePath, relPath)
+
+	if _, err := os.Stat(worktreeClusterPath); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Warning: path %s does not exist at revision %s\n", relPath, revision)
+		return nil, nil
+	}
+
+	parser := flux.NewParser(worktreeClusterPath)
+	helmReleases, err := parser.ParseHelmReleases(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("parsing HelmRelease resources at %s: %w", revision, err)
+	}
+
+	helmReleases = filterHelmReleases(helmReleases, name)
+	helmRepos, _ := parser.ParseHelmRepositories(ctx)
+
+	inflater, err := helm.NewInflater()
+	if err != nil {
+		return nil, fmt.Errorf("initializing helm: %w", err)
+	}
+
+	return inflateAllHelmReleases(ctx, inflater, helmReleases, helmRepos)
+}
+
+// buildKSContent is the shared build logic for Flux Kustomization resources,
+// used by both build and diff commands. It runs buildAllKustomizations (which
+// follows Flux controller behavior: recursive discovery, postBuild substitution,
+// optional external GitRepository resolution) and then appends native kustomize
+// overlay outputs.
+func buildKSContent(ctx context.Context, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot, clusterPath string, configMaps []flux.ConfigMap, resolveExternal, quiet bool) ([]byte, error) {
+	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, configMaps, resolveExternal, quiet)
+	if err != nil {
+		return nil, err
+	}
+
+	// Append native kustomize overlay outputs (vars/ etc.).
+	ksPaths := collectKustomizationPaths(repoRoot, kustomizations)
+	overlayOutputs := buildKustomizeOverlays(clusterPath, ksPaths)
+	for _, overlay := range overlayOutputs {
+		if len(output) > 0 {
+			output = append(output, []byte("\n---\n")...)
+		}
+		output = append(output, reorderYAMLFields(overlay)...)
+	}
+
+	return output, nil
+}
+
+// buildAllKustomizations runs kustomize build for all Kustomization resources,
+// applies postBuild variable substitution from configMaps, and recursively
+// discovers and builds new Kustomization resources found in the output
+// (following Flux Kustomize controller behavior). When resolveExternal is true,
+// Kustomizations referencing external GitRepositories are cloned and built;
+// otherwise they are gracefully skipped.
+func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot string, configMaps []flux.ConfigMap, resolveExternal, quiet bool) ([]byte, error) {
+	// Track already-processed KS by "namespace/name" to prevent duplicates.
+	seen := make(map[string]bool)
+	// Track discovered GitRepository resources for external source resolution.
+	gitRepos := make(map[string]flux.GitRepository)
+	var results []string
+	// Track external repo clones for cleanup.
+	var externalClones []string
+	defer func() {
+		for _, dir := range externalClones {
+			os.RemoveAll(dir)
+		}
+	}()
+
+	// Queue of KS to process.
+	queue := make([]flux.Kustomization, len(kustomizations))
+	copy(queue, kustomizations)
+
+	maxDepth := 10 // Prevent infinite recursion
+
+	for depth := 0; depth < maxDepth && len(queue) > 0; depth++ {
+		var discoveredKS []flux.Kustomization
+
+		for _, ks := range queue {
+			key := fmt.Sprintf("%s/%s", ks.Metadata.Namespace, ks.Metadata.Name)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+
+			if ks.Spec.Suspend {
+				continue
+			}
+
+			// Include the Flux Kustomization resource itself (controller behavior).
+			ksYAML, _ := yaml.Marshal(ks)
+
+			// Resolve source path: first try local repo, then external GitRepository.
+			sourcePath := resolveSourcePath(repoRoot, ks)
+			if sourcePath != "" {
+				if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
+					sourcePath = "" // Will try external.
+				}
+			}
+
+			if sourcePath == "" {
+				if resolveExternal {
+					// Try to resolve from an external GitRepository.
+					extPath, cleanup, err := resolveExternalSource(ctx, ks, gitRepos)
+					if cleanup != "" {
+						externalClones = append(externalClones, cleanup)
+					}
+					if err != nil || extPath == "" {
+						fmt.Fprintf(os.Stderr, "Skipping %s/%s (source %s/%s not found)\n",
+							ks.Metadata.Namespace, ks.Metadata.Name,
+							ks.Spec.SourceRef.Kind, ks.Spec.SourceRef.Name)
+						if ksYAML != nil {
+							results = append(results, string(ksYAML))
+						}
+						continue
+					}
+					sourcePath = extPath
+				} else {
+					// External source resolution disabled — skip gracefully.
+					if ksYAML != nil {
+						results = append(results, string(ksYAML))
+					}
+					continue
+				}
+			}
+
+			if !quiet {
+				fmt.Fprintf(os.Stderr, "Building %s/%s\n",
+					ks.Metadata.Namespace, ks.Metadata.Name)
+			}
+
+			output, err := buildSourcePath(builder, sourcePath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: build failed for %s/%s: %v\n",
+					ks.Metadata.Namespace, ks.Metadata.Name, err)
+				if ksYAML != nil {
+					results = append(results, string(ksYAML))
+				}
+				continue
+			}
+
+			// Apply postBuild variable substitution.
+			if flux.SubstituteNeeded(ks) {
+				vars := flux.ResolveSubstituteVars(ks, configMaps)
+				if len(vars) > 0 {
+					output = flux.ApplySubstitution(output, vars)
+				}
+			}
+
+			// Scan output for new resources (KS and GitRepository).
+			newKS, newGitRepos := discoverResourcesFromOutput(output, seen)
+			if len(newKS) > 0 {
+				discoveredKS = append(discoveredKS, newKS...)
+			}
+			for k, v := range newGitRepos {
+				gitRepos[k] = v
+			}
+
+			// Prepend the Kustomization resource to the build output.
+			if ksYAML != nil {
+				combined := string(ksYAML)
+				if len(output) > 0 {
+					combined += "---\n" + string(output)
+				}
+				results = append(results, combined)
+			} else {
+				results = append(results, string(output))
+			}
+		}
+
+		// Continue with newly discovered KS.
+		queue = discoveredKS
+	}
+
+	if len(results) == 0 {
+		return nil, nil
+	}
+
+	combined := ""
+	for i, r := range results {
+		if i > 0 {
+			combined += "\n---\n"
+		}
+		combined += r
+	}
+
+	return []byte(combined), nil
+}
+
+// resolveExternalSource attempts to clone an external GitRepository and return
+// the source path for a Kustomization. Returns the source path, temp dir for
+// cleanup, and any error.
+func resolveExternalSource(ctx context.Context, ks flux.Kustomization, gitRepos map[string]flux.GitRepository) (string, string, error) {
+	if ks.Spec.SourceRef.Kind != flux.KindGitRepository {
+		return "", "", fmt.Errorf("unsupported source kind: %s", ks.Spec.SourceRef.Kind)
+	}
+
+	repoNS := ks.Spec.SourceRef.Namespace
+	if repoNS == "" {
+		repoNS = ks.Metadata.Namespace
+	}
+	repoKey := fmt.Sprintf("%s/%s", repoNS, ks.Spec.SourceRef.Name)
+
+	gitRepo, ok := gitRepos[repoKey]
+	if !ok {
+		return "", "", fmt.Errorf("GitRepository %s not found", repoKey)
+	}
+
+	ref := git.ResolveGitRepositoryRef(gitRepo.Spec.Ref)
+	fmt.Fprintf(os.Stderr, "Cloning external repository %s (ref: %s)...\n", gitRepo.Spec.URL, ref)
+
+	tmpDir, err := git.CloneExternalRepo(ctx, gitRepo.Spec.URL, ref)
+	if err != nil {
+		return "", "", fmt.Errorf("cloning %s: %w", gitRepo.Spec.URL, err)
+	}
+
+	// Build path within the cloned repo.
+	if ks.Spec.Path == "" {
+		return tmpDir, tmpDir, nil
+	}
+	return filepath.Join(tmpDir, ks.Spec.Path), tmpDir, nil
+}
+
+// discoverResourcesFromOutput parses build output for Flux Kustomization and
+// GitRepository resources that haven't been seen yet.
+func discoverResourcesFromOutput(data []byte, seen map[string]bool) ([]flux.Kustomization, map[string]flux.GitRepository) {
+	docs := flux.SplitYAMLDocuments(data)
+	var ksResults []flux.Kustomization
+	gitRepoResults := make(map[string]flux.GitRepository)
+
+	for _, doc := range docs {
+		trimmed := strings.TrimSpace(doc)
+		if trimmed == "" {
+			continue
+		}
+		var meta struct {
+			APIVersion string `yaml:"apiVersion"`
+			Kind       string `yaml:"kind"`
+		}
+		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
+			continue
+		}
+
+		// Discover Flux Kustomization resources.
+		if meta.Kind == "Kustomization" && strings.HasPrefix(meta.APIVersion, "kustomize.toolkit.fluxcd.io") {
+			var ks flux.Kustomization
+			if err := yaml.Unmarshal([]byte(trimmed), &ks); err != nil {
+				continue
+			}
+			key := fmt.Sprintf("%s/%s", ks.Metadata.Namespace, ks.Metadata.Name)
+			if !seen[key] {
+				ksResults = append(ksResults, ks)
+			}
+		}
+
+		// Discover GitRepository resources.
+		if meta.Kind == "GitRepository" && strings.HasPrefix(meta.APIVersion, "source.toolkit.fluxcd.io") {
+			var gr flux.GitRepository
+			if err := yaml.Unmarshal([]byte(trimmed), &gr); err != nil {
+				continue
+			}
+			key := fmt.Sprintf("%s/%s", gr.Metadata.Namespace, gr.Metadata.Name)
+			gitRepoResults[key] = gr
+		}
+	}
+
+	return ksResults, gitRepoResults
+}
+
+// buildSourcePath processes a Kustomization source path following the Flux
+// Kustomize controller reconciliation logic:
+//  1. If path is a file → read it directly as YAML resources
+//  2. If path is a directory with kustomization.yaml → run kustomize build
+//  3. If path is a directory without kustomization.yaml → read all YAML files
+func buildSourcePath(builder *kustomize.Builder, sourcePath string) ([]byte, error) {
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		return nil, fmt.Errorf("source path %s: %w", sourcePath, err)
+	}
+
+	// Case 1: Path points to a single file — read directly.
+	if !info.IsDir() {
+		return os.ReadFile(sourcePath)
+	}
+
+	// Case 2: Directory with kustomization.yaml — run kustomize build.
+	for _, name := range []string{"kustomization.yaml", "kustomization.yml", "Kustomization"} {
+		if _, err := os.Stat(filepath.Join(sourcePath, name)); err == nil {
+			return builder.Build(sourcePath)
+		}
+	}
+
+	// Case 3: Directory without kustomization.yaml — read all YAML files recursively.
+	return readYAMLFilesRecursive(sourcePath)
+}
+
+// readYAMLFilesRecursive reads all .yaml/.yml files in a directory recursively
+// and combines them into a single multi-document YAML output.
+func readYAMLFilesRecursive(dir string) ([]byte, error) {
+	var buf bytes.Buffer
+
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext != ".yaml" && ext != ".yml" {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if buf.Len() > 0 {
+			buf.WriteString("\n---\n")
+		}
+		buf.Write(data)
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// inflateAllHelmReleases inflates all HelmRelease resources and returns combined YAML.
+func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository) ([]byte, error) {
+	outputs := inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos)
+	if len(outputs) == 0 {
+		return nil, nil
+	}
+
+	var buf bytes.Buffer
+	for i, out := range outputs {
+		if i > 0 {
+			buf.WriteString("\n---\n")
+		}
+		buf.Write(out)
+	}
+	return buf.Bytes(), nil
+}
+
+// computeAndOutputDiff computes per-resource diffs and outputs them.
+// Processing (redact, strip-attrs, skip-crds, resource split) is done in a
+// single pass per state to avoid redundant YAML round-trips.
+func computeAndOutputDiff(original, modified []byte, flags *DiffFlags) error {
+	if flags.Namespace != "" {
+		original = filterByNamespace(original, flags.Namespace)
+		modified = filterByNamespace(modified, flags.Namespace)
+		if len(original) == 0 && len(modified) == 0 {
+			fmt.Fprintf(os.Stderr, "No resources found in namespace %q\n", flags.Namespace)
+			return nil
+		}
+	}
+
+	origMap := buildResourceMap(original, flags)
+	modMap := buildResourceMap(modified, flags)
+
+	diffs := diffResourceMaps(origMap, modMap, flags.Unified)
+
+	if len(diffs) == 0 {
+		fmt.Fprintf(os.Stderr, "No differences found.\n")
+		return nil
+	}
+
+	colorMode := resolveColorMode(flags.Color)
+	useColor := diffpkg.ShouldColor(colorMode)
+
+	output := formatResourceDiffs(diffs, useColor)
+	fmt.Print(output)
+
+	return NewExitError(fmt.Errorf("differences found"), ExitDiffFound)
+}
