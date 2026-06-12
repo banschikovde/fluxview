@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -239,28 +240,13 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 
 		sourcePath := filepath.Join(worktreePath, ks.Spec.Path)
 
-		var output []byte
-		var err error
-
-		// Flux supports paths pointing to a single YAML file.
-		if isYAMLFile(sourcePath) {
-			output, err = os.ReadFile(sourcePath)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to read %s at %s: %v\n", ks.Metadata.Name, revision, err)
-				if ksYAML != nil {
-					results = append(results, string(ksYAML))
-				}
-				continue
+		output, err := buildSourcePath(builder, sourcePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: build failed for %s at %s: %v\n", ks.Metadata.Name, revision, err)
+			if ksYAML != nil {
+				results = append(results, string(ksYAML))
 			}
-		} else {
-			output, err = builder.Build(sourcePath)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: build failed for %s at %s: %v\n", ks.Metadata.Name, revision, err)
-				if ksYAML != nil {
-					results = append(results, string(ksYAML))
-				}
-				continue
-			}
+			continue
 		}
 
 		// Prepend the Kustomization resource to the build output.
@@ -370,31 +356,14 @@ func buildAllKustomizations(builder *kustomize.Builder, kustomizations []flux.Ku
 		// Include the Flux Kustomization resource itself (controller behavior).
 		ksYAML, _ := yaml.Marshal(ks)
 
-		var output []byte
-		var err error
-
-		// Flux supports paths pointing to a single YAML file (not a kustomize directory).
-		// In that case, read the file directly instead of running kustomize build.
-		if isYAMLFile(sourcePath) {
-			output, err = os.ReadFile(sourcePath)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to read file %s for %s/%s: %v\n",
-					sourcePath, ks.Metadata.Namespace, ks.Metadata.Name, err)
-				if ksYAML != nil {
-					results = append(results, string(ksYAML))
-				}
-				continue
+		output, err := buildSourcePath(builder, sourcePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: build failed for %s/%s: %v\n",
+				ks.Metadata.Namespace, ks.Metadata.Name, err)
+			if ksYAML != nil {
+				results = append(results, string(ksYAML))
 			}
-		} else {
-			output, err = builder.Build(sourcePath)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: build failed for %s/%s: %v\n",
-					ks.Metadata.Namespace, ks.Metadata.Name, err)
-				if ksYAML != nil {
-					results = append(results, string(ksYAML))
-				}
-				continue
-			}
+			continue
 		}
 
 		// Apply postBuild variable substitution.
@@ -430,6 +399,66 @@ func buildAllKustomizations(builder *kustomize.Builder, kustomizations []flux.Ku
 	}
 
 	return []byte(combined), nil
+}
+
+// buildSourcePath processes a Kustomization source path following the Flux
+// Kustomize controller reconciliation logic:
+//  1. If path is a file → read it directly as YAML resources
+//  2. If path is a directory with kustomization.yaml → run kustomize build
+//  3. If path is a directory without kustomization.yaml → read all YAML files
+func buildSourcePath(builder *kustomize.Builder, sourcePath string) ([]byte, error) {
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		return nil, fmt.Errorf("source path %s: %w", sourcePath, err)
+	}
+
+	// Case 1: Path points to a single file — read directly.
+	if !info.IsDir() {
+		return os.ReadFile(sourcePath)
+	}
+
+	// Case 2: Directory with kustomization.yaml — run kustomize build.
+	for _, name := range []string{"kustomization.yaml", "kustomization.yml", "Kustomization"} {
+		if _, err := os.Stat(filepath.Join(sourcePath, name)); err == nil {
+			return builder.Build(sourcePath)
+		}
+	}
+
+	// Case 3: Directory without kustomization.yaml — read all YAML files recursively.
+	return readYAMLFilesRecursive(sourcePath)
+}
+
+// readYAMLFilesRecursive reads all .yaml/.yml files in a directory recursively
+// and combines them into a single multi-document YAML output.
+func readYAMLFilesRecursive(dir string) ([]byte, error) {
+	var buf bytes.Buffer
+
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext != ".yaml" && ext != ".yml" {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if buf.Len() > 0 {
+			buf.WriteString("\n---\n")
+		}
+		buf.Write(data)
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // inflateAllHelmReleases inflates all HelmRelease resources.
