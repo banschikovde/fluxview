@@ -383,17 +383,18 @@ func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, helmRe
 				repoNS = hr.Metadata.Namespace
 			}
 			url, err := helm.FindHelmRepoURL(helmRepos, sourceRef.Name, repoNS)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+			if err != nil || url == "" {
 				continue
 			}
 			repoURL = url
 		}
 
+		if repoURL == "" {
+			continue
+		}
+
 		output, err := inflater.InflateHelmRelease(ctx, hr, repoURL)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: inflation failed for %s/%s: %v\n",
-				hr.Metadata.Namespace, hr.Metadata.Name, err)
 			continue
 		}
 
