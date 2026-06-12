@@ -164,7 +164,7 @@ func (p *Parser) ParseConfigMaps(ctx context.Context) ([]ConfigMap, error) {
 			return nil
 		}
 
-		docs := splitYAMLDocuments(data)
+		docs := SplitYAMLDocuments(data)
 		for _, doc := range docs {
 			trimmed := strings.TrimSpace(doc)
 			if trimmed == "" {
@@ -223,7 +223,7 @@ func parseYAMLDocuments(data []byte) ([]interface{}, error) {
 	var results []interface{}
 
 	// Split on YAML document separator `---`
-	docs := splitYAMLDocuments(data)
+	docs := SplitYAMLDocuments(data)
 
 	for _, doc := range docs {
 		trimmed := strings.TrimSpace(doc)
@@ -307,8 +307,8 @@ func parseSingleDocument(data []byte) (interface{}, error) {
 	return nil, nil
 }
 
-// splitYAMLDocuments splits a multi-document YAML into individual documents.
-func splitYAMLDocuments(data []byte) []string {
+// SplitYAMLDocuments splits a multi-document YAML into individual documents.
+func SplitYAMLDocuments(data []byte) []string {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	var docs []string
 

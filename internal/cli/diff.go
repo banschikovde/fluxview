@@ -332,58 +332,92 @@ func buildHROutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 	return inflateAllHelmReleases(ctx, inflater, helmReleases, helmRepos)
 }
 
-// buildAllKustomizations runs kustomize build for all Kustomization resources
-// and applies postBuild variable substitution from configMaps.
+// buildAllKustomizations runs kustomize build for all Kustomization resources,
+// applies postBuild variable substitution from configMaps, and recursively
+// discovers and builds new Kustomization resources found in the output
+// (following Flux Kustomize controller behavior).
 func buildAllKustomizations(builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot string, configMaps []flux.ConfigMap) ([]byte, error) {
+	// Track already-processed KS by "namespace/name" to prevent duplicates.
+	seen := make(map[string]bool)
 	var results []string
 
-	for _, ks := range kustomizations {
-		if ks.Spec.Suspend {
-			fmt.Fprintf(os.Stderr, "Skipping suspended Kustomization %s/%s\n", ks.Metadata.Namespace, ks.Metadata.Name)
-			continue
-		}
+	// Queue of KS to process.
+	queue := make([]flux.Kustomization, len(kustomizations))
+	copy(queue, kustomizations)
 
-		sourcePath := resolveSourcePath(repoRoot, ks)
-		if sourcePath == "" {
-			fmt.Fprintf(os.Stderr, "Warning: could not resolve source path for Kustomization %s/%s, skipping\n",
-				ks.Metadata.Namespace, ks.Metadata.Name)
-			continue
-		}
+	maxDepth := 10 // Prevent infinite recursion
 
-		fmt.Fprintf(os.Stderr, "Building Kustomization %s/%s (path: %s)...\n",
-			ks.Metadata.Namespace, ks.Metadata.Name, sourcePath)
+	for depth := 0; depth < maxDepth && len(queue) > 0; depth++ {
+		var discovered []flux.Kustomization
 
-		// Include the Flux Kustomization resource itself (controller behavior).
-		ksYAML, _ := yaml.Marshal(ks)
+		for _, ks := range queue {
+			key := fmt.Sprintf("%s/%s", ks.Metadata.Namespace, ks.Metadata.Name)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
 
-		output, err := buildSourcePath(builder, sourcePath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: build failed for %s/%s: %v\n",
-				ks.Metadata.Namespace, ks.Metadata.Name, err)
+			if ks.Spec.Suspend {
+				fmt.Fprintf(os.Stderr, "Skipping suspended Kustomization %s/%s\n", ks.Metadata.Namespace, ks.Metadata.Name)
+				continue
+			}
+
+			// Include the Flux Kustomization resource itself (controller behavior).
+			ksYAML, _ := yaml.Marshal(ks)
+
+			sourcePath := resolveSourcePath(repoRoot, ks)
+			if sourcePath == "" {
+				// No local source path — this KS references an external source (e.g. another GitRepository).
+				// Include the KS resource itself but skip building.
+				fmt.Fprintf(os.Stderr, "Skipping Kustomization %s/%s (external source: %s/%s)\n",
+					ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.SourceRef.Kind, ks.Spec.SourceRef.Name)
+				if ksYAML != nil {
+					results = append(results, string(ksYAML))
+				}
+				continue
+			}
+
+			fmt.Fprintf(os.Stderr, "Building Kustomization %s/%s (path: %s)...\n",
+				ks.Metadata.Namespace, ks.Metadata.Name, sourcePath)
+
+			output, err := buildSourcePath(builder, sourcePath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: build failed for %s/%s: %v\n",
+					ks.Metadata.Namespace, ks.Metadata.Name, err)
+				if ksYAML != nil {
+					results = append(results, string(ksYAML))
+				}
+				continue
+			}
+
+			// Apply postBuild variable substitution.
+			if flux.SubstituteNeeded(ks) {
+				vars := flux.ResolveSubstituteVars(ks, configMaps)
+				if len(vars) > 0 {
+					output = flux.ApplySubstitution(output, vars)
+				}
+			}
+
+			// Scan output for new Flux Kustomization resources (recursive discovery).
+			newKS := discoverKustomizationsFromOutput(output, seen)
+			if len(newKS) > 0 {
+				discovered = append(discovered, newKS...)
+			}
+
+			// Prepend the Kustomization resource to the build output.
 			if ksYAML != nil {
-				results = append(results, string(ksYAML))
-			}
-			continue
-		}
-
-		// Apply postBuild variable substitution.
-		if flux.SubstituteNeeded(ks) {
-			vars := flux.ResolveSubstituteVars(ks, configMaps)
-			if len(vars) > 0 {
-				output = flux.ApplySubstitution(output, vars)
+				combined := string(ksYAML)
+				if len(output) > 0 {
+					combined += "---\n" + string(output)
+				}
+				results = append(results, combined)
+			} else {
+				results = append(results, string(output))
 			}
 		}
 
-		// Prepend the Kustomization resource to the build output.
-		if ksYAML != nil {
-			combined := string(ksYAML)
-			if len(output) > 0 {
-				combined += "---\n" + string(output)
-			}
-			results = append(results, combined)
-		} else {
-			results = append(results, string(output))
-		}
+		// Continue with newly discovered KS.
+		queue = discovered
 	}
 
 	if len(results) == 0 {
@@ -399,6 +433,41 @@ func buildAllKustomizations(builder *kustomize.Builder, kustomizations []flux.Ku
 	}
 
 	return []byte(combined), nil
+}
+
+// discoverKustomizationsFromOutput parses build output for Flux Kustomization
+// resources that haven't been seen yet, returning them for recursive processing.
+func discoverKustomizationsFromOutput(data []byte, seen map[string]bool) []flux.Kustomization {
+	docs := flux.SplitYAMLDocuments(data)
+	var result []flux.Kustomization
+
+	for _, doc := range docs {
+		trimmed := strings.TrimSpace(doc)
+		if trimmed == "" {
+			continue
+		}
+		var meta struct {
+			APIVersion string `yaml:"apiVersion"`
+			Kind       string `yaml:"kind"`
+		}
+		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
+			continue
+		}
+		if meta.Kind != "Kustomization" || !strings.HasPrefix(meta.APIVersion, "kustomize.toolkit.fluxcd.io") {
+			continue
+		}
+		var ks flux.Kustomization
+		if err := yaml.Unmarshal([]byte(trimmed), &ks); err != nil {
+			continue
+		}
+		key := fmt.Sprintf("%s/%s", ks.Metadata.Namespace, ks.Metadata.Name)
+		if seen[key] {
+			continue
+		}
+		result = append(result, ks)
+	}
+
+	return result
 }
 
 // buildSourcePath processes a Kustomization source path following the Flux

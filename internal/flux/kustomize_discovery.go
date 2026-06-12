@@ -82,7 +82,7 @@ func isNativeKustomize(kust nativeKustomization) bool {
 func ParseConfigMapsFromBytes(data []byte) ([]ConfigMap, error) {
 	var results []ConfigMap
 
-	docs := splitYAMLDocuments(data)
+	docs := SplitYAMLDocuments(data)
 	for _, doc := range docs {
 		trimmed := strings.TrimSpace(doc)
 		if trimmed == "" {
