@@ -395,6 +395,8 @@ func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, helmRe
 
 		output, err := inflater.InflateHelmRelease(ctx, hr, repoURL)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to inflate HelmRelease %s/%s: %v\n",
+				hr.Metadata.Namespace, hr.Metadata.Name, err)
 			continue
 		}
 

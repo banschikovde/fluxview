@@ -277,6 +277,8 @@ func inflateHelmReleases(ctx context.Context, clusterPath string) (int, error) {
 
 		output, err := inflater.InflateHelmRelease(ctx, hr, repoURL)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to inflate HelmRelease %s/%s: %v\n",
+				hr.Metadata.Namespace, hr.Metadata.Name, err)
 			continue
 		}
 
