@@ -13,6 +13,7 @@ import (
 	"github.com/banschikovde/flux-diff/internal/git"
 	"github.com/banschikovde/flux-diff/internal/helm"
 	"github.com/banschikovde/flux-diff/internal/kustomize"
+	"gopkg.in/yaml.v3"
 )
 
 // DiffFlags holds flags for the diff command.
@@ -231,13 +232,31 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 		if ks.Spec.Suspend {
 			continue
 		}
+
+		// Include the Flux Kustomization resource itself (controller behavior).
+		ksYAML, _ := yaml.Marshal(ks)
+
 		sourcePath := filepath.Join(worktreePath, ks.Spec.Path)
 		output, err := builder.Build(sourcePath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: build failed for %s at %s: %v\n", ks.Metadata.Name, revision, err)
+			// Still include the Kustomization resource even if build fails.
+			if ksYAML != nil {
+				results = append(results, string(ksYAML))
+			}
 			continue
 		}
-		results = append(results, string(output))
+
+		// Prepend the Kustomization resource to the build output.
+		if ksYAML != nil {
+			combined := string(ksYAML)
+			if len(output) > 0 {
+				combined += "---\n" + string(output)
+			}
+			results = append(results, combined)
+		} else {
+			results = append(results, string(output))
+		}
 	}
 
 	if len(results) == 0 {
@@ -332,10 +351,17 @@ func buildAllKustomizations(builder *kustomize.Builder, kustomizations []flux.Ku
 		fmt.Fprintf(os.Stderr, "Building Kustomization %s/%s (path: %s)...\n",
 			ks.Metadata.Namespace, ks.Metadata.Name, sourcePath)
 
+		// Include the Flux Kustomization resource itself (controller behavior).
+		ksYAML, _ := yaml.Marshal(ks)
+
 		output, err := builder.Build(sourcePath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: build failed for %s/%s: %v\n",
 				ks.Metadata.Namespace, ks.Metadata.Name, err)
+			// Still include the Kustomization resource even if build fails.
+			if ksYAML != nil {
+				results = append(results, string(ksYAML))
+			}
 			continue
 		}
 
@@ -347,7 +373,16 @@ func buildAllKustomizations(builder *kustomize.Builder, kustomizations []flux.Ku
 			}
 		}
 
-		results = append(results, string(output))
+		// Prepend the Kustomization resource to the build output.
+		if ksYAML != nil {
+			combined := string(ksYAML)
+			if len(output) > 0 {
+				combined += "---\n" + string(output)
+			}
+			results = append(results, combined)
+		} else {
+			results = append(results, string(output))
+		}
 	}
 
 	if len(results) == 0 {
