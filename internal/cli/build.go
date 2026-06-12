@@ -132,11 +132,10 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	ksPaths := collectKustomizationPaths(repoRoot, kustomizations)
 	overlayOutputs := buildKustomizeOverlays(clusterPath, ksPaths)
 	for _, out := range overlayOutputs {
-		reordered := reorderYAMLFields(out)
-		if !bytes.HasPrefix(reordered, []byte("---")) {
+		if !bytes.HasPrefix(bytes.TrimSpace(out), []byte("---")) {
 			fmt.Print("---\n")
 		}
-		printRedacted(reordered)
+		printRedacted(out)
 	}
 
 	// Inflate HelmReleases found in the cluster path.
@@ -224,16 +223,18 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	return nil
 }
 
-// printRedacted redacts secrets and strips SOPS metadata from the output,
-// then prints to stdout. Returns the number of secrets redacted.
+// printRedacted normalizes, reorders fields, strips SOPS metadata, and redacts
+// secrets from the output, then prints to stdout.
+// Returns the number of secrets redacted.
 func printRedacted(data []byte) int {
 	if data == nil {
 		return 0
 	}
-	// Strip SOPS metadata before any processing.
-	cleaned := stripSOPSFields(data)
-	redacted := flux.RedactSecrets(cleaned)
-	count := flux.CountSecrets(cleaned)
+	// Normalize: reorder fields (apiVersion, kind, metadata first) and strip SOPS.
+	normalized := reorderYAMLFields(data)
+	// Redact secret values.
+	redacted := flux.RedactSecrets(normalized)
+	count := flux.CountSecrets(normalized)
 	fmt.Print(string(redacted))
 	return count
 }
