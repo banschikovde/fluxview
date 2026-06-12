@@ -58,25 +58,27 @@ func runDiff(ctx context.Context, args []string, flags *DiffFlags) error {
 		name = args[1]
 	}
 
-	// Determine the repository root.
-	repoRoot, err := git.FindRepoRoot(".")
-	if err != nil {
-		return NewExitError(fmt.Errorf("finding git repo root: %w", err), ExitCodeError)
-	}
-
 	// Determine the cluster path.
 	clusterPath := flags.Path
 	if clusterPath == "" {
 		clusterPath = "."
 	}
-	absClusterPath := clusterPath
-	if !filepath.IsAbs(clusterPath) {
-		absClusterPath = filepath.Join(repoRoot, clusterPath)
+
+	// Resolve to absolute path.
+	absClusterPath, err := filepath.Abs(clusterPath)
+	if err != nil {
+		return NewExitError(fmt.Errorf("resolving path %s: %w", clusterPath, err), ExitCodeError)
 	}
 
 	// Verify the cluster path exists.
 	if _, err := os.Stat(absClusterPath); os.IsNotExist(err) {
 		return NewExitError(fmt.Errorf("path %s does not exist", clusterPath), ExitCodeError)
+	}
+
+	// Determine the repository root from the cluster path (not CWD).
+	repoRoot, err := git.FindRepoRoot(absClusterPath)
+	if err != nil {
+		return NewExitError(fmt.Errorf("finding git repo root for %s: %w", clusterPath, err), ExitCodeError)
 	}
 
 	// Resolve the branch/revision to compare against.
@@ -167,8 +169,26 @@ func buildKSOutput(clusterPath, repoRoot, name string, flags *DiffFlags) ([]byte
 		kustomizations = filterKustomizations(kustomizations, name)
 	}
 
+	// Resolve ConfigMaps for postBuild substitution.
+	configMaps, _ := resolveConfigMaps(context.TODO(), clusterPath)
+
 	builder := kustomize.NewBuilder()
-	return buildAllKustomizations(builder, kustomizations, repoRoot)
+	output, err := buildAllKustomizations(builder, kustomizations, repoRoot, configMaps)
+	if err != nil {
+		return nil, err
+	}
+
+	// Append native kustomize overlay outputs (vars/ etc.).
+	ksPaths := collectKustomizationPaths(repoRoot, kustomizations)
+	overlayOutputs := buildKustomizeOverlays(clusterPath, ksPaths)
+	for _, overlay := range overlayOutputs {
+		if len(output) > 0 {
+			output = append(output, []byte("\n---\n")...)
+		}
+		output = append(output, reorderYAMLFields(overlay)...)
+	}
+
+	return output, nil
 }
 
 // buildKSOutputAtRevision builds the Kustomization output at a specific git revision.
@@ -291,8 +311,9 @@ func buildHROutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 	return inflateAllHelmReleases(ctx, inflater, helmReleases, helmRepos)
 }
 
-// buildAllKustomizations runs kustomize build for all Kustomization resources.
-func buildAllKustomizations(builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot string) ([]byte, error) {
+// buildAllKustomizations runs kustomize build for all Kustomization resources
+// and applies postBuild variable substitution from configMaps.
+func buildAllKustomizations(builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot string, configMaps []flux.ConfigMap) ([]byte, error) {
 	var results []string
 
 	for _, ks := range kustomizations {
@@ -303,14 +324,28 @@ func buildAllKustomizations(builder *kustomize.Builder, kustomizations []flux.Ku
 
 		sourcePath := resolveSourcePath(repoRoot, ks)
 		if sourcePath == "" {
+			fmt.Fprintf(os.Stderr, "Warning: could not resolve source path for Kustomization %s/%s, skipping\n",
+				ks.Metadata.Namespace, ks.Metadata.Name)
 			continue
 		}
+
+		fmt.Fprintf(os.Stderr, "Building Kustomization %s/%s (path: %s)...\n",
+			ks.Metadata.Namespace, ks.Metadata.Name, sourcePath)
 
 		output, err := builder.Build(sourcePath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: build failed for %s/%s: %v\n",
 				ks.Metadata.Namespace, ks.Metadata.Name, err)
 			continue
+		}
+
+		// Apply postBuild variable substitution.
+		if flux.SubstituteNeeded(ks) {
+			vars := flux.ResolveSubstituteVars(ks, configMaps)
+			if len(vars) > 0 {
+				fmt.Fprintf(os.Stderr, "  Applying %d substitution variable(s)\n", len(vars))
+				output = flux.ApplySubstitution(output, vars)
+			}
 		}
 
 		results = append(results, string(output))

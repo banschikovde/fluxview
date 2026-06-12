@@ -26,6 +26,8 @@ func NewParser(rootPath string) *Parser {
 // ParseKustomizations discovers all Flux Kustomization resources under the root path.
 func (p *Parser) ParseKustomizations(ctx context.Context) ([]Kustomization, error) {
 	var result []Kustomization
+	var yamlFiles int
+	var parseErrors []string
 
 	err := filepath.WalkDir(p.RootPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -38,9 +40,12 @@ func (p *Parser) ParseKustomizations(ctx context.Context) ([]Kustomization, erro
 			return nil
 		}
 
+		yamlFiles++
+
 		docs, err := p.parseFile(path)
 		if err != nil {
-			return fmt.Errorf("parsing file %s: %w", path, err)
+			parseErrors = append(parseErrors, fmt.Sprintf("%s: %v", path, err))
+			return nil
 		}
 
 		for _, doc := range docs {
@@ -54,6 +59,14 @@ func (p *Parser) ParseKustomizations(ctx context.Context) ([]Kustomization, erro
 
 	if err != nil {
 		return nil, fmt.Errorf("walking directory %s: %w", p.RootPath, err)
+	}
+
+	if len(result) == 0 {
+		msg := fmt.Sprintf("no Flux Kustomization resources found in %s (scanned %d YAML files)", p.RootPath, yamlFiles)
+		if len(parseErrors) > 0 {
+			msg += fmt.Sprintf(", %d parse errors: %s", len(parseErrors), strings.Join(parseErrors, "; "))
+		}
+		return nil, fmt.Errorf("%s", msg)
 	}
 
 	return result, nil
@@ -131,9 +144,9 @@ func (p *Parser) ParseHelmRepositories(ctx context.Context) ([]HelmRepository, e
 	return result, nil
 }
 
-// ParseGitRepositories discovers all Flux GitRepository resources under the root path.
-func (p *Parser) ParseGitRepositories(ctx context.Context) ([]GitRepository, error) {
-	var result []GitRepository
+// ParseConfigMaps discovers all Kubernetes ConfigMap resources under the root path.
+func (p *Parser) ParseConfigMaps(ctx context.Context) ([]ConfigMap, error) {
+	var result []ConfigMap
 
 	err := filepath.WalkDir(p.RootPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -146,15 +159,23 @@ func (p *Parser) ParseGitRepositories(ctx context.Context) ([]GitRepository, err
 			return nil
 		}
 
-		docs, err := p.parseFile(path)
+		data, err := os.ReadFile(path)
 		if err != nil {
-			return fmt.Errorf("parsing file %s: %w", path, err)
+			return nil
 		}
 
+		docs := splitYAMLDocuments(data)
 		for _, doc := range docs {
-			repo, ok := doc.(GitRepository)
-			if ok {
-				result = append(result, repo)
+			trimmed := strings.TrimSpace(doc)
+			if trimmed == "" {
+				continue
+			}
+			cm, err := parseConfigMapDoc([]byte(trimmed))
+			if err != nil {
+				continue
+			}
+			if cm != nil {
+				result = append(result, *cm)
 			}
 		}
 		return nil
@@ -165,6 +186,25 @@ func (p *Parser) ParseGitRepositories(ctx context.Context) ([]GitRepository, err
 	}
 
 	return result, nil
+}
+
+// parseConfigMapDoc parses a single YAML document as a ConfigMap.
+func parseConfigMapDoc(data []byte) (*ConfigMap, error) {
+	var meta struct {
+		APIVersion string `yaml:"apiVersion"`
+		Kind       string `yaml:"kind"`
+	}
+	if err := yaml.Unmarshal(data, &meta); err != nil {
+		return nil, err
+	}
+	if meta.APIVersion != "v1" || meta.Kind != "ConfigMap" {
+		return nil, nil
+	}
+	var cm ConfigMap
+	if err := yaml.Unmarshal(data, &cm); err != nil {
+		return nil, err
+	}
+	return &cm, nil
 }
 
 // parseFile reads a YAML file and splits it into individual documents,
@@ -253,6 +293,14 @@ func parseSingleDocument(data []byte) (interface{}, error) {
 				return nil, fmt.Errorf("unmarshaling GitRepository: %w", err)
 			}
 			return repo, nil
+		}
+	case "ConfigMap":
+		if meta.APIVersion == "v1" {
+			var cm ConfigMap
+			if err := yaml.Unmarshal(data, &cm); err != nil {
+				return nil, fmt.Errorf("unmarshaling ConfigMap: %w", err)
+			}
+			return cm, nil
 		}
 	}
 

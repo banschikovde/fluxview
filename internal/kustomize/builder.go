@@ -2,11 +2,9 @@
 package kustomize
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"sigs.k8s.io/kustomize/api/krusty"
 	"sigs.k8s.io/kustomize/kyaml/filesys"
@@ -62,94 +60,6 @@ func (b *Builder) Build(dir string) ([]byte, error) {
 	return yamlOutput, nil
 }
 
-// BuildMultiple runs kustomize build in multiple directories and concatenates the results.
-func (b *Builder) BuildMultiple(dirs []string) ([]byte, error) {
-	var results []string
-
-	for _, dir := range dirs {
-		output, err := b.Build(dir)
-		if err != nil {
-			return nil, fmt.Errorf("building %s: %w", dir, err)
-		}
-
-		trimmed := strings.TrimSpace(string(output))
-		if trimmed != "" {
-			results = append(results, trimmed)
-		}
-	}
-
-	return []byte(strings.Join(results, "\n---\n")), nil
-}
-
-// BuildToString runs Build and returns the result as a string.
-func (b *Builder) BuildToString(dir string) (string, error) {
-	output, err := b.Build(dir)
-	if err != nil {
-		return "", err
-	}
-	return string(output), nil
-}
-
-// BuildFromBuffer runs kustomize build on in-memory content.
-// This is useful for testing or when the kustomization is not on disk.
-func BuildFromBuffer(kustomizationYAML []byte) ([]byte, error) {
-	// Create a temporary directory.
-	tmpDir, err := os.MkdirTemp("", "flux-diff-kustomize-*")
-	if err != nil {
-		return nil, fmt.Errorf("creating temp dir: %w", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Write the kustomization file.
-	kustPath := filepath.Join(tmpDir, "kustomization.yaml")
-	if err := os.WriteFile(kustPath, kustomizationYAML, 0644); err != nil {
-		return nil, fmt.Errorf("writing kustomization file: %w", err)
-	}
-
-	builder := NewBuilder()
-	return builder.Build(tmpDir)
-}
-
-// ValidateKustomization checks if a directory contains a valid kustomization file.
-func ValidateKustomization(dir string) error {
-	kustFile := findKustomizationFile(dir)
-	if kustFile == "" {
-		return fmt.Errorf("no kustomization file found in %s", dir)
-	}
-
-	// Try to read the file to verify it's accessible.
-	content, err := os.ReadFile(kustFile)
-	if err != nil {
-		return fmt.Errorf("reading kustomization file: %w", err)
-	}
-
-	if len(content) == 0 {
-		return fmt.Errorf("kustomization file is empty: %s", kustFile)
-	}
-
-	return nil
-}
-
-// RenderResources renders a kustomize ResMap to multi-document YAML.
-func RenderResources(yamlOutput []byte) string {
-	// Ensure the output has proper YAML document separators.
-	output := strings.TrimSpace(string(yamlOutput))
-	if output == "" {
-		return ""
-	}
-
-	// Split into individual documents and reassemble with proper separators.
-	docs := bytes.Split(yamlOutput, []byte("\n---\n"))
-	var result []string
-	for _, doc := range docs {
-		trimmed := strings.TrimSpace(string(doc))
-		if trimmed != "" {
-			result = append(result, trimmed)
-		}
-	}
-
-	return strings.Join(result, "\n---\n")
-}
 
 // findKustomizationFile returns the path to the kustomization file, or empty string if not found.
 func findKustomizationFile(dir string) string {

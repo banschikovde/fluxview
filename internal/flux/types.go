@@ -38,12 +38,16 @@ type KustomizationSpec struct {
 	Path string `yaml:"path,omitempty"`
 	// Prune enables pruning.
 	Prune bool `yaml:"prune,omitempty"`
-	// Interval is the reconciliation interval.
-	Interval struct {
-		Duration string `yaml:"duration,omitempty"`
-	} `yaml:"interval,omitempty"`
+	// Interval is the reconciliation interval (e.g. "5m").
+	Interval interface{} `yaml:"interval,omitempty"`
+	// RetryInterval is the retry interval (e.g. "1m").
+	RetryInterval interface{} `yaml:"retryInterval,omitempty"`
+	// Timeout is the timeout for reconciliation.
+	Timeout interface{} `yaml:"timeout,omitempty"`
+	// Wait enables waiting for health checks.
+	Wait bool `yaml:"wait,omitempty"`
 	// DependsOn lists dependencies.
-	DependsOn []string `yaml:"dependsOn,omitempty"`
+	DependsOn []DependsOnEntry `yaml:"dependsOn,omitempty"`
 	// PostBuild contains post-build substitutions.
 	PostBuild *PostBuild `yaml:"postBuild,omitempty"`
 	// Patches lists patches to apply.
@@ -54,6 +58,16 @@ type KustomizationSpec struct {
 	Suspend bool `yaml:"suspend,omitempty"`
 	// HealthChecks lists health check references.
 	HealthChecks interface{} `yaml:"healthChecks,omitempty"`
+	// Decryption configures SOPS decryption.
+	Decryption interface{} `yaml:"decryption,omitempty"`
+	// Force enables force reconciliation.
+	Force bool `yaml:"force,omitempty"`
+}
+
+// DependsOnEntry represents a dependency reference.
+type DependsOnEntry struct {
+	Name      string `yaml:"name"`
+	Namespace string `yaml:"namespace,omitempty"`
 }
 
 // PostBuild contains post-build substitution configuration.
@@ -86,9 +100,7 @@ type HelmRelease struct {
 // HelmReleaseSpec holds the spec for a Flux HelmRelease.
 type HelmReleaseSpec struct {
 	Chart    HelmReleaseChart `yaml:"chart"`
-	Interval struct {
-		Duration string `yaml:"duration,omitempty"`
-	} `yaml:"interval,omitempty"`
+	Interval interface{} `yaml:"interval,omitempty"`
 	// Values holds the values to pass to helm template.
 	Values map[string]interface{} `yaml:"values,omitempty"`
 	// ValuesFrom references ConfigMaps/Secrets with values.
@@ -102,7 +114,7 @@ type HelmReleaseSpec struct {
 	// Upgrade holds upgrade-specific configuration.
 	Upgrade interface{} `yaml:"upgrade,omitempty"`
 	// DependsOn lists dependencies.
-	DependsOn []string `yaml:"dependsOn,omitempty"`
+	DependsOn []DependsOnEntry `yaml:"dependsOn,omitempty"`
 }
 
 // HelmReleaseChart references the Helm chart to use.
@@ -119,10 +131,8 @@ type HelmReleaseChartSpec struct {
 		Name      string `yaml:"name"`
 		Namespace string `yaml:"namespace,omitempty"`
 	} `yaml:"sourceRef"`
-	Interval *struct {
-		Duration string `yaml:"duration,omitempty"`
-	} `yaml:"interval,omitempty"`
-	ReconcileStrategy string `yaml:"reconcileStrategy,omitempty"`
+	Interval          interface{} `yaml:"interval,omitempty"`
+	ReconcileStrategy string      `yaml:"reconcileStrategy,omitempty"`
 }
 
 // HelmRepository represents a Flux HelmRepository resource.
@@ -138,10 +148,8 @@ type HelmRepository struct {
 
 // HelmRepositorySpec holds the spec for a Flux HelmRepository.
 type HelmRepositorySpec struct {
-	URL      string `yaml:"url"`
-	Interval struct {
-		Duration string `yaml:"duration,omitempty"`
-	} `yaml:"interval,omitempty"`
+	URL      string      `yaml:"url"`
+	Interval interface{} `yaml:"interval,omitempty"`
 	SecretRef *struct {
 		Name string `yaml:"name"`
 	} `yaml:"secretRef,omitempty"`
@@ -161,26 +169,21 @@ type GitRepository struct {
 
 // GitRepositorySpec holds the spec for a Flux GitRepository.
 type GitRepositorySpec struct {
-	URL string `yaml:"url"`
-	Ref struct {
-		Branch string `yaml:"branch,omitempty"`
-		Tag    string `yaml:"tag,omitempty"`
-		Commit string `yaml:"commit,omitempty"`
-	} `yaml:"ref"`
-	Interval struct {
-		Duration string `yaml:"duration,omitempty"`
-	} `yaml:"interval,omitempty"`
+	URL      string      `yaml:"url"`
+	Ref      interface{} `yaml:"ref,omitempty"`
+	Interval interface{} `yaml:"interval,omitempty"`
 	SecretRef *struct {
 		Name string `yaml:"name"`
 	} `yaml:"secretRef,omitempty"`
 }
 
-// Resource is a generic parsed Kubernetes/Flux resource with metadata.
-type Resource struct {
-	APIVersion string
-	Kind       string
-	Name       string
-	Namespace  string
-	// RawYAML is the original YAML bytes of this document.
-	RawYAML []byte
+// ConfigMap represents a Kubernetes ConfigMap resource.
+type ConfigMap struct {
+	APIVersion string `yaml:"apiVersion"`
+	Kind       string `yaml:"kind"`
+	Metadata   struct {
+		Name      string `yaml:"name"`
+		Namespace string `yaml:"namespace"`
+	} `yaml:"metadata"`
+	Data map[string]string `yaml:"data,omitempty"`
 }

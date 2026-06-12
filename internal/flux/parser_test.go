@@ -86,8 +86,8 @@ spec:
 		},
 		{
 			name: "non-Flux resource",
-			yaml: `apiVersion: v1
-kind: ConfigMap
+			yaml: `apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: test
 `,
@@ -287,6 +287,81 @@ spec:
 	}
 	if len(releases) != 1 {
 		t.Errorf("expected 1 HelmRelease, got %d", len(releases))
+	}
+}
+
+func TestParseKustomizations_RealWorldFormat(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Real-world Flux Kustomization format from user's repository
+	yamlContent := `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: base
+  namespace: flux-system
+spec:
+  interval: 5m
+  retryInterval: 1m
+  path: ./k8s/clusters/infra/apps/base
+  wait: false
+  prune: true
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  decryption:
+    provider: sops
+  dependsOn:
+    - name: system
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: cluster-settings
+      - kind: Secret
+        name: cluster-secrets
+`
+	err := os.WriteFile(filepath.Join(tmpDir, "base.yaml"), []byte(yamlContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	parser := NewParser(tmpDir)
+	results, err := parser.ParseKustomizations(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 Kustomization, got %d", len(results))
+	}
+
+	ks := results[0]
+	if ks.Metadata.Name != "base" {
+		t.Errorf("name = %q, want %q", ks.Metadata.Name, "base")
+	}
+	if ks.Spec.Path != "./k8s/clusters/infra/apps/base" {
+		t.Errorf("path = %q, want %q", ks.Spec.Path, "./k8s/clusters/infra/apps/base")
+	}
+	if ks.Spec.Wait != false {
+		t.Errorf("wait = %v, want false", ks.Spec.Wait)
+	}
+	if ks.Spec.Prune != true {
+		t.Errorf("prune = %v, want true", ks.Spec.Prune)
+	}
+	if len(ks.Spec.DependsOn) != 1 || ks.Spec.DependsOn[0].Name != "system" {
+		t.Errorf("dependsOn = %v, want [{name: system}]", ks.Spec.DependsOn)
+	}
+	if ks.Spec.SourceRef.Kind != "GitRepository" {
+		t.Errorf("sourceRef.kind = %q, want %q", ks.Spec.SourceRef.Kind, "GitRepository")
+	}
+}
+
+func TestParseKustomizations_EmptyDir(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	parser := NewParser(tmpDir)
+	_, err := parser.ParseKustomizations(context.Background())
+	if err == nil {
+		t.Fatal("expected error for empty directory, got nil")
 	}
 }
 
