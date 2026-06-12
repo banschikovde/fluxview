@@ -223,65 +223,62 @@ func buildHunk(ops []editOp, firstChange, lastChange int) hunk {
 	}
 
 	h := hunk{}
+	oldStart, newStart := -1, -1
 
 	for i := start; i <= end; i++ {
 		op := ops[i]
 		switch op.op {
 		case 'e':
+			// oIdx and nIdx are reliable 0-based line indices for equal ops.
+			if oldStart < 0 {
+				oldStart = op.oIdx + 1
+			}
+			if newStart < 0 {
+				newStart = op.nIdx + 1
+			}
 			h.lines = append(h.lines, " "+op.line)
 			h.oldCount++
 			h.newCount++
 		case 'd':
+			// oIdx is a reliable 0-based original line index for delete ops.
+			if oldStart < 0 {
+				oldStart = op.oIdx + 1
+			}
 			h.lines = append(h.lines, "-"+op.line)
 			h.oldCount++
 		case 'i':
+			// nIdx is a reliable 0-based modified line index for insert ops.
+			if newStart < 0 {
+				newStart = op.nIdx + 1
+			}
 			h.lines = append(h.lines, "+"+op.line)
 			h.newCount++
 		}
 	}
 
-	// Calculate 1-based line numbers from the first op in the hunk.
-	h.oldStart = ops[start].oIdx + 1
-	h.newStart = ops[start].nIdx + 1
-	if h.oldStart < 1 {
-		h.oldStart = 1
+	if oldStart < 1 {
+		oldStart = 1
 	}
-	if h.newStart < 1 {
-		h.newStart = 1
+	if newStart < 1 {
+		newStart = 1
 	}
+	h.oldStart = oldStart
+	h.newStart = newStart
 
 	return h
 }
 
 // computeEditScript computes a minimal edit script using the LCS algorithm.
-// Uses O(min(m,n)) space by keeping only two rows of the DP table.
 func computeEditScript(original, modified []string) []editOp {
 	m, n := len(original), len(modified)
 
-	// Ensure n <= m for O(min(m,n)) space.
-	swapped := false
-	if n > m {
-		original, modified = modified, original
-		m, n = n, m
-		swapped = true
-	}
-
-	// Build LCS table using two rows (rolling array).
-	prev := make([]int, n+1)
-	curr := make([]int, n+1)
-
-	// We need the full DP table for backtracking.
-	// Store only the rows we need: use a rolling approach with full storage
-	// for correctness. For large inputs this is still O(m*n) time but
-	// we optimize the common case where inputs are similar.
+	// Build LCS table.
 	dp := make([][]int, m+1)
 	for i := range dp {
 		dp[i] = make([]int, n+1)
 	}
 
 	for i := 1; i <= m; i++ {
-		copy(prev, curr)
-		curr[0] = 0
 		for j := 1; j <= n; j++ {
 			if original[i-1] == modified[j-1] {
 				dp[i][j] = dp[i-1][j-1] + 1
@@ -293,47 +290,36 @@ func computeEditScript(original, modified []string) []editOp {
 		}
 	}
 
-	// Backtrack to produce edit script.
+	// Backtrack to produce edit script (append in reverse, then reverse).
 	var ops []editOp
 	i, j := m, n
 	for i > 0 && j > 0 {
 		if original[i-1] == modified[j-1] {
-			ops = append([]editOp{{op: 'e', line: original[i-1], oIdx: i - 1, nIdx: j - 1}}, ops...)
+			ops = append(ops, editOp{op: 'e', line: original[i-1], oIdx: i - 1, nIdx: j - 1})
 			i--
 			j--
 		} else if dp[i-1][j] >= dp[i][j-1] {
-			ops = append([]editOp{{op: 'd', line: original[i-1], oIdx: i - 1, nIdx: j}}, ops...)
+			ops = append(ops, editOp{op: 'd', line: original[i-1], oIdx: i - 1, nIdx: j})
 			i--
 		} else {
-			ops = append([]editOp{{op: 'i', line: modified[j-1], oIdx: i, nIdx: j - 1}}, ops...)
+			ops = append(ops, editOp{op: 'i', line: modified[j-1], oIdx: i, nIdx: j - 1})
 			j--
 		}
 	}
 
 	for i > 0 {
-		ops = append([]editOp{{op: 'd', line: original[i-1], oIdx: i - 1, nIdx: 0}}, ops...)
+		ops = append(ops, editOp{op: 'd', line: original[i-1], oIdx: i - 1, nIdx: 0})
 		i--
 	}
 	for j > 0 {
-		ops = append([]editOp{{op: 'i', line: modified[j-1], oIdx: 0, nIdx: j - 1}}, ops...)
+		ops = append(ops, editOp{op: 'i', line: modified[j-1], oIdx: 0, nIdx: j - 1})
 		j--
 	}
 
-	// If we swapped, we need to swap back the operation types.
-	if swapped {
-		for k := range ops {
-			switch ops[k].op {
-			case 'd':
-				ops[k].op = 'i'
-			case 'i':
-				ops[k].op = 'd'
-			}
-			ops[k].oIdx, ops[k].nIdx = ops[k].nIdx, ops[k].oIdx
-		}
+	// Reverse to get correct order.
+	for l, r := 0, len(ops)-1; l < r; l, r = l+1, r-1 {
+		ops[l], ops[r] = ops[r], ops[l]
 	}
-
-	_ = prev // avoid unused variable warning
-	_ = curr
 
 	return ops
 }

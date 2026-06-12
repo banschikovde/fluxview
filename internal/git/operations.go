@@ -102,9 +102,9 @@ func (g *Operations) CloneToDir(_ context.Context, revision string) (string, err
 		if err != nil {
 			return fmt.Errorf("opening file %s: %w", f.Name, err)
 		}
-		defer reader.Close()
 
 		contents, err := io.ReadAll(reader)
+		reader.Close()
 		if err != nil {
 			return fmt.Errorf("reading file %s: %w", f.Name, err)
 		}
