@@ -42,6 +42,8 @@ func ExitCodeFromError(err error) int {
 	return ExitCodeError
 }
 
+// Version is set at build time via -ldflags.
+var Version = "dev"
 
 // NewRootCmd creates the root command for flux-diff.
 func NewRootCmd() *cobra.Command {
@@ -57,6 +59,7 @@ Commands:
   diff     Compare Kustomization or HelmRelease resources against another git revision`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		Version:       Version,
 	}
 
 	rootCmd.AddCommand(newBuildCmd())

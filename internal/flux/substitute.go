@@ -1,9 +1,8 @@
-// Package flux provides postBuild variable substitution for Flux Kustomization resources.
+// Package flux provides Flux resource parsing, variable substitution, and secret redaction.
 package flux
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 )
 
@@ -65,11 +64,8 @@ func ApplySubstitution(data []byte, vars map[string]string) []byte {
 
 	result := string(data)
 	for key, value := range vars {
-		escaped := regexp.QuoteMeta(key)
-		braceRe := regexp.MustCompile(`\$\{` + escaped + `\}`)
-		parenRe := regexp.MustCompile(`\$\(` + escaped + `\)`)
-		result = braceRe.ReplaceAllString(result, value)
-		result = parenRe.ReplaceAllString(result, value)
+		result = strings.ReplaceAll(result, "${"+key+"}", value)
+		result = strings.ReplaceAll(result, "$("+key+")", value)
 	}
 
 	return []byte(result)

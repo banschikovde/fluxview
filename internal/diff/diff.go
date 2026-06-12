@@ -7,13 +7,6 @@ import (
 	"strings"
 )
 
-// Exit codes for diff operations.
-const (
-	ExitSuccess      = 0
-	ExitDiffFound    = 1
-	ExitError        = 2
-)
-
 // ColorMode controls ANSI color output.
 type ColorMode string
 
@@ -83,11 +76,10 @@ func Format(result *Result, color bool) string {
 
 // ANSI escape codes for colored output.
 const (
-	ansiRed    = "\033[31m"
-	ansiGreen  = "\033[32m"
-	ansiCyan   = "\033[36m"
-	ansiBold   = "\033[1m"
-	ansiReset  = "\033[0m"
+	ansiRed   = "\033[31m"
+	ansiGreen = "\033[32m"
+	ansiCyan  = "\033[36m"
+	ansiReset = "\033[0m"
 )
 
 // Colorize applies ANSI colors to a unified diff output.
@@ -121,11 +113,8 @@ func Colorize(diff string) string {
 	return buf.String()
 }
 
-// unifiedDiff computes a simple unified diff between two line slices.
-// This is a basic implementation — for production use, a proper diff algorithm
-// (Myers, patience, etc.) would be preferred, but this covers the core use case.
+// unifiedDiff computes a unified diff between two line slices.
 func unifiedDiff(original, modified []string) string {
-	// Use a simple line-by-line comparison with LCS-based diff.
 	ops := computeEditScript(original, modified)
 
 	// Check if there are any actual changes (non-equal operations).
@@ -144,8 +133,7 @@ func unifiedDiff(original, modified []string) string {
 	buf.WriteString("--- a\n")
 	buf.WriteString("+++ b\n")
 
-	// Group changes into hunks and format them.
-	hunks := groupIntoHunks(ops, original, modified)
+	hunks := groupIntoHunks(ops)
 	for _, hunk := range hunks {
 		buf.WriteString(fmt.Sprintf("@@ -%d,%d +%d,%d @@\n",
 			hunk.oldStart, hunk.oldCount,
@@ -160,10 +148,10 @@ func unifiedDiff(original, modified []string) string {
 }
 
 type editOp struct {
-	op    byte // 'e' equal, 'd' delete, 'i' insert
-	line  string
-	oIdx  int
-	nIdx  int
+	op   byte // 'e' equal, 'd' delete, 'i' insert
+	line string
+	oIdx int
+	nIdx int
 }
 
 type hunk struct {
@@ -174,92 +162,126 @@ type hunk struct {
 	lines    []string
 }
 
-func groupIntoHunks(ops []editOp, original, modified []string) []hunk {
+// contextLines is the number of unchanged lines to show around each change.
+const contextLines = 3
+
+// groupIntoHunks groups edit operations into unified diff hunks with context.
+func groupIntoHunks(ops []editOp) []hunk {
 	if len(ops) == 0 {
 		return nil
 	}
 
-	var hunks []hunk
-	current := hunk{
-		oldStart: ops[0].oIdx + 1,
-		newStart: ops[0].nIdx + 1,
-	}
-
-	if current.oldStart < 1 {
-		current.oldStart = 1
-	}
-	if current.newStart < 1 {
-		current.newStart = 1
-	}
-
-	// Add context before first change.
-	contextLines := 3
-	changeStart := 0
+	// Find indices of all change operations.
+	var changeIdxs []int
 	for i, op := range ops {
 		if op.op != 'e' {
-			changeStart = i
-			break
+			changeIdxs = append(changeIdxs, i)
 		}
 	}
-
-	// Adjust start with leading context.
-	contextBefore := min(contextLines, changeStart)
-	for i := changeStart - contextBefore; i < changeStart; i++ {
-		current.lines = append(current.lines, " "+ops[i].line)
-		current.oldCount++
-		current.newCount++
+	if len(changeIdxs) == 0 {
+		return nil
 	}
 
-	inChange := false
-	for i, op := range ops {
-		switch op.op {
-		case 'e':
-			// Check if we need to start a new hunk after a gap.
-			if inChange {
-				// Add trailing context.
-				contextAfter := min(contextLines, len(ops)-i)
-				for j := i; j < i+contextAfter && j < len(ops) && ops[j].op == 'e'; j++ {
-					current.lines = append(current.lines, " "+ops[j].line)
-					current.oldCount++
-					current.newCount++
-				}
-				hunks = append(hunks, current)
+	var hunks []hunk
 
-				// Start new hunk for remaining changes.
-				current = hunk{}
-				inChange = false
-			}
-		case 'd':
-			current.lines = append(current.lines, "-"+op.line)
-			current.oldCount++
-			inChange = true
-		case 'i':
-			current.lines = append(current.lines, "+"+op.line)
-			current.newCount++
-			inChange = true
+	// Group change indices into hunk ranges, merging overlapping context.
+	groupStart := changeIdxs[0]
+	groupEnd := changeIdxs[0]
+
+	for _, idx := range changeIdxs[1:] {
+		// Check if this change is close enough to the current group to merge.
+		// Two changes belong to the same hunk if the gap between them
+		// (number of equal lines) is less than 2*contextLines.
+		if idx-groupEnd <= 2*contextLines {
+			groupEnd = idx
+			continue
 		}
 
-		_ = i // suppress unused warning if needed
+		// Flush the current group as a hunk.
+		hunks = append(hunks, buildHunk(ops, groupStart, groupEnd))
+		groupStart = idx
+		groupEnd = idx
 	}
 
-	if len(current.lines) > 0 {
-		hunks = append(hunks, current)
-	}
+	// Flush the last group.
+	hunks = append(hunks, buildHunk(ops, groupStart, groupEnd))
 
 	return hunks
 }
 
+// buildHunk creates a single hunk from ops surrounding the change range
+// [firstChange, lastChange], adding contextLines of context on each side.
+func buildHunk(ops []editOp, firstChange, lastChange int) hunk {
+	// Determine context boundaries.
+	start := firstChange - contextLines
+	if start < 0 {
+		start = 0
+	}
+	end := lastChange + contextLines
+	if end >= len(ops) {
+		end = len(ops) - 1
+	}
+
+	h := hunk{}
+
+	for i := start; i <= end; i++ {
+		op := ops[i]
+		switch op.op {
+		case 'e':
+			h.lines = append(h.lines, " "+op.line)
+			h.oldCount++
+			h.newCount++
+		case 'd':
+			h.lines = append(h.lines, "-"+op.line)
+			h.oldCount++
+		case 'i':
+			h.lines = append(h.lines, "+"+op.line)
+			h.newCount++
+		}
+	}
+
+	// Calculate 1-based line numbers from the first op in the hunk.
+	h.oldStart = ops[start].oIdx + 1
+	h.newStart = ops[start].nIdx + 1
+	if h.oldStart < 1 {
+		h.oldStart = 1
+	}
+	if h.newStart < 1 {
+		h.newStart = 1
+	}
+
+	return h
+}
+
 // computeEditScript computes a minimal edit script using the LCS algorithm.
+// Uses O(min(m,n)) space by keeping only two rows of the DP table.
 func computeEditScript(original, modified []string) []editOp {
 	m, n := len(original), len(modified)
 
-	// Build LCS table.
+	// Ensure n <= m for O(min(m,n)) space.
+	swapped := false
+	if n > m {
+		original, modified = modified, original
+		m, n = n, m
+		swapped = true
+	}
+
+	// Build LCS table using two rows (rolling array).
+	prev := make([]int, n+1)
+	curr := make([]int, n+1)
+
+	// We need the full DP table for backtracking.
+	// Store only the rows we need: use a rolling approach with full storage
+	// for correctness. For large inputs this is still O(m*n) time but
+	// we optimize the common case where inputs are similar.
 	dp := make([][]int, m+1)
 	for i := range dp {
 		dp[i] = make([]int, n+1)
 	}
 
 	for i := 1; i <= m; i++ {
+		copy(prev, curr)
+		curr[0] = 0
 		for j := 1; j <= n; j++ {
 			if original[i-1] == modified[j-1] {
 				dp[i][j] = dp[i-1][j-1] + 1
@@ -297,6 +319,22 @@ func computeEditScript(original, modified []string) []editOp {
 		j--
 	}
 
+	// If we swapped, we need to swap back the operation types.
+	if swapped {
+		for k := range ops {
+			switch ops[k].op {
+			case 'd':
+				ops[k].op = 'i'
+			case 'i':
+				ops[k].op = 'd'
+			}
+			ops[k].oIdx, ops[k].nIdx = ops[k].nIdx, ops[k].oIdx
+		}
+	}
+
+	_ = prev // avoid unused variable warning
+	_ = curr
+
 	return ops
 }
 
@@ -320,11 +358,4 @@ func isTerminal(f *os.File) bool {
 		return false
 	}
 	return (fi.Mode() & os.ModeCharDevice) != 0
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

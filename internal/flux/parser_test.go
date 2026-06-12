@@ -389,6 +389,46 @@ func TestIsYAMLFile(t *testing.T) {
 	}
 }
 
+func TestParsePartialHelmRelease(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Partial HelmRelease: cluster-specific overlay with only values, no chart spec.
+	yamlContent := `apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: infra-ingress-nginx
+  namespace: flux-system
+spec:
+  values:
+    controller:
+      config:
+        proxy-buffer-size: 32k
+`
+	err := os.WriteFile(filepath.Join(tmpDir, "overlay.yaml"), []byte(yamlContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	parser := NewParser(tmpDir)
+	results, err := parser.ParseHelmReleases(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 HelmRelease, got %d", len(results))
+	}
+
+	hr := results[0]
+	if hr.Metadata.Name != "infra-ingress-nginx" {
+		t.Errorf("name = %q, want %q", hr.Metadata.Name, "infra-ingress-nginx")
+	}
+	// Chart spec should be empty (partial overlay).
+	if hr.Spec.Chart.Spec.Chart != "" {
+		t.Errorf("expected empty chart name for partial HelmRelease, got %q", hr.Spec.Chart.Spec.Chart)
+	}
+}
+
 func TestIsKustomizeAPI(t *testing.T) {
 	tests := []struct {
 		apiVersion string

@@ -60,7 +60,6 @@ func (b *Builder) Build(dir string) ([]byte, error) {
 	return yamlOutput, nil
 }
 
-
 // findKustomizationFile returns the path to the kustomization file, or empty string if not found.
 func findKustomizationFile(dir string) string {
 	candidates := []string{

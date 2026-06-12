@@ -109,7 +109,7 @@ func (g *Operations) CloneToDir(_ context.Context, revision string) (string, err
 			return fmt.Errorf("reading file %s: %w", f.Name, err)
 		}
 
-		if err := os.WriteFile(filePath, contents, 0644); err != nil {
+		if err := os.WriteFile(filePath, contents, os.FileMode(f.Mode)); err != nil {
 			return fmt.Errorf("writing file %s: %w", f.Name, err)
 		}
 		return nil

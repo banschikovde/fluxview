@@ -128,18 +128,6 @@ func TestColorizeNoColor(t *testing.T) {
 	}
 }
 
-func TestComputeExitCodes(t *testing.T) {
-	if ExitSuccess != 0 {
-		t.Errorf("ExitSuccess = %d, want 0", ExitSuccess)
-	}
-	if ExitDiffFound != 1 {
-		t.Errorf("ExitDiffFound = %d, want 1", ExitDiffFound)
-	}
-	if ExitError != 2 {
-		t.Errorf("ExitError = %d, want 2", ExitError)
-	}
-}
-
 func TestSplitLines(t *testing.T) {
 	tests := []struct {
 		input string
