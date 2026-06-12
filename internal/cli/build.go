@@ -224,14 +224,16 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	return nil
 }
 
-// printRedacted redacts secrets from the output and prints to stdout.
-// Returns the number of secrets redacted.
+// printRedacted redacts secrets and strips SOPS metadata from the output,
+// then prints to stdout. Returns the number of secrets redacted.
 func printRedacted(data []byte) int {
 	if data == nil {
 		return 0
 	}
-	redacted := flux.RedactSecrets(data)
-	count := flux.CountSecrets(data)
+	// Strip SOPS metadata before any processing.
+	cleaned := stripSOPSFields(data)
+	redacted := flux.RedactSecrets(cleaned)
+	count := flux.CountSecrets(cleaned)
 	fmt.Print(string(redacted))
 	return count
 }
