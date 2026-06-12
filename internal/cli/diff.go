@@ -367,10 +367,21 @@ func buildAllKustomizations(builder *kustomize.Builder, kustomizations []flux.Ku
 
 			sourcePath := resolveSourcePath(repoRoot, ks)
 			if sourcePath == "" {
-				// No local source path — this KS references an external source (e.g. another GitRepository).
-				// Include the KS resource itself but skip building.
-				fmt.Fprintf(os.Stderr, "Skipping Kustomization %s/%s (external source: %s/%s)\n",
-					ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.SourceRef.Kind, ks.Spec.SourceRef.Name)
+				// No source path at all — skip.
+				fmt.Fprintf(os.Stderr, "Skipping Kustomization %s/%s (no path)\n",
+					ks.Metadata.Namespace, ks.Metadata.Name)
+				if ksYAML != nil {
+					results = append(results, string(ksYAML))
+				}
+				continue
+			}
+
+			// Check if source path exists locally. If not, this KS references
+			// an external source (e.g. another GitRepository) that we can't build.
+			if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "Skipping Kustomization %s/%s (external source: %s/%s, path: %s)\n",
+					ks.Metadata.Namespace, ks.Metadata.Name,
+					ks.Spec.SourceRef.Kind, ks.Spec.SourceRef.Name, ks.Spec.Path)
 				if ksYAML != nil {
 					results = append(results, string(ksYAML))
 				}
