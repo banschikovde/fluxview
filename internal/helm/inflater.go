@@ -103,17 +103,9 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 }
 
 // FindHelmRepoURL finds the URL for a HelmRepository referenced by a HelmRelease.
-// If namespace is empty, matches by name only (first match).
 func FindHelmRepoURL(repos []fluxtypes.HelmRepository, name, namespace string) (string, error) {
-	// First pass: exact match with namespace.
 	for _, repo := range repos {
-		if repo.Metadata.Name == name && repo.Metadata.Namespace == namespace && namespace != "" {
-			return repo.Spec.URL, nil
-		}
-	}
-	// Second pass: match by name only (for resources without explicit namespace).
-	for _, repo := range repos {
-		if repo.Metadata.Name == name {
+		if repo.Metadata.Name == name && repo.Metadata.Namespace == namespace {
 			return repo.Spec.URL, nil
 		}
 	}

@@ -186,6 +186,11 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 			continue
 		}
 
+		// Skip partial HelmReleases (cluster-specific overlays without chart spec).
+		if hr.Spec.Chart.Spec.Chart == "" {
+			continue
+		}
+
 		// Find the HelmRepository URL.
 		repoURL := ""
 		sourceRef := hr.Spec.Chart.Spec.SourceRef
@@ -254,6 +259,11 @@ func inflateHelmReleases(ctx context.Context, clusterPath string) (int, error) {
 	var totalSecrets int
 	for _, hr := range helmReleases {
 		if hr.Spec.Suspend {
+			continue
+		}
+
+		// Skip partial HelmReleases (cluster-specific overlays without chart spec).
+		if hr.Spec.Chart.Spec.Chart == "" {
 			continue
 		}
 

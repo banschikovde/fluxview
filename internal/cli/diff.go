@@ -375,6 +375,11 @@ func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, helmRe
 			continue
 		}
 
+		// Skip partial HelmReleases (cluster-specific overlays without chart spec).
+		if hr.Spec.Chart.Spec.Chart == "" {
+			continue
+		}
+
 		repoURL := ""
 		sourceRef := hr.Spec.Chart.Spec.SourceRef
 		if sourceRef.Kind == flux.KindHelmRepository {
