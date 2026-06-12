@@ -1,4 +1,3 @@
-// Package flux provides Flux resource parsing, variable substitution, and secret redaction.
 package flux
 
 import (

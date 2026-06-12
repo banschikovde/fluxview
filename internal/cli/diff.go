@@ -142,13 +142,13 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	fmt.Fprintf(os.Stderr, "Diffing HelmRelease %s from %s...\n", name, clusterPath)
 
 	// Build current state.
-	currentOutput, err := buildHROutput(ctx, clusterPath, repoRoot, name, flags)
+	currentOutput, err := buildHROutput(ctx, clusterPath, name)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building current state: %w", err), ExitCodeError)
 	}
 
 	// Build comparison state (from the target revision).
-	compareOutput, err := buildHROutputAtRevision(ctx, gitOps, clusterPath, repoRoot, name, compareCommit, flags)
+	compareOutput, err := buildHROutputAtRevision(ctx, gitOps, clusterPath, repoRoot, name, compareCommit)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, err), ExitCodeError)
 	}
@@ -256,7 +256,7 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 }
 
 // buildHROutput builds the HelmRelease output for the current working tree.
-func buildHROutput(ctx context.Context, clusterPath, repoRoot, name string, flags *DiffFlags) ([]byte, error) {
+func buildHROutput(ctx context.Context, clusterPath, name string) ([]byte, error) {
 	parser := flux.NewParser(clusterPath)
 	helmReleases, err := parser.ParseHelmReleases(ctx)
 	if err != nil {
@@ -275,7 +275,7 @@ func buildHROutput(ctx context.Context, clusterPath, repoRoot, name string, flag
 }
 
 // buildHROutputAtRevision builds the HelmRelease output at a specific git revision.
-func buildHROutputAtRevision(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, revision string, flags *DiffFlags) ([]byte, error) {
+func buildHROutputAtRevision(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, revision string) ([]byte, error) {
 	// Create a git worktree at the target revision.
 	worktreePath, err := gitOps.CloneToDir(ctx, revision)
 	if err != nil {

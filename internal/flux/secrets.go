@@ -1,4 +1,3 @@
-// Package flux provides secret redaction for Flux/Kubernetes manifests.
 package flux
 
 import (

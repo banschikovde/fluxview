@@ -1,4 +1,3 @@
-// Package flux provides discovery of native kustomize directories for ConfigMap resolution.
 package flux
 
 import (
