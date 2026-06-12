@@ -120,7 +120,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 
 	// Build the kustomize resources via SDK (shared with diff command).
 	builder := kustomize.NewBuilder()
-	output, err := buildAllKustomizations(builder, kustomizations, repoRoot, configMaps)
+	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, configMaps)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}
