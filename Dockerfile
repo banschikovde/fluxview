@@ -9,9 +9,7 @@ RUN go mod download
 
 # Copy source and build
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build \
-  -ldflags="-s -w -X github.com/banschikovde/flux-diff/internal/cli.Version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" \
-  -o /flux-diff ./cmd/flux-diff/
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /flux-diff ./cmd/flux-diff/
 
 # Runtime stage
 FROM alpine:3.21
