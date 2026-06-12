@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -237,14 +238,29 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 		ksYAML, _ := yaml.Marshal(ks)
 
 		sourcePath := filepath.Join(worktreePath, ks.Spec.Path)
-		output, err := builder.Build(sourcePath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: build failed for %s at %s: %v\n", ks.Metadata.Name, revision, err)
-			// Still include the Kustomization resource even if build fails.
-			if ksYAML != nil {
-				results = append(results, string(ksYAML))
+
+		var output []byte
+		var err error
+
+		// Flux supports paths pointing to a single YAML file.
+		if isYAMLFile(sourcePath) {
+			output, err = os.ReadFile(sourcePath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to read %s at %s: %v\n", ks.Metadata.Name, revision, err)
+				if ksYAML != nil {
+					results = append(results, string(ksYAML))
+				}
+				continue
 			}
-			continue
+		} else {
+			output, err = builder.Build(sourcePath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: build failed for %s at %s: %v\n", ks.Metadata.Name, revision, err)
+				if ksYAML != nil {
+					results = append(results, string(ksYAML))
+				}
+				continue
+			}
 		}
 
 		// Prepend the Kustomization resource to the build output.
@@ -354,15 +370,31 @@ func buildAllKustomizations(builder *kustomize.Builder, kustomizations []flux.Ku
 		// Include the Flux Kustomization resource itself (controller behavior).
 		ksYAML, _ := yaml.Marshal(ks)
 
-		output, err := builder.Build(sourcePath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: build failed for %s/%s: %v\n",
-				ks.Metadata.Namespace, ks.Metadata.Name, err)
-			// Still include the Kustomization resource even if build fails.
-			if ksYAML != nil {
-				results = append(results, string(ksYAML))
+		var output []byte
+		var err error
+
+		// Flux supports paths pointing to a single YAML file (not a kustomize directory).
+		// In that case, read the file directly instead of running kustomize build.
+		if isYAMLFile(sourcePath) {
+			output, err = os.ReadFile(sourcePath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to read file %s for %s/%s: %v\n",
+					sourcePath, ks.Metadata.Namespace, ks.Metadata.Name, err)
+				if ksYAML != nil {
+					results = append(results, string(ksYAML))
+				}
+				continue
 			}
-			continue
+		} else {
+			output, err = builder.Build(sourcePath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: build failed for %s/%s: %v\n",
+					ks.Metadata.Namespace, ks.Metadata.Name, err)
+				if ksYAML != nil {
+					results = append(results, string(ksYAML))
+				}
+				continue
+			}
 		}
 
 		// Apply postBuild variable substitution.
@@ -456,6 +488,19 @@ func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, helmRe
 	}
 
 	return []byte(combined), nil
+}
+
+// isYAMLFile checks if the path points to a YAML file (not a directory).
+func isYAMLFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	if info.IsDir() {
+		return false
+	}
+	ext := strings.ToLower(filepath.Ext(path))
+	return ext == ".yaml" || ext == ".yml"
 }
 
 // computeAndOutputDiff computes the diff and outputs it.
