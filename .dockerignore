@@ -1,0 +1,6 @@
+.git
+.agent
+bin/
+.idea/
+.vscode/
+*.md
