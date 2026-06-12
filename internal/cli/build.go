@@ -90,8 +90,6 @@ func runBuild(ctx context.Context, args []string, flags *BuildFlags) error {
 func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *BuildFlags) error {
 	fmt.Fprintf(os.Stderr, "Building Kustomization resources from %s...\n", clusterPath)
 
-	var totalSecrets int
-
 	// Parse Flux Kustomization resources from the cluster path.
 	parser := flux.NewParser(clusterPath)
 	kustomizations, err := parser.ParseKustomizations(ctx)
@@ -104,9 +102,6 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	configMaps, err := resolveConfigMaps(ctx, clusterPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not resolve ConfigMaps: %v\n", err)
-	}
-	if len(configMaps) > 0 {
-		fmt.Fprintf(os.Stderr, "Found %d ConfigMap(s) for substitution\n", len(configMaps))
 	}
 
 	// Sort Kustomizations by dependency order.
@@ -130,7 +125,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return NewExitError(err, ExitCodeError)
 	}
 	if output != nil {
-		totalSecrets += printRedacted(output)
+		printRedacted(output)
 	}
 
 	// Build native kustomize overlays (e.g. vars/) and output ALL resources.
@@ -141,19 +136,15 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		if !bytes.HasPrefix(reordered, []byte("---")) {
 			fmt.Print("---\n")
 		}
-		totalSecrets += printRedacted(reordered)
+		printRedacted(reordered)
 	}
 
 	// Inflate HelmReleases found in the cluster path.
-	secrets, err := inflateHelmReleases(ctx, clusterPath)
-	totalSecrets += secrets
+	_, err = inflateHelmReleases(ctx, clusterPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: helm inflation failed: %v\n", err)
 	}
 
-	if totalSecrets > 0 {
-		fmt.Fprintf(os.Stderr, "%s\n", flux.FormatSecretSummary(totalSecrets))
-	}
 	return nil
 }
 
@@ -162,7 +153,6 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return NewExitError(fmt.Errorf("HelmRelease name is required for 'build hr' command"), ExitCodeError)
 	}
 
-	var totalSecrets int
 	fmt.Fprintf(os.Stderr, "Building HelmRelease %s in %s...\n", name, clusterPath)
 
 	// Parse HelmRelease resources.
@@ -223,12 +213,9 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		}
 
 		// Redact secrets and output to stdout.
-		totalSecrets += printRedacted(output)
+		printRedacted(output)
 	}
 
-	if totalSecrets > 0 {
-		fmt.Fprintf(os.Stderr, "%s\n", flux.FormatSecretSummary(totalSecrets))
-	}
 	return nil
 }
 

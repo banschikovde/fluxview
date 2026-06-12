@@ -343,7 +343,6 @@ func buildAllKustomizations(builder *kustomize.Builder, kustomizations []flux.Ku
 		if flux.SubstituteNeeded(ks) {
 			vars := flux.ResolveSubstituteVars(ks, configMaps)
 			if len(vars) > 0 {
-				fmt.Fprintf(os.Stderr, "  Applying %d substitution variable(s)\n", len(vars))
 				output = flux.ApplySubstitution(output, vars)
 			}
 		}
@@ -424,14 +423,6 @@ func computeAndOutputDiff(_ context.Context, original, modified []byte, flags *D
 	}
 	if modified != nil {
 		modified = flux.RedactSecrets(modified)
-	}
-
-	// Report secrets found.
-	origCount := flux.CountSecrets(original)
-	modCount := flux.CountSecrets(modified)
-	totalSecrets := origCount + modCount
-	if totalSecrets > 0 {
-		fmt.Fprintf(os.Stderr, "⚠ %d secret(s) found and redacted\n", totalSecrets)
 	}
 
 	// Handle nil cases for comparison.
