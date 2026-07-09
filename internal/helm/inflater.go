@@ -64,19 +64,30 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 	install.Namespace = namespace
 
 	// Chart resolution: OCI repos need special handling.
-	// For OCI, don't set RepoURL — pass full OCI reference as chart name.
 	// See helm/helm#10191: setting RepoURL for OCI causes index.yaml fetch failure.
 	var chartRef string
-	if strings.HasPrefix(repoURL, "oci://") {
-		chartRef = strings.TrimSuffix(repoURL, "/") + "/" + chartName
+	switch {
+	case strings.HasPrefix(chartName, "oci://"):
+		// OCIRepository pattern: chartName is the full OCI reference
+		// (URL + optional @digest). Use directly, don't append anything.
+		chartRef = chartName
 		install.ChartPathOptions.Version = hr.Spec.Chart.Spec.Version
-		// RegistryClient is needed for OCI pulls.
 		registryClient, err := registry.NewClient()
 		if err != nil {
 			return nil, fmt.Errorf("creating registry client: %w", err)
 		}
 		actionConfig.RegistryClient = registryClient
-	} else {
+	case strings.HasPrefix(repoURL, "oci://"):
+		// HelmRepository type=oci: append chart name to repo URL.
+		chartRef = strings.TrimSuffix(repoURL, "/") + "/" + chartName
+		install.ChartPathOptions.Version = hr.Spec.Chart.Spec.Version
+		registryClient, err := registry.NewClient()
+		if err != nil {
+			return nil, fmt.Errorf("creating registry client: %w", err)
+		}
+		actionConfig.RegistryClient = registryClient
+	default:
+		// Traditional HTTP HelmRepository.
 		chartRef = chartName
 		install.ChartPathOptions.RepoURL = repoURL
 		install.ChartPathOptions.Version = hr.Spec.Chart.Spec.Version

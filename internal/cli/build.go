@@ -224,15 +224,15 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 
 		// ChartRef-based HR (Flux v2 OCIRepository pattern).
 		if hr.Spec.ChartRef != nil && hr.Spec.ChartRef.Kind == flux.KindOCIRepository {
-			ociURL, ociVersion := resolveOCIRepoURL(hr, ociRepos)
-			if ociURL == "" {
+			ociRef, ociVersion := resolveOCIRepoURL(hr, ociRepos)
+			if ociRef == "" {
 				continue
 			}
-			repoURL = ociURL
-			hr.Spec.Chart.Spec.Chart = hr.Spec.ChartRef.Name
-			if ociVersion != "" {
-				hr.Spec.Chart.Spec.Version = ociVersion
-			}
+			// For OCIRepository, the full reference IS the chart name.
+			// Pass it directly; don't append to a separate repoURL.
+			repoURL = ""
+			hr.Spec.Chart.Spec.Chart = ociRef
+			hr.Spec.Chart.Spec.Version = ociVersion
 		} else {
 			// Traditional chart.spec pattern.
 			if hr.Spec.Chart.Spec.Chart == "" {
@@ -258,7 +258,10 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 	return outputs
 }
 
-// resolveOCIRepoURL finds the OCIRepository URL for a HelmRelease's chartRef.
+// resolveOCIRepoURL finds the OCIRepository reference for a HelmRelease's chartRef.
+// Returns (chartRef, version) where chartRef is the full OCI reference
+// (URL, optionally with @digest appended), and version is semver/tag.
+// For digest-based refs, chartRef includes @sha256:... and version is empty.
 func resolveOCIRepoURL(hr flux.HelmRelease, ociRepos []flux.OCIRepository) (string, string) {
 	if hr.Spec.ChartRef == nil {
 		return "", ""
@@ -269,7 +272,16 @@ func resolveOCIRepoURL(hr flux.HelmRelease, ociRepos []flux.OCIRepository) (stri
 	}
 	for _, repo := range ociRepos {
 		if repo.Metadata.Name == hr.Spec.ChartRef.Name && repo.Metadata.Namespace == repoNS {
-			return repo.Spec.URL, repo.Spec.Ref.ResolveVersion()
+			url := repo.Spec.URL
+			ref := repo.Spec.Ref
+
+			// Digest: highest priority — append @sha256:... to URL, no version.
+			if ref.HasDigest() {
+				return url + "@" + ref.Digest, ""
+			}
+
+			// Semver or tag → pass as version.
+			return url, ref.ResolveVersion()
 		}
 	}
 	return "", ""

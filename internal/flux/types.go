@@ -151,18 +151,25 @@ type OCIRepositoryRef struct {
 }
 
 // ResolveVersion returns the chart version to use for this OCIRepository.
-// Returns the tag or semver range; empty string means latest.
+// Priority: digest > semver > tag > empty (latest). Matches Flux source-controller.
+// Note: digest is NOT returned here — it's handled separately by appending
+// @sha256:... to the OCI URL.
 func (r *OCIRepositoryRef) ResolveVersion() string {
 	if r == nil {
 		return ""
 	}
-	if r.Tag != "" {
-		return r.Tag
-	}
 	if r.Semver != "" {
 		return r.Semver
 	}
+	if r.Tag != "" {
+		return r.Tag
+	}
 	return ""
+}
+
+// HasDigest returns true if a digest reference is set.
+func (r *OCIRepositoryRef) HasDigest() bool {
+	return r != nil && r.Digest != ""
 }
 
 // HelmReleaseChartSpec specifies the chart source.

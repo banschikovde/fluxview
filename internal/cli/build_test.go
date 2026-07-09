@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/banschikovde/fluxview/internal/flux"
@@ -112,10 +113,10 @@ func TestResolveOCIRepoURL(t *testing.T) {
 	}
 
 	tests := []struct {
-		name     string
-		hr       flux.HelmRelease
-		wantURL  string
-		wantVer  string
+		name    string
+		hr      flux.HelmRelease
+		wantURL string
+		wantVer string
 	}{
 		{
 			"found same namespace",
@@ -185,21 +186,57 @@ func TestResolveOCIRepoURL_WithRef(t *testing.T) {
 				Ref: &flux.OCIRepositoryRef{Semver: "^1.0.0"},
 			},
 		},
+		{
+			Metadata: flux.ObjectMeta{Name: "chart-digest", Namespace: "ns1"},
+			Spec: flux.OCIRepositorySpec{
+				URL: "oci://registry.io/chart",
+				Ref: &flux.OCIRepositoryRef{Digest: "sha256:abc123"},
+			},
+		},
+		{
+			Metadata: flux.ObjectMeta{Name: "chart-both", Namespace: "ns1"},
+			Spec: flux.OCIRepositorySpec{
+				URL: "oci://registry.io/chart",
+				Ref: &flux.OCIRepositoryRef{Tag: "v1.0.0", Semver: "^2.0.0"},
+			},
+		},
 	}
 
+	// Tag only.
 	hr := flux.HelmRelease{
 		Metadata: flux.ObjectMeta{Name: "hr", Namespace: "ns1"},
 		Spec:     flux.HelmReleaseSpec{ChartRef: &flux.ChartRef{Kind: "OCIRepository", Name: "chart-tagged"}},
 	}
-	_, ver := resolveOCIRepoURL(hr, ociRepos)
+	ref, ver := resolveOCIRepoURL(hr, ociRepos)
+	if ref != "oci://registry.io/chart" {
+		t.Errorf("tag: ref = %q, want oci://registry.io/chart", ref)
+	}
 	if ver != "v1.2.3" {
-		t.Errorf("tag version = %q, want v1.2.3", ver)
+		t.Errorf("tag: version = %q, want v1.2.3", ver)
 	}
 
+	// Semver only.
 	hr.Spec.ChartRef.Name = "chart-semver"
-	_, ver = resolveOCIRepoURL(hr, ociRepos)
+	ref, ver = resolveOCIRepoURL(hr, ociRepos)
 	if ver != "^1.0.0" {
-		t.Errorf("semver version = %q, want ^1.0.0", ver)
+		t.Errorf("semver: version = %q, want ^1.0.0", ver)
+	}
+
+	// Both tag+semver → semver wins (higher priority).
+	hr.Spec.ChartRef.Name = "chart-both"
+	_, ver = resolveOCIRepoURL(hr, ociRepos)
+	if ver != "^2.0.0" {
+		t.Errorf("tag+semver: version = %q, want ^2.0.0 (semver > tag)", ver)
+	}
+
+	// Digest → URL gets @digest appended, version empty.
+	hr.Spec.ChartRef.Name = "chart-digest"
+	ref, ver = resolveOCIRepoURL(hr, ociRepos)
+	if !strings.Contains(ref, "@sha256:abc123") {
+		t.Errorf("digest: ref = %q, want URL with @sha256:abc123", ref)
+	}
+	if ver != "" {
+		t.Errorf("digest: version = %q, want empty", ver)
 	}
 }
 
