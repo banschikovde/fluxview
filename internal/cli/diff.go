@@ -198,6 +198,9 @@ func buildKSOutput(ctx context.Context, clusterPath, repoRoot, name string) ([]b
 
 	if name != "" {
 		kustomizations = filterKustomizations(kustomizations, name)
+		if len(kustomizations) == 0 {
+			return nil, fmt.Errorf("Kustomization %q not found", name)
+		}
 	}
 
 	// Resolve ConfigMaps for postBuild substitution.
@@ -237,6 +240,9 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 
 	if name != "" {
 		kustomizations = filterKustomizations(kustomizations, name)
+		if len(kustomizations) == 0 {
+			return nil, nil // KS doesn't exist at this revision — valid diff (added/removed)
+		}
 	}
 
 	// Resolve ConfigMaps for postBuild substitution from the worktree.
@@ -329,13 +335,16 @@ func buildKSContent(ctx context.Context, builder *kustomize.Builder, kustomizati
 	}
 
 	// Append native kustomize overlay outputs (vars/ etc.).
-	ksPaths := collectKustomizationPaths(repoRoot, kustomizations)
-	overlayOutputs := buildKustomizeOverlays(clusterPath, ksPaths)
-	for _, overlay := range overlayOutputs {
-		if len(output) > 0 {
-			output = append(output, []byte("\n---\n")...)
+	// Skip overlays when no KS are selected (name filter returned empty).
+	if len(kustomizations) > 0 {
+		ksPaths := collectKustomizationPaths(repoRoot, kustomizations)
+		overlayOutputs := buildKustomizeOverlays(clusterPath, ksPaths)
+		for _, overlay := range overlayOutputs {
+			if len(output) > 0 {
+				output = append(output, []byte("\n---\n")...)
+			}
+			output = append(output, reorderYAMLFields(overlay)...)
 		}
-		output = append(output, reorderYAMLFields(overlay)...)
 	}
 
 	return output, nil
