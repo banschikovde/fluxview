@@ -32,13 +32,16 @@ func newBuildCmd() *cobra.Command {
 		Short: "Build (assemble) Flux Kustomization or HelmRelease resources",
 		Long: `Build Flux resources from a local git repository.
 
-Supported resource types:
-  ks — Flux Kustomization: runs kustomize build and inflates HelmReleases
-  hr — Flux HelmRelease: inflates Helm chart via helm template
+Resource types:
+  ks, kustomization   — build all Kustomizations (kustomize + helm inflation)
+  hr, helmrelease     — inflate HelmRelease chart(s)
+
+If [name] is omitted, all resources of the type are processed.
 
 Examples:
   fluxview build ks --path clusters/prod/
   fluxview build ks --path clusters/prod/ --skip-crds --strip-attrs status,creationTimestamp
+  fluxview build hr --path clusters/prod/
   fluxview build hr podinfo --path clusters/prod/`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -158,11 +161,11 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 }
 
 func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *BuildFlags) error {
-	if name == "" {
-		return NewExitError(fmt.Errorf("HelmRelease name is required for 'build hr' command"), ExitCodeError)
+	if name != "" {
+		fmt.Fprintf(os.Stderr, "Building HelmRelease %s in %s...\n", name, clusterPath)
+	} else {
+		fmt.Fprintf(os.Stderr, "Building all HelmReleases in %s...\n", clusterPath)
 	}
-
-	fmt.Fprintf(os.Stderr, "Building HelmRelease %s in %s...\n", name, clusterPath)
 
 	parser := flux.NewParser(clusterPath)
 	helmReleases, err := parser.ParseHelmReleases(ctx)
@@ -172,7 +175,11 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 
 	helmReleases = filterHelmReleases(helmReleases, name)
 	if len(helmReleases) == 0 {
-		return NewExitError(fmt.Errorf("HelmRelease %q not found", name), ExitCodeError)
+		if name != "" {
+			return NewExitError(fmt.Errorf("HelmRelease %q not found", name), ExitCodeError)
+		}
+		fmt.Fprintln(os.Stderr, "No HelmReleases found.")
+		return nil
 	}
 
 	helmRepos, err := parser.ParseHelmRepositories(ctx)

@@ -39,13 +39,15 @@ func newDiffCmd() *cobra.Command {
 		Long: `Compare Flux Kustomization or HelmRelease resources against another
 git revision/branch and show the differences.
 
-Supported resource types:
-  ks — Flux Kustomization: diffs kustomize build output
-  hr — Flux HelmRelease: diffs helm template output
+Resource types:
+  ks, kustomization   — diff kustomize build output
+  hr, helmrelease     — diff helm template output
+
+If [name] is omitted, all resources of the type are compared.
 
 Examples:
   fluxview diff ks --path clusters/prod/
-  fluxview diff hr podinfo --path clusters/prod/
+  fluxview diff hr --path clusters/prod/
   fluxview diff ks --path clusters/dev/ --branch-orig main --strip-attrs helm.sh/chart,status --skip-crds`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -161,10 +163,6 @@ func runDiffKS(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 }
 
 func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, compareCommit string, flags *DiffFlags) error {
-	if name == "" {
-		return NewExitError(fmt.Errorf("HelmRelease name is required for 'diff hr' command"), ExitCodeError)
-	}
-
 	currentCh := make(chan buildResult, 1)
 	compareCh := make(chan buildResult, 1)
 
@@ -261,7 +259,10 @@ func buildHROutput(ctx context.Context, clusterPath, name string) ([]byte, error
 
 	helmReleases = filterHelmReleases(helmReleases, name)
 	if len(helmReleases) == 0 {
-		return nil, fmt.Errorf("HelmRelease %q not found", name)
+		if name != "" {
+			return nil, fmt.Errorf("HelmRelease %q not found", name)
+		}
+		return nil, nil // no HRs found, return empty
 	}
 
 	helmRepos, _ := parser.ParseHelmRepositories(ctx)
@@ -302,6 +303,9 @@ func buildHROutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 	}
 
 	helmReleases = filterHelmReleases(helmReleases, name)
+	if len(helmReleases) == 0 {
+		return nil, nil // no HRs found
+	}
 	helmRepos, _ := parser.ParseHelmRepositories(ctx)
 	ociRepos, _ := parser.ParseOCIRepositories(ctx)
 
