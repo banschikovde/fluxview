@@ -19,7 +19,6 @@ type ValidateFlags struct {
 	Path      string
 	Namespace string
 	SchemaDir string
-	SkipCRDs  bool
 }
 
 func newValidateCmd() *cobra.Command {
@@ -45,7 +44,6 @@ Examples:
 	cmd.Flags().StringVarP(&flags.Path, "path", "p", "", "Path to the cluster directory in the repository")
 	cmd.Flags().StringVarP(&flags.Namespace, "namespace", "n", "", "Filter output resources by namespace")
 	cmd.Flags().StringVar(&flags.SchemaDir, "schema-dir", "", "Directory with CRD schema files (default: ./crds/)")
-	cmd.Flags().BoolVar(&flags.SkipCRDs, "skip-crds", false, "Skip CustomResourceDefinition resources")
 
 	return cmd
 }
@@ -88,13 +86,13 @@ func runValidate(ctx context.Context, args []string, flags *ValidateFlags) error
 
 	switch resourceType {
 	case "ks", "kustomization":
-		return runValidateKS(ctx, absClusterPath, repoRoot, name, flags.Namespace, flags.SkipCRDs, validator)
+		return runValidateKS(ctx, absClusterPath, repoRoot, name, flags.Namespace, validator)
 	default:
 		return NewExitError(fmt.Errorf("unsupported resource type %q (currently only 'ks' is supported)", resourceType), ExitCodeError)
 	}
 }
 
-func runValidateKS(ctx context.Context, clusterPath, repoRoot, name, namespace string, skipCRDs bool, validator *validate.Validator) error {
+func runValidateKS(ctx context.Context, clusterPath, repoRoot, name, namespace string, validator *validate.Validator) error {
 	parser := flux.NewParser(clusterPath)
 	kustomizations, err := parser.ParseKustomizations(ctx)
 	if err != nil {
@@ -121,9 +119,8 @@ func runValidateKS(ctx context.Context, clusterPath, repoRoot, name, namespace s
 		return nil
 	}
 
-	if skipCRDs {
-		output = filterCRDDocs(output)
-	}
+	// CRDs are schema definitions, not resources to validate — always skip.
+	output = filterCRDDocs(output)
 
 	if namespace != "" {
 		output = filterByNamespace(output, namespace)
