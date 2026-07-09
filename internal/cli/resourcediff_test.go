@@ -37,10 +37,10 @@ func TestStripAttrsRecursive(t *testing.T) {
 		"metadata": map[string]interface{}{
 			"creationTimestamp": "removed",
 			"name":              "kept",
-					"annotations": map[string]interface{}{
-						"helm.sh/chart":     "removed",
-						"app.kubernetes.io/name": "kept",
-					},
+			"annotations": map[string]interface{}{
+				"helm.sh/chart":          "removed",
+				"app.kubernetes.io/name": "kept",
+			},
 		},
 		"spec": "kept",
 	}

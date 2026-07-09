@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 
@@ -55,6 +57,7 @@ func buildResourceMap(data []byte, flags *DiffFlags) map[resourceKey]string {
 			} `yaml:"metadata"`
 		}
 		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
+			log.Printf("Warning: skipping unparseable YAML document: %v", err)
 			continue
 		}
 		if meta.Kind == "" || meta.Metadata.Name == "" {
@@ -83,6 +86,10 @@ func buildResourceMap(data []byte, flags *DiffFlags) map[resourceKey]string {
 			Namespace: meta.Metadata.Namespace,
 			Name:      meta.Metadata.Name,
 		}
+		if existing, exists := result[key]; exists {
+			log.Printf("Warning: duplicate resource %s — overwriting previous entry", key)
+			_ = existing
+		}
 		result[key] = processed
 	}
 
@@ -90,11 +97,13 @@ func buildResourceMap(data []byte, flags *DiffFlags) map[resourceKey]string {
 }
 
 // splitYAMLText splits multi-doc YAML by --- separators using plain text
-// operations. This is orders of magnitude faster than yaml.v3 Node decode+encode
-// round-trips used by flux.SplitYAMLDocuments.
+// operations. Normalizes CRLF to LF first. Note: does not track block scalar
+// context — a literal "---" inside a multiline block scalar (| or >) would
+// be incorrectly treated as a separator. This is uncommon in kustomize output.
 func splitYAMLText(data []byte) []string {
+	normalized := strings.ReplaceAll(string(data), "\r\n", "\n")
 	var docs []string
-	for _, doc := range strings.Split(string(data), "\n---") {
+	for _, doc := range strings.Split(normalized, "\n---") {
 		s := strings.TrimSpace(doc)
 		s = strings.TrimPrefix(s, "---")
 		s = strings.TrimSpace(s)
@@ -106,25 +115,58 @@ func splitYAMLText(data []byte) []string {
 }
 
 // stripAttrsFromDoc removes the specified keys recursively from a YAML document.
-// Keys are removed from every map at any depth (top-level fields, metadata,
-// annotations, labels, pod template annotations, etc.).
+// Uses yaml.Node to preserve original formatting, comments, key ordering, and
+// scalar styles (quotes, block scalars).
 func stripAttrsFromDoc(doc string, attrs map[string]bool) string {
 	if len(attrs) == 0 {
 		return doc
 	}
-	var obj map[string]interface{}
-	if err := yaml.Unmarshal([]byte(doc), &obj); err != nil {
+	var node yaml.Node
+	if err := yaml.Unmarshal([]byte(doc), &node); err != nil {
 		return doc
 	}
-	stripAttrsRecursive(obj, attrs)
-	out, err := yaml.Marshal(obj)
-	if err != nil {
+	stripAttrsNode(&node, attrs)
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(&node); err != nil {
 		return doc
 	}
-	return strings.TrimSpace(string(out))
+	enc.Close()
+	return strings.TrimSpace(buf.String())
+}
+
+// stripAttrsNode recursively removes keys in attrs from a yaml.Node tree.
+func stripAttrsNode(node *yaml.Node, attrs map[string]bool) {
+	if node == nil {
+		return
+	}
+	switch node.Kind {
+	case yaml.DocumentNode:
+		for _, child := range node.Content {
+			stripAttrsNode(child, attrs)
+		}
+	case yaml.MappingNode:
+		var kept []*yaml.Node
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			keyNode := node.Content[i]
+			valNode := node.Content[i+1]
+			if attrs[keyNode.Value] {
+				continue
+			}
+			kept = append(kept, keyNode, valNode)
+			stripAttrsNode(valNode, attrs)
+		}
+		node.Content = kept
+	case yaml.SequenceNode:
+		for _, child := range node.Content {
+			stripAttrsNode(child, attrs)
+		}
+	}
 }
 
 // stripAttrsRecursive removes keys in attrs from m and all nested maps/slices.
+// Used by stripAllAttrs for build path (not diff).
 func stripAttrsRecursive(m map[string]interface{}, attrs map[string]bool) {
 	for k := range m {
 		if attrs[k] {
@@ -169,7 +211,7 @@ func filterCRDDocs(data []byte) []byte {
 			Kind string `yaml:"kind"`
 		}
 		if err := yaml.Unmarshal([]byte(doc), &meta); err != nil {
-			result = append(result, doc)
+			log.Printf("Warning: skipping unparseable document in filterCRDDocs: %v", err)
 			continue
 		}
 		if meta.Kind != "CustomResourceDefinition" {
@@ -192,8 +234,9 @@ func filterByNamespace(data []byte, namespace string) []byte {
 				Namespace string `yaml:"namespace"`
 			} `yaml:"metadata"`
 		}
-		if yaml.Unmarshal([]byte(doc), &meta) != nil {
-			continue // skip unparseable docs
+		if err := yaml.Unmarshal([]byte(doc), &meta); err != nil {
+			log.Printf("Warning: skipping unparseable document in filterByNamespace: %v", err)
+			continue
 		}
 		if meta.Metadata.Namespace == namespace {
 			result = append(result, doc)

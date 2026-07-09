@@ -43,7 +43,8 @@ func ExitCodeFromError(err error) int {
 }
 
 // version is set at build time via ldflags:
-//   -ldflags "-X github.com/banschikovde/fluxview/internal/cli.version=v1.0.0"
+//
+//	-ldflags "-X github.com/banschikovde/fluxview/internal/cli.version=v1.0.0"
 var version = "dev"
 
 // Version returns the current build version.

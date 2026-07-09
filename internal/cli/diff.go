@@ -26,7 +26,7 @@ type DiffFlags struct {
 	BranchOrig string
 	Unified    int
 	SkipCRDs   bool
-	StripAttrs   string
+	StripAttrs string
 }
 
 func newDiffCmd() *cobra.Command {
