@@ -127,6 +127,9 @@ func runDiff(ctx context.Context, args []string, flags *DiffFlags) error {
 	case "hr", "helmrelease":
 		return runDiffHR(ctx, gitOps, absClusterPath, repoRoot, name, compareCommit, flags)
 	case "all":
+		if name != "" {
+			return NewExitError(fmt.Errorf("cannot use name with 'all' — specify 'ks' or 'hr' when filtering by name"), ExitCodeError)
+		}
 		if err := runDiffKS(ctx, gitOps, absClusterPath, repoRoot, name, compareCommit, flags); err != nil {
 			return err
 		}

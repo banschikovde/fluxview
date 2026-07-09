@@ -5,6 +5,36 @@ import (
 	"testing"
 )
 
+// TestRunBuild_AllWithName verifies that 'all' + name is rejected.
+func TestRunBuild_AllWithName(t *testing.T) {
+	err := runBuild(context.Background(), []string{"all", "podinfo"}, &BuildFlags{})
+	if err == nil {
+		t.Fatal("expected error for 'all' with name")
+	}
+	exitErr, ok := err.(*DiffExitError)
+	if !ok {
+		t.Fatalf("expected DiffExitError, got %T: %v", err, err)
+	}
+	if exitErr.ExitCode != ExitCodeError {
+		t.Errorf("exit code = %d, want %d", exitErr.ExitCode, ExitCodeError)
+	}
+}
+
+// TestRunDiff_AllWithName verifies that 'all' + name is rejected.
+func TestRunDiff_AllWithName(t *testing.T) {
+	err := runDiff(context.Background(), []string{"all", "podinfo"}, &DiffFlags{})
+	if err == nil {
+		t.Fatal("expected error for 'all' with name")
+	}
+	exitErr, ok := err.(*DiffExitError)
+	if !ok {
+		t.Fatalf("expected DiffExitError, got %T: %v", err, err)
+	}
+	if exitErr.ExitCode != ExitCodeError {
+		t.Errorf("exit code = %d, want %d", exitErr.ExitCode, ExitCodeError)
+	}
+}
+
 // TestRunBuild_UnsupportedResourceType verifies that unsupported resource
 // types produce a clear error message mentioning 'all' as an option.
 func TestRunBuild_UnsupportedResourceType(t *testing.T) {

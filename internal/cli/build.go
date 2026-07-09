@@ -95,6 +95,9 @@ func runBuild(ctx context.Context, args []string, flags *BuildFlags) error {
 	case "hr", "helmrelease":
 		return runBuildHR(ctx, absClusterPath, repoRoot, name, flags)
 	case "all":
+		if name != "" {
+			return NewExitError(fmt.Errorf("cannot use name with 'all' — specify 'ks' or 'hr' when filtering by name"), ExitCodeError)
+		}
 		if err := runBuildKS(ctx, absClusterPath, repoRoot, name, flags); err != nil {
 			return err
 		}
