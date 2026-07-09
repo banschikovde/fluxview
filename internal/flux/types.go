@@ -122,8 +122,9 @@ type HelmReleaseChart struct {
 
 // ChartRef references a source (e.g. OCIRepository) for Flux v2 chartRef API.
 type ChartRef struct {
-	Kind string `yaml:"kind"`
-	Name string `yaml:"name"`
+	Kind      string `yaml:"kind"`
+	Name      string `yaml:"name"`
+	Namespace string `yaml:"namespace,omitempty"`
 }
 
 // OCIRepository represents a Flux OCIRepository resource.
@@ -136,8 +137,32 @@ type OCIRepository struct {
 
 // OCIRepositorySpec holds the spec for a Flux OCIRepository.
 type OCIRepositorySpec struct {
-	URL      string      `yaml:"url"`
-	Interval interface{} `yaml:"interval,omitempty"`
+	URL      string            `yaml:"url"`
+	Ref      *OCIRepositoryRef `yaml:"ref,omitempty"`
+	Interval interface{}       `yaml:"interval,omitempty"`
+}
+
+// OCIRepositoryRef specifies which artifact version to pull.
+// Priority: digest > semver > tag > latest.
+type OCIRepositoryRef struct {
+	Tag    string `yaml:"tag,omitempty"`
+	Semver string `yaml:"semver,omitempty"`
+	Digest string `yaml:"digest,omitempty"`
+}
+
+// ResolveVersion returns the chart version to use for this OCIRepository.
+// Returns the tag or semver range; empty string means latest.
+func (r *OCIRepositoryRef) ResolveVersion() string {
+	if r == nil {
+		return ""
+	}
+	if r.Tag != "" {
+		return r.Tag
+	}
+	if r.Semver != "" {
+		return r.Semver
+	}
+	return ""
 }
 
 // HelmReleaseChartSpec specifies the chart source.

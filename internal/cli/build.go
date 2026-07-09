@@ -224,13 +224,15 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 
 		// ChartRef-based HR (Flux v2 OCIRepository pattern).
 		if hr.Spec.ChartRef != nil && hr.Spec.ChartRef.Kind == flux.KindOCIRepository {
-			repoURL = resolveOCIRepoURL(hr, ociRepos)
-			if repoURL == "" {
+			ociURL, ociVersion := resolveOCIRepoURL(hr, ociRepos)
+			if ociURL == "" {
 				continue
 			}
-			// For OCIRepository, the URL is the full chart reference.
-			// Set chart name to the OCIRepository name for logging.
+			repoURL = ociURL
 			hr.Spec.Chart.Spec.Chart = hr.Spec.ChartRef.Name
+			if ociVersion != "" {
+				hr.Spec.Chart.Spec.Version = ociVersion
+			}
 		} else {
 			// Traditional chart.spec pattern.
 			if hr.Spec.Chart.Spec.Chart == "" {
@@ -257,17 +259,20 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 }
 
 // resolveOCIRepoURL finds the OCIRepository URL for a HelmRelease's chartRef.
-func resolveOCIRepoURL(hr flux.HelmRelease, ociRepos []flux.OCIRepository) string {
+func resolveOCIRepoURL(hr flux.HelmRelease, ociRepos []flux.OCIRepository) (string, string) {
 	if hr.Spec.ChartRef == nil {
-		return ""
+		return "", ""
 	}
-	repoNS := hr.Metadata.Namespace
+	repoNS := hr.Spec.ChartRef.Namespace
+	if repoNS == "" {
+		repoNS = hr.Metadata.Namespace
+	}
 	for _, repo := range ociRepos {
 		if repo.Metadata.Name == hr.Spec.ChartRef.Name && repo.Metadata.Namespace == repoNS {
-			return repo.Spec.URL
+			return repo.Spec.URL, repo.Spec.Ref.ResolveVersion()
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // resolveHelmRepoURL finds the HelmRepository URL for a HelmRelease's chart.
