@@ -21,7 +21,7 @@ type BuildFlags struct {
 	Path       string
 	Namespace  string
 	SkipCRDs   bool
-	StripAttrs bool
+	StripAttrs string
 }
 
 func newBuildCmd() *cobra.Command {
@@ -49,7 +49,7 @@ Examples:
 	cmd.Flags().StringVarP(&flags.Path, "path", "p", "", "Path to the cluster directory in the repository")
 	cmd.Flags().StringVarP(&flags.Namespace, "namespace", "n", "", "Filter output resources by namespace")
 	cmd.Flags().BoolVar(&flags.SkipCRDs, "skip-crds", false, "Skip CustomResourceDefinition resources in output")
-	cmd.Flags().BoolVar(&flags.StripAttrs, "strip-attrs", false, "Strip noisy metadata attrs (creationTimestamp, status, uid, etc.)")
+	cmd.Flags().StringVar(&flags.StripAttrs, "strip-attrs", "", "Comma-separated keys to strip from output (e.g. helm.sh/chart,status)")
 
 	return cmd
 }
@@ -142,8 +142,8 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		if flags.SkipCRDs {
 			output = filterCRDDocs(output)
 		}
-		if flags.StripAttrs {
-			output = stripAllAttrs(output)
+		if flags.StripAttrs != "" {
+			output = stripAllAttrs(output, flags.StripAttrs)
 		}
 		printRedacted(output)
 	}

@@ -36,6 +36,7 @@ type resourceDiffResult struct {
 // pass, applying redaction, attribute stripping, and CRD filtering. This
 // replaces the previous multi-step pipeline that parsed YAML 4+ times.
 func buildResourceMap(data []byte, flags *DiffFlags) map[resourceKey]string {
+	stripAttrs := parseAttrs(flags.StripAttrs)
 	docs := splitYAMLText(data)
 	result := make(map[resourceKey]string)
 
@@ -67,9 +68,9 @@ func buildResourceMap(data []byte, flags *DiffFlags) map[resourceKey]string {
 
 		processed := trimmed
 
-		// Strip noisy attrs if requested (only unmarshal/marshal when needed).
-		if flags.StripAttrs {
-			processed = stripAttrsFromDoc(processed)
+		// Strip specified attrs if requested.
+		if len(stripAttrs) > 0 {
+			processed = stripAttrsFromDoc(processed, stripAttrs)
 		}
 
 		// Redact secrets (only for Secret kind).
@@ -104,25 +105,59 @@ func splitYAMLText(data []byte) []string {
 	return docs
 }
 
-// stripAttrsFromDoc removes noisy metadata fields from a single YAML document.
-func stripAttrsFromDoc(doc string) string {
+// stripAttrsFromDoc removes the specified keys recursively from a YAML document.
+// Keys are removed from every map at any depth (top-level fields, metadata,
+// annotations, labels, pod template annotations, etc.).
+func stripAttrsFromDoc(doc string, attrs map[string]bool) string {
+	if len(attrs) == 0 {
+		return doc
+	}
 	var obj map[string]interface{}
 	if err := yaml.Unmarshal([]byte(doc), &obj); err != nil {
 		return doc
 	}
-
-	delete(obj, "status")
-	if meta, ok := obj["metadata"].(map[string]interface{}); ok {
-		for _, key := range []string{"creationTimestamp", "resourceVersion", "uid", "generation", "managedFields"} {
-			delete(meta, key)
-		}
-	}
-
+	stripAttrsRecursive(obj, attrs)
 	out, err := yaml.Marshal(obj)
 	if err != nil {
 		return doc
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// stripAttrsRecursive removes keys in attrs from m and all nested maps/slices.
+func stripAttrsRecursive(m map[string]interface{}, attrs map[string]bool) {
+	for k := range m {
+		if attrs[k] {
+			delete(m, k)
+		}
+	}
+	for _, val := range m {
+		switch v := val.(type) {
+		case map[string]interface{}:
+			stripAttrsRecursive(v, attrs)
+		case []interface{}:
+			for _, item := range v {
+				if nested, ok := item.(map[string]interface{}); ok {
+					stripAttrsRecursive(nested, attrs)
+				}
+			}
+		}
+	}
+}
+
+// parseAttrs parses a comma-separated string into a set of keys.
+func parseAttrs(s string) map[string]bool {
+	if s == "" {
+		return nil
+	}
+	attrs := make(map[string]bool)
+	for _, key := range strings.Split(s, ",") {
+		key = strings.TrimSpace(key)
+		if key != "" {
+			attrs[key] = true
+		}
+	}
+	return attrs
 }
 
 // filterCRDDocs removes CustomResourceDefinition documents from multi-doc YAML.
@@ -167,12 +202,16 @@ func filterByNamespace(data []byte, namespace string) []byte {
 	return []byte(strings.Join(result, "\n---\n"))
 }
 
-// stripAllAttrs strips noisy metadata from all documents in multi-doc YAML.
-func stripAllAttrs(data []byte) []byte {
+// stripAllAttrs strips specified keys from all documents in multi-doc YAML.
+func stripAllAttrs(data []byte, attrsList string) []byte {
+	attrs := parseAttrs(attrsList)
+	if attrs == nil {
+		return data
+	}
 	docs := splitYAMLText(data)
 	var result []string
 	for _, doc := range docs {
-		result = append(result, stripAttrsFromDoc(doc))
+		result = append(result, stripAttrsFromDoc(doc, attrs))
 	}
 	return []byte(strings.Join(result, "\n---\n"))
 }

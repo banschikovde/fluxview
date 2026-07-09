@@ -26,7 +26,7 @@ type DiffFlags struct {
 	BranchOrig string
 	Unified    int
 	SkipCRDs   bool
-	StripAttrs bool
+	StripAttrs   string
 }
 
 func newDiffCmd() *cobra.Command {
@@ -45,7 +45,7 @@ Supported resource types:
 Examples:
   fluxview diff ks --path clusters/prod/
   fluxview diff hr podinfo --path clusters/prod/
-  fluxview diff ks --path clusters/dev/ --branch-orig main --strip-attrs --skip-crds`,
+  fluxview diff ks --path clusters/dev/ --branch-orig main --strip-attrs helm.sh/chart,status --skip-crds`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDiff(cmd.Context(), args, flags)
@@ -58,7 +58,7 @@ Examples:
 	cmd.Flags().StringVar(&flags.BranchOrig, "branch-orig", "", "Branch/revision to compare against (default: auto-detect default branch)")
 	cmd.Flags().IntVar(&flags.Unified, "unified", 3, "Number of context lines in diff output")
 	cmd.Flags().BoolVar(&flags.SkipCRDs, "skip-crds", false, "Skip CustomResourceDefinition resources in diff")
-	cmd.Flags().BoolVar(&flags.StripAttrs, "strip-attrs", false, "Strip noisy metadata attrs (creationTimestamp, status, uid, etc.)")
+	cmd.Flags().StringVar(&flags.StripAttrs, "strip-attrs", "", "Comma-separated keys to strip from diff (e.g. helm.sh/chart,status)")
 	return cmd
 }
 
