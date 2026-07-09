@@ -227,7 +227,7 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 			continue
 		}
 
-		repoURL := ""
+		var repoURL string
 
 		// ChartRef-based HR (Flux v2 OCIRepository pattern).
 		if hr.Spec.ChartRef != nil && hr.Spec.ChartRef.Kind == flux.KindOCIRepository {
@@ -236,8 +236,6 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 				continue
 			}
 			// For OCIRepository, the full reference IS the chart name.
-			// Pass it directly; don't append to a separate repoURL.
-			repoURL = ""
 			hr.Spec.Chart.Spec.Chart = ociRef
 			hr.Spec.Chart.Spec.Version = ociVersion
 		} else {

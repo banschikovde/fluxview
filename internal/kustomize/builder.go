@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"sigs.k8s.io/kustomize/api/krusty"
+	"sigs.k8s.io/kustomize/api/types"
 	"sigs.k8s.io/kustomize/kyaml/filesys"
 )
 
@@ -16,10 +17,14 @@ type Builder struct {
 	options *krusty.Options
 }
 
-// NewBuilder creates a new kustomize Builder with default options.
+// NewBuilder creates a new kustomize Builder with options that allow
+// loading files outside the kustomization root (e.g. ../../base —
+// common pattern in Flux repos).
 func NewBuilder() *Builder {
+	opts := krusty.MakeDefaultOptions()
+	opts.LoadRestrictions = types.LoadRestrictionsNone
 	return &Builder{
-		options: krusty.MakeDefaultOptions(),
+		options: opts,
 	}
 }
 

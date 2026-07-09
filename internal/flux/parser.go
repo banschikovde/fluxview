@@ -162,7 +162,7 @@ func (p *Parser) ParseOCIRepositories(ctx context.Context) ([]OCIRepository, err
 
 		docs, err := p.parseFile(path)
 		if err != nil {
-			return nil
+			return fmt.Errorf("parsing file %s: %w", path, err)
 		}
 
 		for _, doc := range docs {

@@ -114,11 +114,11 @@ func TestFilterKustomizations_ByName(t *testing.T) {
 	}
 
 	tests := []struct {
-		name string
-		args []flux.Kustomization
-		filter string
+		name      string
+		args      []flux.Kustomization
+		filter    string
 		wantCount int
-		wantName string
+		wantName  string
 	}{
 		{"no filter returns all", ks, "", 3, ""},
 		{"filter by name", ks, "base", 1, "base"},
@@ -145,9 +145,9 @@ func TestFilterHelmReleases_ByName(t *testing.T) {
 	}
 
 	tests := []struct {
-		name string
-		args []flux.HelmRelease
-		filter string
+		name      string
+		args      []flux.HelmRelease
+		filter    string
 		wantCount int
 	}{
 		{"no filter returns all", hr, "", 2},

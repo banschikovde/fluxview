@@ -114,7 +114,7 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 	// Run template rendering.
 	rel, err := install.RunWithContext(ctx, chartObj, values)
 	if err != nil {
-		return nil, fmt.Errorf("rendering chart %s: %w", chartName, err)
+		return nil, fmt.Errorf("rendering chart %s: %w", chartRef, err)
 	}
 
 	// Extract manifest via accessor (Helm v4 returns Releaser interface).
