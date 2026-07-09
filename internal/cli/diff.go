@@ -124,8 +124,13 @@ func runDiff(ctx context.Context, args []string, flags *DiffFlags) error {
 		return runDiffKS(ctx, gitOps, absClusterPath, repoRoot, name, compareCommit, flags)
 	case "hr", "helmrelease":
 		return runDiffHR(ctx, gitOps, absClusterPath, repoRoot, name, compareCommit, flags)
+	case "all":
+		if err := runDiffKS(ctx, gitOps, absClusterPath, repoRoot, name, compareCommit, flags); err != nil {
+			return err
+		}
+		return runDiffHR(ctx, gitOps, absClusterPath, repoRoot, name, compareCommit, flags)
 	default:
-		return NewExitError(fmt.Errorf("unsupported resource type %q (use 'ks' or 'hr')", resourceType), ExitCodeError)
+		return NewExitError(fmt.Errorf("unsupported resource type %q (use 'ks', 'hr', or 'all')", resourceType), ExitCodeError)
 	}
 }
 
