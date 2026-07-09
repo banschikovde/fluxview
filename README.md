@@ -136,6 +136,7 @@ Missing schemas never break the pipeline — resources without a matching schema
 | 0 | Success / no differences / all resources valid |
 | 1 | Differences found (diff only) |
 | 2 | Error |
+| 3 | Validation failed (validate only) |
 
 ## CRD schemas
 

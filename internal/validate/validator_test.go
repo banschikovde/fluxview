@@ -30,9 +30,9 @@ func TestNew_CRDFile(t *testing.T) {
 	if v.SchemaCount() != 1 {
 		t.Fatalf("expected 1 schema, got %d", v.SchemaCount())
 	}
-	gk := schema.GroupKind{Group: "test.example.com", Kind: "Widget"}
-	if _, ok := v.schemas[gk]; !ok {
-		t.Error("expected schema for test.example.com/Widget")
+	gvk := schema.GroupVersionKind{Group: "test.example.com", Version: "v1", Kind: "Widget"}
+	if _, ok := v.schemas[gvk]; !ok {
+		t.Error("expected schema for test.example.com/v1/Widget")
 	}
 }
 

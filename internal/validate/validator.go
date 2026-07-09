@@ -24,28 +24,28 @@ import (
 // to their GroupKind. This is an explicit mapping because the lowercase
 // filename → CamelCase kind conversion is ambiguous (e.g. "helmrelease" →
 // "HelmRelease", not "Helmrelease").
-var fluxSchemaKinds = map[string]schema.GroupKind{
-	"kustomization-kustomize-v1":       {Group: "kustomize.toolkit.fluxcd.io", Kind: "Kustomization"},
-	"helmrelease-helm-v2":              {Group: "helm.toolkit.fluxcd.io", Kind: "HelmRelease"},
-	"gitrepository-source-v1":          {Group: "source.toolkit.fluxcd.io", Kind: "GitRepository"},
-	"helmrepository-source-v1":         {Group: "source.toolkit.fluxcd.io", Kind: "HelmRepository"},
-	"helmchart-source-v1":              {Group: "source.toolkit.fluxcd.io", Kind: "HelmChart"},
-	"bucket-source-v1":                 {Group: "source.toolkit.fluxcd.io", Kind: "Bucket"},
-	"ocirepository-source-v1":          {Group: "source.toolkit.fluxcd.io", Kind: "OCIRepository"},
-	"alert-notification-v1beta3":       {Group: "notification.toolkit.fluxcd.io", Kind: "Alert"},
-	"provider-notification-v1beta3":    {Group: "notification.toolkit.fluxcd.io", Kind: "Provider"},
-	"receiver-notification-v1":         {Group: "notification.toolkit.fluxcd.io", Kind: "Receiver"},
-	"imagerepository-image-v1":         {Group: "image.toolkit.fluxcd.io", Kind: "ImageRepository"},
-	"imagepolicy-image-v1":             {Group: "image.toolkit.fluxcd.io", Kind: "ImagePolicy"},
-	"imageupdateautomation-image-v1":   {Group: "image.toolkit.fluxcd.io", Kind: "ImageUpdateAutomation"},
-	"artifactgenerator-source-v1beta1": {Group: "source.toolkit.fluxcd.io", Kind: "ArtifactGenerator"},
-	"externalartifact-source-v1":       {Group: "source.toolkit.fluxcd.io", Kind: "ExternalArtifact"},
+var fluxSchemaKinds = map[string]schema.GroupVersionKind{
+	"kustomization-kustomize-v1":       {Group: "kustomize.toolkit.fluxcd.io", Version: "v1", Kind: "Kustomization"},
+	"helmrelease-helm-v2":              {Group: "helm.toolkit.fluxcd.io", Version: "v2", Kind: "HelmRelease"},
+	"gitrepository-source-v1":          {Group: "source.toolkit.fluxcd.io", Version: "v1", Kind: "GitRepository"},
+	"helmrepository-source-v1":         {Group: "source.toolkit.fluxcd.io", Version: "v1", Kind: "HelmRepository"},
+	"helmchart-source-v1":              {Group: "source.toolkit.fluxcd.io", Version: "v1", Kind: "HelmChart"},
+	"bucket-source-v1":                 {Group: "source.toolkit.fluxcd.io", Version: "v1", Kind: "Bucket"},
+	"ocirepository-source-v1":          {Group: "source.toolkit.fluxcd.io", Version: "v1", Kind: "OCIRepository"},
+	"alert-notification-v1beta3":       {Group: "notification.toolkit.fluxcd.io", Version: "v1beta3", Kind: "Alert"},
+	"provider-notification-v1beta3":    {Group: "notification.toolkit.fluxcd.io", Version: "v1beta3", Kind: "Provider"},
+	"receiver-notification-v1":         {Group: "notification.toolkit.fluxcd.io", Version: "v1", Kind: "Receiver"},
+	"imagerepository-image-v1":         {Group: "image.toolkit.fluxcd.io", Version: "v1", Kind: "ImageRepository"},
+	"imagepolicy-image-v1":             {Group: "image.toolkit.fluxcd.io", Version: "v1", Kind: "ImagePolicy"},
+	"imageupdateautomation-image-v1":   {Group: "image.toolkit.fluxcd.io", Version: "v1", Kind: "ImageUpdateAutomation"},
+	"artifactgenerator-source-v1beta1": {Group: "source.toolkit.fluxcd.io", Version: "v1beta1", Kind: "ArtifactGenerator"},
+	"externalartifact-source-v1":       {Group: "source.toolkit.fluxcd.io", Version: "v1", Kind: "ExternalArtifact"},
 }
 
 // Validator validates Kubernetes resources against bundled schema files.
 // Resources without a matching schema are silently skipped.
 type Validator struct {
-	schemas map[schema.GroupKind]validation.SchemaValidator
+	schemas map[schema.GroupVersionKind]validation.SchemaValidator
 }
 
 // New creates a Validator by loading schema files from schemaDir.
@@ -54,7 +54,7 @@ type Validator struct {
 // or doesn't exist, returns an empty Validator (all resources skipped).
 func New(schemaDir string) *Validator {
 	v := &Validator{
-		schemas: make(map[schema.GroupKind]validation.SchemaValidator),
+		schemas: make(map[schema.GroupVersionKind]validation.SchemaValidator),
 	}
 
 	if schemaDir == "" {
@@ -172,22 +172,22 @@ func (v *Validator) loadCRDFile(path string) {
 			continue
 		}
 
-		gk := schema.GroupKind{Group: crd.Spec.Group, Kind: crd.Spec.Names.Kind}
 		for _, ver := range crd.Spec.Versions {
 			if ver.Schema == nil || ver.Schema.OpenAPIV3Schema == nil {
 				continue
 			}
+			gvk := schema.GroupVersionKind{Group: crd.Spec.Group, Version: ver.Name, Kind: crd.Spec.Names.Kind}
 			internal := &apiextensions.JSONSchemaProps{}
 			if err := apiextv1.Convert_v1_JSONSchemaProps_To_apiextensions_JSONSchemaProps(ver.Schema.OpenAPIV3Schema, internal, nil); err != nil {
-				log.Printf("Warning: could not convert CRD schema for %s: %v", gk, err)
+				log.Printf("Warning: could not convert CRD schema for %s: %v", gvk, err)
 				continue
 			}
 			validator, _, err := validation.NewSchemaValidator(internal)
 			if err != nil {
-				log.Printf("Warning: could not create validator for %s: %v", gk, err)
+				log.Printf("Warning: could not create validator for %s: %v", gvk, err)
 				continue
 			}
-			v.schemas[gk] = validator
+			v.schemas[gvk] = validator
 		}
 	}
 }
@@ -254,9 +254,9 @@ func (v *Validator) Validate(data []byte) []Result {
 			continue
 		}
 
-		group, _ := parseAPIVersion(meta.APIVersion)
-		gk := schema.GroupKind{Group: group, Kind: meta.Kind}
-		validator, ok := v.schemas[gk]
+		group, version := parseAPIVersion(meta.APIVersion)
+		gvk := schema.GroupVersionKind{Group: group, Version: version, Kind: meta.Kind}
+		validator, ok := v.schemas[gvk]
 		if !ok {
 			continue // No schema — skip silently.
 		}

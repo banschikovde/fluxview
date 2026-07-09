@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
@@ -98,6 +99,20 @@ func (g *Operations) CloneToDir(_ context.Context, revision string) (string, err
 			return fmt.Errorf("creating directory %s: %w", filepath.Dir(filePath), err)
 		}
 
+		// Handle symlinks: git stores the target path as file content.
+		if f.Mode == filemode.Symlink {
+			reader, err := f.Reader()
+			if err != nil {
+				return fmt.Errorf("opening symlink %s: %w", f.Name, err)
+			}
+			target, err := io.ReadAll(reader)
+			reader.Close()
+			if err != nil {
+				return fmt.Errorf("reading symlink %s: %w", f.Name, err)
+			}
+			return os.Symlink(strings.TrimSpace(string(target)), filePath)
+		}
+
 		reader, err := f.Reader()
 		if err != nil {
 			return fmt.Errorf("opening file %s: %w", f.Name, err)
@@ -131,6 +146,10 @@ func (g *Operations) RemoveWorktree(_ context.Context, worktreePath string) erro
 // CloneExternalRepo clones an external git repository at the specified ref
 // into a temp directory. Returns the temp directory path (caller should clean up).
 // ref can be a tag, branch, or commit hash.
+//
+// NOTE: This function is currently dead code — external GitRepository resolution
+// is disabled (resolveExternal=false) in both build and diff for performance.
+// Kept for potential future use with caching.
 func CloneExternalRepo(ctx context.Context, url, ref string) (string, error) {
 	tmpDir, err := os.MkdirTemp("", "fluxview-external-*")
 	if err != nil {

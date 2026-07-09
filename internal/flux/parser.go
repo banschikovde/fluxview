@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -315,6 +316,9 @@ func SplitYAMLDocuments(data []byte) []string {
 	for {
 		var node yaml.Node
 		if err := decoder.Decode(&node); err != nil {
+			if err != io.EOF {
+				fmt.Fprintf(os.Stderr, "Warning: YAML parse error in SplitYAMLDocuments: %v\n", err)
+			}
 			break
 		}
 		var buf bytes.Buffer

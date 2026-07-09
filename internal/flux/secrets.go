@@ -2,6 +2,9 @@ package flux
 
 import (
 	"bytes"
+	"fmt"
+	"io"
+	"os"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -22,6 +25,9 @@ func RedactSecrets(data []byte) []byte {
 	for {
 		var node yaml.Node
 		if err := decoder.Decode(&node); err != nil {
+			if err != io.EOF {
+				fmt.Fprintf(os.Stderr, "Warning: YAML parse error, remaining documents skipped: %v\n", err)
+			}
 			break
 		}
 
@@ -111,6 +117,9 @@ func CountSecrets(data []byte) int {
 	for {
 		var node yaml.Node
 		if err := decoder.Decode(&node); err != nil {
+			if err != io.EOF {
+				fmt.Fprintf(os.Stderr, "Warning: YAML parse error in CountSecrets: %v\n", err)
+			}
 			break
 		}
 

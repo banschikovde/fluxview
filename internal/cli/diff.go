@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -457,6 +458,10 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 
 		// Continue with newly discovered KS.
 		queue = discoveredKS
+	}
+
+	if len(queue) > 0 {
+		log.Printf("Warning: max recursion depth (%d) reached, %d Kustomization(s) not processed", maxDepth, len(queue))
 	}
 
 	if len(results) == 0 {

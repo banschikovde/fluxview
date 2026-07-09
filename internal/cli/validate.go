@@ -140,7 +140,7 @@ func runValidateKS(ctx context.Context, clusterPath, repoRoot, name, namespace s
 		}
 	}
 
-	return NewExitError(fmt.Errorf("%d resource(s) failed validation", len(results)), ExitCodeError)
+	return NewExitError(fmt.Errorf("%d resource(s) failed validation", len(results)), ExitValidationFailed)
 }
 
 // defaultSchemaDir returns the default CRD schema directory.

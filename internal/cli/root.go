@@ -13,6 +13,8 @@ import (
 const (
 	// ExitDiffFound indicates successful execution with differences found.
 	ExitDiffFound = 1
+	// ExitValidationFailed indicates validation found invalid resources.
+	ExitValidationFailed = 3
 	// ExitCodeError indicates an error occurred.
 	ExitCodeError = 2
 )
