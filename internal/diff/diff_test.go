@@ -75,23 +75,17 @@ func TestColorize(t *testing.T) {
 
 	colored := Colorize(diff)
 
-	// Removed line: red, prefix stripped.
-	if !strings.Contains(colored, "\033[31mold line") {
-		t.Errorf("expected red color for removed line with prefix stripped, got %q", colored)
+	// Removed line: red, prefix kept.
+	if !strings.Contains(colored, "\033[31m-old line") {
+		t.Errorf("expected red color for removed line with prefix, got %q", colored)
 	}
-	if strings.Contains(colored, "\033[31m-old") {
-		t.Error("should not retain '-' prefix in colored output")
+	// Added line: green, prefix kept.
+	if !strings.Contains(colored, "\033[32m+new line") {
+		t.Errorf("expected green color for added line with prefix, got %q", colored)
 	}
-	// Added line: green, prefix stripped.
-	if !strings.Contains(colored, "\033[32mnew line") {
-		t.Errorf("expected green color for added line with prefix stripped, got %q", colored)
-	}
-	if strings.Contains(colored, "\033[32m+new") {
-		t.Error("should not retain '+' prefix in colored output")
-	}
-	// Context line: space prefix stripped.
-	if strings.Contains(colored, " context") {
-		t.Error("context line should have leading space stripped")
+	// Context line: no color, prefix kept.
+	if !strings.Contains(colored, " context") {
+		t.Error("expected context line to be preserved")
 	}
 }
 

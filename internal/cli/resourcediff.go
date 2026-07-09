@@ -86,8 +86,13 @@ func buildResourceMap(data []byte, flags *DiffFlags) map[resourceKey]string {
 			Namespace: meta.Metadata.Namespace,
 			Name:      meta.Metadata.Name,
 		}
-		if _, exists := result[key]; exists {
-			log.Printf("Warning: duplicate resource %s — overwriting previous entry", key)
+		if existing, exists := result[key]; exists {
+			// Only warn for genuinely conflicting resources.
+			// Kustomization duplicates are expected from recursive discovery
+			// (KS YAML prepended + same KS in kustomize output).
+			if existing != processed && meta.Kind != "Kustomization" {
+				log.Printf("Warning: duplicate resource %s — overwriting with different content", key)
+			}
 		}
 		result[key] = processed
 	}

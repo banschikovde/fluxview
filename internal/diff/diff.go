@@ -74,11 +74,8 @@ const (
 	ANSIReset = "\033[0m"
 )
 
-// Colorize applies ANSI colors to a diff output, stripping the +/-/space
-// prefixes so only color distinguishes changes from context.
-// - Lines starting with `-` are colored red (removed), prefix stripped.
-// - Lines starting with `+` are colored green (added), prefix stripped.
-// - Context lines (leading space) have the prefix stripped.
+// Colorize applies ANSI colors to a diff output while keeping +/- prefixes
+// for visual structure. Colors supplement the prefix, not replace it.
 func Colorize(diff string) string {
 	var buf strings.Builder
 	lines := splitLines(diff)
@@ -87,18 +84,14 @@ func Colorize(diff string) string {
 		switch {
 		case strings.HasPrefix(line, "-"):
 			buf.WriteString(ANSIRed)
-			buf.WriteString(line[1:])
+			buf.WriteString(line)
 			buf.WriteString(ANSIReset)
 		case strings.HasPrefix(line, "+"):
 			buf.WriteString(ANSIGreen)
-			buf.WriteString(line[1:])
+			buf.WriteString(line)
 			buf.WriteString(ANSIReset)
 		default:
-			if len(line) > 0 && line[0] == ' ' {
-				buf.WriteString(line[1:])
-			} else {
-				buf.WriteString(line)
-			}
+			buf.WriteString(line)
 		}
 		buf.WriteByte('\n')
 	}

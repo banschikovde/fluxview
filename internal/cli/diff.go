@@ -369,7 +369,13 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 			}
 
 			// Include the Flux Kustomization resource itself (controller behavior).
-			ksYAML, _ := yaml.Marshal(ks)
+			// Use 2-space indent to match kustomize output formatting.
+			var ksYAMLBuf bytes.Buffer
+			ksEnc := yaml.NewEncoder(&ksYAMLBuf)
+			ksEnc.SetIndent(2)
+			ksEnc.Encode(ks)
+			ksEnc.Close()
+			ksYAML := ksYAMLBuf.Bytes()
 
 			// Resolve source path from local repo.
 			sourcePath := resolveSourcePath(repoRoot, ks)
