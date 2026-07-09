@@ -265,13 +265,14 @@ func buildHROutput(ctx context.Context, clusterPath, name string) ([]byte, error
 	}
 
 	helmRepos, _ := parser.ParseHelmRepositories(ctx)
+	ociRepos, _ := parser.ParseOCIRepositories(ctx)
 
 	inflater, err := helm.NewInflater()
 	if err != nil {
 		return nil, fmt.Errorf("initializing helm: %w", err)
 	}
 
-	return inflateAllHelmReleases(ctx, inflater, helmReleases, helmRepos)
+	return inflateAllHelmReleases(ctx, inflater, helmReleases, helmRepos, ociRepos)
 }
 
 // buildHROutputAtRevision builds the HelmRelease output at a specific git revision.
@@ -302,13 +303,14 @@ func buildHROutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 
 	helmReleases = filterHelmReleases(helmReleases, name)
 	helmRepos, _ := parser.ParseHelmRepositories(ctx)
+	ociRepos, _ := parser.ParseOCIRepositories(ctx)
 
 	inflater, err := helm.NewInflater()
 	if err != nil {
 		return nil, fmt.Errorf("initializing helm: %w", err)
 	}
 
-	return inflateAllHelmReleases(ctx, inflater, helmReleases, helmRepos)
+	return inflateAllHelmReleases(ctx, inflater, helmReleases, helmRepos, ociRepos)
 }
 
 // buildKSContent is the shared build logic for Flux Kustomization resources,
@@ -545,8 +547,8 @@ func readYAMLFilesRecursive(dir string) ([]byte, error) {
 }
 
 // inflateAllHelmReleases inflates all HelmRelease resources and returns combined YAML.
-func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository) ([]byte, error) {
-	outputs := inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos)
+func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository) ([]byte, error) {
+	outputs := inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos)
 	if len(outputs) == 0 {
 		return nil, nil
 	}

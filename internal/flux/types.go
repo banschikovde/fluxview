@@ -7,6 +7,7 @@ const (
 	KindHelmRelease    = "HelmRelease"
 	KindHelmRepository = "HelmRepository"
 	KindGitRepository  = "GitRepository"
+	KindOCIRepository  = "OCIRepository"
 
 	GroupSourceToolkitFluxHelmIO    = "source.toolkit.fluxcd.io"
 	GroupKustomizeToolkitFluxHelmIO = "kustomize.toolkit.fluxcd.io"
@@ -94,8 +95,10 @@ type HelmRelease struct {
 
 // HelmReleaseSpec holds the spec for a Flux HelmRelease.
 type HelmReleaseSpec struct {
-	Chart    HelmReleaseChart `yaml:"chart"`
-	Interval interface{}      `yaml:"interval,omitempty"`
+	Chart HelmReleaseChart `yaml:"chart"`
+	// ChartRef references an OCIRepository directly (Flux v2 chartRef API).
+	ChartRef *ChartRef   `yaml:"chartRef,omitempty"`
+	Interval interface{} `yaml:"interval,omitempty"`
 	// Values holds the values to pass to helm template.
 	Values map[string]interface{} `yaml:"values,omitempty"`
 	// ValuesFrom references ConfigMaps/Secrets with values.
@@ -115,6 +118,26 @@ type HelmReleaseSpec struct {
 // HelmReleaseChart references the Helm chart to use.
 type HelmReleaseChart struct {
 	Spec HelmReleaseChartSpec `yaml:"spec"`
+}
+
+// ChartRef references a source (e.g. OCIRepository) for Flux v2 chartRef API.
+type ChartRef struct {
+	Kind string `yaml:"kind"`
+	Name string `yaml:"name"`
+}
+
+// OCIRepository represents a Flux OCIRepository resource.
+type OCIRepository struct {
+	APIVersion string            `yaml:"apiVersion"`
+	Kind       string            `yaml:"kind"`
+	Metadata   ObjectMeta        `yaml:"metadata"`
+	Spec       OCIRepositorySpec `yaml:"spec"`
+}
+
+// OCIRepositorySpec holds the spec for a Flux OCIRepository.
+type OCIRepositorySpec struct {
+	URL      string      `yaml:"url"`
+	Interval interface{} `yaml:"interval,omitempty"`
 }
 
 // HelmReleaseChartSpec specifies the chart source.

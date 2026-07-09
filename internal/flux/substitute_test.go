@@ -271,7 +271,7 @@ func TestApplySubstitution_Defaults(t *testing.T) {
 		{"dash default var set", "${SET:-def}", "value"},
 		{"dash default var empty", "${EMPTY:-def}", "def"},
 		{"dash default var unset", "${UNSET:-def}", "def"},
-		{"assign default var empty", "${EMPTY:=def}", ""},
+		{"assign default var empty", "${EMPTY:=def}", "def"},
 	}
 
 	for _, tt := range tests {

@@ -145,6 +145,42 @@ func (p *Parser) ParseHelmRepositories(ctx context.Context) ([]HelmRepository, e
 	return result, nil
 }
 
+// ParseOCIRepositories discovers all Flux OCIRepository resources under the root path.
+func (p *Parser) ParseOCIRepositories(ctx context.Context) ([]OCIRepository, error) {
+	var result []OCIRepository
+
+	err := filepath.WalkDir(p.RootPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if d.IsDir() || !isYAMLFile(path) {
+			return nil
+		}
+
+		docs, err := p.parseFile(path)
+		if err != nil {
+			return nil
+		}
+
+		for _, doc := range docs {
+			repo, ok := doc.(OCIRepository)
+			if ok {
+				result = append(result, repo)
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("walking directory %s: %w", p.RootPath, err)
+	}
+
+	return result, nil
+}
+
 // ParseConfigMaps discovers all Kubernetes ConfigMap resources under the root path.
 func (p *Parser) ParseConfigMaps(ctx context.Context) ([]ConfigMap, error) {
 	var result []ConfigMap
@@ -292,6 +328,14 @@ func parseSingleDocument(data []byte) (interface{}, error) {
 			var repo GitRepository
 			if err := yaml.Unmarshal(data, &repo); err != nil {
 				return nil, fmt.Errorf("unmarshaling GitRepository: %w", err)
+			}
+			return repo, nil
+		}
+	case KindOCIRepository:
+		if isSourceAPI(meta.APIVersion) {
+			var repo OCIRepository
+			if err := yaml.Unmarshal(data, &repo); err != nil {
+				return nil, fmt.Errorf("unmarshaling OCIRepository: %w", err)
 			}
 			return repo, nil
 		}

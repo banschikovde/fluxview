@@ -185,7 +185,9 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return NewExitError(fmt.Errorf("initializing helm: %w", err), ExitCodeError)
 	}
 
-	for _, result := range inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos) {
+	ociRepos, _ := parser.ParseOCIRepositories(ctx)
+
+	for _, result := range inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos) {
 		printRedacted(result)
 	}
 
@@ -210,20 +212,34 @@ func printRedacted(data []byte) int {
 
 // inflateHelmReleasesShared inflates all non-suspended HelmReleases and returns
 // a slice of YAML outputs. Shared by build and diff commands.
-func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository) [][]byte {
+func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository) [][]byte {
 	var outputs [][]byte
 	for _, hr := range helmReleases {
 		if hr.Spec.Suspend {
 			fmt.Fprintf(os.Stderr, "Skipping suspended HelmRelease %s/%s\n", hr.Metadata.Namespace, hr.Metadata.Name)
 			continue
 		}
-		if hr.Spec.Chart.Spec.Chart == "" {
-			continue
-		}
 
-		repoURL := resolveHelmRepoURL(hr, helmRepos)
-		if repoURL == "" {
-			continue
+		repoURL := ""
+
+		// ChartRef-based HR (Flux v2 OCIRepository pattern).
+		if hr.Spec.ChartRef != nil && hr.Spec.ChartRef.Kind == flux.KindOCIRepository {
+			repoURL = resolveOCIRepoURL(hr, ociRepos)
+			if repoURL == "" {
+				continue
+			}
+			// For OCIRepository, the URL is the full chart reference.
+			// Set chart name to the OCIRepository name for logging.
+			hr.Spec.Chart.Spec.Chart = hr.Spec.ChartRef.Name
+		} else {
+			// Traditional chart.spec pattern.
+			if hr.Spec.Chart.Spec.Chart == "" {
+				continue
+			}
+			repoURL = resolveHelmRepoURL(hr, helmRepos)
+			if repoURL == "" {
+				continue
+			}
 		}
 
 		fmt.Fprintf(os.Stderr, "Inflating HelmRelease %s/%s (chart: %s)...\n",
@@ -238,6 +254,20 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 		outputs = append(outputs, output)
 	}
 	return outputs
+}
+
+// resolveOCIRepoURL finds the OCIRepository URL for a HelmRelease's chartRef.
+func resolveOCIRepoURL(hr flux.HelmRelease, ociRepos []flux.OCIRepository) string {
+	if hr.Spec.ChartRef == nil {
+		return ""
+	}
+	repoNS := hr.Metadata.Namespace
+	for _, repo := range ociRepos {
+		if repo.Metadata.Name == hr.Spec.ChartRef.Name && repo.Metadata.Namespace == repoNS {
+			return repo.Spec.URL
+		}
+	}
+	return ""
 }
 
 // resolveHelmRepoURL finds the HelmRepository URL for a HelmRelease's chart.
@@ -270,6 +300,7 @@ func inflateHelmReleases(ctx context.Context, clusterPath string) (int, error) {
 	}
 
 	helmRepos, _ := parser.ParseHelmRepositories(ctx)
+	ociRepos, _ := parser.ParseOCIRepositories(ctx)
 
 	inflater, err := helm.NewInflater()
 	if err != nil {
@@ -277,7 +308,7 @@ func inflateHelmReleases(ctx context.Context, clusterPath string) (int, error) {
 	}
 
 	var totalSecrets int
-	for _, output := range inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos) {
+	for _, output := range inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos) {
 		totalSecrets += printRedacted(output)
 	}
 

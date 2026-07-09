@@ -73,11 +73,12 @@ func ApplySubstitution(data []byte, vars map[string]string) []byte {
 		inner := match[2 : len(match)-1] // strip ${ and }
 
 		// Check for := (assign default) or :- (use default if unset/empty).
+		// In bash (and Flux), both operators trigger on unset AND empty values.
 		for _, sep := range []string{":=", ":-"} {
 			if idx := strings.Index(inner, sep); idx >= 0 {
 				key := inner[:idx]
 				defaultVal := inner[idx+2:]
-				if val, ok := vars[key]; ok && (sep == ":=" || val != "") {
+				if val, ok := vars[key]; ok && val != "" {
 					return val
 				}
 				return defaultVal
