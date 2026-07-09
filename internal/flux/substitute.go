@@ -2,6 +2,7 @@ package flux
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -55,15 +56,42 @@ func ResolveSubstituteVars(ks Kustomization, configMaps []ConfigMap) map[string]
 	return vars
 }
 
-// ApplySubstitution replaces ${VAR} and $(VAR) patterns in YAML content with resolved values.
+// varPattern matches ${VAR}, ${VAR:=default}, ${VAR:-default}.
+var varPattern = regexp.MustCompile(`\$\{([^}]+)\}`)
+
+// ApplySubstitution replaces ${VAR}, ${VAR:=default}, ${VAR:-default},
+// and $(VAR) patterns in YAML content with resolved values.
+// Unresolved variables are left as-is (matching Flux behavior).
 func ApplySubstitution(data []byte, vars map[string]string) []byte {
 	if len(vars) == 0 {
 		return data
 	}
 
-	result := string(data)
+	// Handle ${...} patterns (including defaults).
+	result := varPattern.ReplaceAllStringFunc(string(data), func(match string) string {
+		inner := match[2 : len(match)-1] // strip ${ and }
+
+		// Check for := (assign default) or :- (use default if unset/empty).
+		for _, sep := range []string{":=", ":-"} {
+			if idx := strings.Index(inner, sep); idx >= 0 {
+				key := inner[:idx]
+				defaultVal := inner[idx+2:]
+				if val, ok := vars[key]; ok && val != "" {
+					return val
+				}
+				return defaultVal
+			}
+		}
+
+		// Simple ${VAR}.
+		if val, ok := vars[inner]; ok {
+			return val
+		}
+		return match // unresolved — keep as-is
+	})
+
+	// Handle $(VAR) syntax.
 	for key, value := range vars {
-		result = strings.ReplaceAll(result, "${"+key+"}", value)
 		result = strings.ReplaceAll(result, "$("+key+")", value)
 	}
 

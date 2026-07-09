@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"helm.sh/helm/v4/pkg/action"
 	"helm.sh/helm/v4/pkg/chart/common"
@@ -99,10 +100,18 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 }
 
 // FindHelmRepoURL finds the URL for a HelmRepository referenced by a HelmRelease.
+// For OCI repositories (type: oci), the URL is prefixed with oci:// as required
+// by the Helm SDK.
 func FindHelmRepoURL(repos []fluxtypes.HelmRepository, name, namespace string) (string, error) {
 	for _, repo := range repos {
 		if repo.Metadata.Name == name && repo.Metadata.Namespace == namespace {
-			return repo.Spec.URL, nil
+			url := repo.Spec.URL
+			if repo.Spec.Type == "oci" && !strings.HasPrefix(url, "oci://") {
+				url = strings.TrimPrefix(url, "https://")
+				url = strings.TrimPrefix(url, "http://")
+				url = "oci://" + url
+			}
+			return url, nil
 		}
 	}
 	return "", fmt.Errorf("HelmRepository %s/%s not found", namespace, name)

@@ -451,8 +451,9 @@ func reorderSingleDoc(doc []byte) []byte {
 	var sections []section
 
 	for _, line := range lines {
-		// Top-level key: no indentation and contains ":"
-		if len(line) > 0 && line[0] != ' ' && line[0] != '\t' && strings.Contains(line, ":") {
+		// Top-level key: no indentation, not a list item (-), not a comment (#),
+		// and contains ":".
+		if len(line) > 0 && line[0] != ' ' && line[0] != '\t' && line[0] != '-' && line[0] != '#' && strings.Contains(line, ":") {
 			key := strings.SplitN(line, ":", 2)[0]
 			sections = append(sections, section{key: key, lines: []string{line}})
 		} else if len(sections) > 0 {

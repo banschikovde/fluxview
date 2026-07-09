@@ -218,55 +218,111 @@ func buildHunk(ops []editOp, firstChange, lastChange, ctxLines int) hunk {
 	return h
 }
 
-// computeEditScript computes a minimal edit script using the LCS algorithm.
-func computeEditScript(original, modified []string) []editOp {
-	m, n := len(original), len(modified)
+// computeEditScript computes a minimal edit script using the Myers diff
+// algorithm. Time: O((N+M)D), Space: O((N+M)D) where D = number of edits.
+// For typical diffs where D is small, this is dramatically faster and uses
+// less memory than the O(NM) LCS approach.
+func computeEditScript(a, b []string) []editOp {
+	n, m := len(a), len(b)
 
-	// Build LCS table.
-	dp := make([][]int, m+1)
-	for i := range dp {
-		dp[i] = make([]int, n+1)
+	// Fast paths for empty inputs.
+	if n == 0 {
+		ops := make([]editOp, m)
+		for i := range b {
+			ops[i] = editOp{op: 'i', line: b[i]}
+		}
+		return ops
+	}
+	if m == 0 {
+		ops := make([]editOp, n)
+		for i := range a {
+			ops[i] = editOp{op: 'd', line: a[i]}
+		}
+		return ops
 	}
 
-	for i := 1; i <= m; i++ {
-		for j := 1; j <= n; j++ {
-			if original[i-1] == modified[j-1] {
-				dp[i][j] = dp[i-1][j-1] + 1
-			} else if dp[i-1][j] >= dp[i][j-1] {
-				dp[i][j] = dp[i-1][j]
+	max := n + m
+	offset := max
+	v := make([]int, 2*max+1)
+
+	// Store V snapshots for backtracking.
+	var trace [][]int
+	dFound := -1
+
+	for d := 0; d <= max && dFound < 0; d++ {
+		snap := make([]int, len(v))
+		copy(snap, v)
+		trace = append(trace, snap)
+
+		for k := -d; k <= d; k += 2 {
+			var x int
+			if k == -d || (k != d && v[k-1+offset] < v[k+1+offset]) {
+				x = v[k+1+offset] // down (insert)
 			} else {
-				dp[i][j] = dp[i][j-1]
+				x = v[k-1+offset] + 1 // right (delete)
+			}
+			y := x - k
+
+			for x < n && y < m && a[x] == b[y] {
+				x++
+				y++
+			}
+			v[k+offset] = x
+
+			if x >= n && y >= m {
+				dFound = d
+				break
 			}
 		}
 	}
 
-	// Backtrack to produce edit script (append in reverse, then reverse).
+	if dFound < 0 {
+		dFound = max
+	}
+
+	// Backtrack through trace to build edit script.
 	var ops []editOp
-	i, j := m, n
-	for i > 0 && j > 0 {
-		if original[i-1] == modified[j-1] {
-			ops = append(ops, editOp{op: 'e', line: original[i-1]})
-			i--
-			j--
-		} else if dp[i-1][j] >= dp[i][j-1] {
-			ops = append(ops, editOp{op: 'd', line: original[i-1]})
-			i--
+	x, y := n, m
+
+	for d := dFound; d > 0; d-- {
+		vPrev := trace[d]
+		k := x - y
+
+		var prevK int
+		if k == -d || (k != d && vPrev[k-1+offset] < vPrev[k+1+offset]) {
+			prevK = k + 1
 		} else {
-			ops = append(ops, editOp{op: 'i', line: modified[j-1]})
-			j--
+			prevK = k - 1
+		}
+
+		prevX := vPrev[prevK+offset]
+		prevY := prevX - prevK
+
+		// Snake (equal lines).
+		for x > prevX && y > prevY {
+			ops = append(ops, editOp{op: 'e', line: a[x-1]})
+			x--
+			y--
+		}
+
+		// Edit step.
+		if x == prevX {
+			ops = append(ops, editOp{op: 'i', line: b[y-1]})
+			y--
+		} else {
+			ops = append(ops, editOp{op: 'd', line: a[x-1]})
+			x--
 		}
 	}
 
-	for i > 0 {
-		ops = append(ops, editOp{op: 'd', line: original[i-1]})
-		i--
-	}
-	for j > 0 {
-		ops = append(ops, editOp{op: 'i', line: modified[j-1]})
-		j--
+	// Final snake at d=0.
+	for x > 0 && y > 0 {
+		ops = append(ops, editOp{op: 'e', line: a[x-1]})
+		x--
+		y--
 	}
 
-	// Reverse to get correct order.
+	// Reverse.
 	for l, r := 0, len(ops)-1; l < r; l, r = l+1, r-1 {
 		ops[l], ops[r] = ops[r], ops[l]
 	}
