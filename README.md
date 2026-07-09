@@ -56,6 +56,9 @@ docker run --rm -v $(pwd):/repo -v /path/to/crds:/crds \
 ### build — assemble resources
 
 ```bash
+# Build everything (Kustomizations + HelmReleases)
+fluxview build all --path clusters/prod/
+
 # Build all Kustomizations (with HelmRelease inflation)
 fluxview build ks --path clusters/prod/
 
@@ -65,6 +68,9 @@ fluxview build ks --path clusters/prod/ --namespace flux-system
 # Build without CRDs and noisy metadata attributes
 fluxview build ks --path clusters/prod/ --skip-crds --strip-attrs status,creationTimestamp
 
+# Inflate all HelmReleases
+fluxview build hr --path clusters/prod/
+
 # Inflate a specific HelmRelease
 fluxview build hr podinfo --path clusters/prod/
 ```
@@ -72,7 +78,10 @@ fluxview build hr podinfo --path clusters/prod/
 ### diff — compare changes
 
 ```bash
-# Diff against master
+# Diff everything (Kustomizations + HelmReleases)
+fluxview diff all --path clusters/prod/ --branch-orig master
+
+# Diff all Kustomizations against master
 fluxview diff ks --path clusters/prod/ --branch-orig master
 
 # Diff only resources in flux-system namespace

@@ -35,10 +35,12 @@ func newBuildCmd() *cobra.Command {
 Resource types:
   ks, kustomization   — build all Kustomizations (kustomize + helm inflation)
   hr, helmrelease     — inflate HelmRelease chart(s)
+  all                 — both ks and hr
 
 If [name] is omitted, all resources of the type are processed.
 
 Examples:
+  fluxview build all --path clusters/prod/
   fluxview build ks --path clusters/prod/
   fluxview build ks --path clusters/prod/ --skip-crds --strip-attrs status,creationTimestamp
   fluxview build hr --path clusters/prod/

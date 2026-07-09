@@ -42,10 +42,12 @@ git revision/branch and show the differences.
 Resource types:
   ks, kustomization   — diff kustomize build output
   hr, helmrelease     — diff helm template output
+  all                 — both ks and hr
 
 If [name] is omitted, all resources of the type are compared.
 
 Examples:
+  fluxview diff all --path clusters/prod/ --branch-orig master
   fluxview diff ks --path clusters/prod/
   fluxview diff hr --path clusters/prod/
   fluxview diff ks --path clusters/dev/ --branch-orig main --strip-attrs helm.sh/chart,status --skip-crds`,
