@@ -12,6 +12,7 @@ import (
 	"helm.sh/helm/v4/pkg/chart/common"
 	"helm.sh/helm/v4/pkg/chart/loader"
 	"helm.sh/helm/v4/pkg/cli"
+	"helm.sh/helm/v4/pkg/registry"
 	"helm.sh/helm/v4/pkg/release"
 	"helm.sh/helm/v4/pkg/storage"
 	"helm.sh/helm/v4/pkg/storage/driver"
@@ -62,14 +63,29 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 	}
 	install.Namespace = namespace
 
-	// Chart resolution options.
-	install.ChartPathOptions.RepoURL = repoURL
-	install.ChartPathOptions.Version = hr.Spec.Chart.Spec.Version
+	// Chart resolution: OCI repos need special handling.
+	// For OCI, don't set RepoURL — pass full OCI reference as chart name.
+	// See helm/helm#10191: setting RepoURL for OCI causes index.yaml fetch failure.
+	var chartRef string
+	if strings.HasPrefix(repoURL, "oci://") {
+		chartRef = strings.TrimSuffix(repoURL, "/") + "/" + chartName
+		install.ChartPathOptions.Version = hr.Spec.Chart.Spec.Version
+		// RegistryClient is needed for OCI pulls.
+		registryClient, err := registry.NewClient()
+		if err != nil {
+			return nil, fmt.Errorf("creating registry client: %w", err)
+		}
+		actionConfig.RegistryClient = registryClient
+	} else {
+		chartRef = chartName
+		install.ChartPathOptions.RepoURL = repoURL
+		install.ChartPathOptions.Version = hr.Spec.Chart.Spec.Version
+	}
 
 	// Locate the chart (downloads from repo if necessary).
-	chartPath, err := install.ChartPathOptions.LocateChart(chartName, in.settings)
+	chartPath, err := install.ChartPathOptions.LocateChart(chartRef, in.settings)
 	if err != nil {
-		return nil, fmt.Errorf("locating chart %s: %w", chartName, err)
+		return nil, fmt.Errorf("locating chart %s: %w", chartRef, err)
 	}
 
 	// Load the chart.

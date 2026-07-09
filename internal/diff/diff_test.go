@@ -181,3 +181,49 @@ func TestComputeLargeFileDiff(t *testing.T) {
 		t.Error("expected '+changed line' in diff")
 	}
 }
+
+func TestMyers_DuplicateLines(t *testing.T) {
+	// Multiple duplicate lines — common source of diff bugs.
+	result := Compute("a\nb\na\nb\nc\n", "a\nb\na\nb\nX\n")
+	if !result.HasDiff {
+		t.Fatal("expected diff")
+	}
+	if !strings.Contains(result.RawDiff, "+X") {
+		t.Error("expected +X in diff")
+	}
+	if !strings.Contains(result.RawDiff, "-c") {
+		t.Error("expected -c in diff")
+	}
+}
+
+func TestMyers_AllDifferent(t *testing.T) {
+	result := Compute("a\nb\nc\n", "x\ny\nz\n")
+	if !result.HasDiff {
+		t.Fatal("expected diff")
+	}
+	for _, line := range []string{"-a", "-b", "-c", "+x", "+y", "+z"} {
+		if !strings.Contains(result.RawDiff, line) {
+			t.Errorf("expected %q in diff", line)
+		}
+	}
+}
+
+func TestMyers_InsertInMiddle(t *testing.T) {
+	result := Compute("line1\nline2\nline3\n", "line1\nINSERTED\nline2\nline3\n")
+	if !result.HasDiff {
+		t.Fatal("expected diff")
+	}
+	if !strings.Contains(result.RawDiff, "+INSERTED") {
+		t.Error("expected +INSERTED")
+	}
+}
+
+func TestMyers_MultipleNonAdjacent(t *testing.T) {
+	result := Compute("a\nb\nc\nd\ne\n", "X\nb\nc\nY\ne\n")
+	if !result.HasDiff {
+		t.Fatal("expected diff")
+	}
+	if !strings.Contains(result.RawDiff, "+X") || !strings.Contains(result.RawDiff, "+Y") {
+		t.Error("expected both +X and +Y")
+	}
+}

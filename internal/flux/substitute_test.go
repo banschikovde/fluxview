@@ -255,3 +255,31 @@ func TestSubstituteNeeded(t *testing.T) {
 		})
 	}
 }
+
+func TestApplySubstitution_Defaults(t *testing.T) {
+	vars := map[string]string{"SET": "value", "EMPTY": ""}
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"simple resolved", "host: ${SET}", "host: value"},
+		{"unresolved becomes empty (Flux)", "host: ${UNSET}", "host: "},
+		{"assign default var set", "${SET:=def}", "value"},
+		{"assign default var unset", "${UNSET:=def}", "def"},
+		{"dash default var set", "${SET:-def}", "value"},
+		{"dash default var empty", "${EMPTY:-def}", "def"},
+		{"dash default var unset", "${UNSET:-def}", "def"},
+		{"assign default var empty", "${EMPTY:=def}", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := string(ApplySubstitution([]byte(tt.input), vars))
+			if result != tt.want {
+				t.Errorf("ApplySubstitution(%q) = %q, want %q", tt.input, result, tt.want)
+			}
+		})
+	}
+}

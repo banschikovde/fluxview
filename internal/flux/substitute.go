@@ -61,7 +61,8 @@ var varPattern = regexp.MustCompile(`\$\{([^}]+)\}`)
 
 // ApplySubstitution replaces ${VAR}, ${VAR:=default}, ${VAR:-default},
 // and $(VAR) patterns in YAML content with resolved values.
-// Unresolved variables are left as-is (matching Flux behavior).
+// Unresolved variables without a default are replaced with empty string,
+// matching Flux postBuild substitution behavior.
 func ApplySubstitution(data []byte, vars map[string]string) []byte {
 	if len(vars) == 0 {
 		return data
@@ -76,18 +77,18 @@ func ApplySubstitution(data []byte, vars map[string]string) []byte {
 			if idx := strings.Index(inner, sep); idx >= 0 {
 				key := inner[:idx]
 				defaultVal := inner[idx+2:]
-				if val, ok := vars[key]; ok && val != "" {
+				if val, ok := vars[key]; ok && (sep == ":=" || val != "") {
 					return val
 				}
 				return defaultVal
 			}
 		}
 
-		// Simple ${VAR}.
+		// Simple ${VAR} — Flux substitutes empty string for unresolved vars.
 		if val, ok := vars[inner]; ok {
 			return val
 		}
-		return match // unresolved — keep as-is
+		return ""
 	})
 
 	// Handle $(VAR) syntax.
