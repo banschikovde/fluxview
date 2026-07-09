@@ -34,7 +34,7 @@ Run against a local repo mounted as a volume:
 
 ```bash
 docker run --rm -v $(pwd):/repo -w /repo ghcr.io/banschikovde/fluxview:latest \
-  diff ks --path clusters/prod/ --branch-orig master --strip-attrs --skip-crds
+  diff ks --path clusters/prod/ --branch-orig master --strip-attrs helm.sh/chart,status --skip-crds
 ```
 
 Build locally:
@@ -63,7 +63,7 @@ fluxview build ks --path clusters/prod/
 fluxview build ks --path clusters/prod/ --namespace flux-system
 
 # Build without CRDs and noisy metadata attributes
-fluxview build ks --path clusters/prod/ --skip-crds --strip-attrs
+fluxview build ks --path clusters/prod/ --skip-crds --strip-attrs status,creationTimestamp
 
 # Inflate a specific HelmRelease
 fluxview build hr podinfo --path clusters/prod/
@@ -80,7 +80,7 @@ fluxview diff ks --path clusters/prod/ --branch-orig master --namespace flux-sys
 
 # With flux-local flags
 fluxview diff ks --path clusters/prod/ --branch-orig master \
-  --strip-attrs --skip-crds --unified 6
+  --strip-attrs helm.sh/chart,checksum/cm,status --skip-crds --unified 6
 
 # Diff a HelmRelease
 fluxview diff hr podinfo --path clusters/prod/
@@ -126,7 +126,7 @@ Missing schemas never break the pipeline — resources without a matching schema
 | `--color` | diff | Color mode: `auto`, `always`, `never` |
 | `--unified` | diff | Context lines (default: 3) |
 | `--skip-crds` | build, diff | Skip CustomResourceDefinition resources |
-| `--strip-attrs` | build, diff | Strip creationTimestamp, status, uid, etc. |
+| `--strip-attrs` | build, diff | Comma-separated keys to strip (e.g. `helm.sh/chart,status`) |
 | `--schema-dir` | validate | Schema files directory |
 
 ## Exit codes
@@ -157,7 +157,7 @@ fluxview:diff:
   image: ghcr.io/banschikovde/fluxview:latest
   script:
     - fluxview diff ks --path clusters/prod/ --branch-orig master
-        --strip-attrs --skip-crds --color never
+        --strip-attrs helm.sh/chart,checksum/cm,status --skip-crds --color never
   rules:
     - if: $CI_MERGE_REQUEST_ID
 ```

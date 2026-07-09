@@ -317,9 +317,11 @@ func parseAPIVersion(apiVersion string) (group, version string) {
 }
 
 // splitYAMLDocs splits multi-doc YAML by --- separators (text-based, fast).
+// Normalizes CRLF to LF first.
 func splitYAMLDocs(data []byte) []string {
+	normalized := strings.ReplaceAll(string(data), "\r\n", "\n")
 	var docs []string
-	for _, doc := range strings.Split(string(data), "\n---") {
+	for _, doc := range strings.Split(normalized, "\n---") {
 		s := strings.TrimSpace(doc)
 		s = strings.TrimPrefix(s, "---")
 		s = strings.TrimSpace(s)

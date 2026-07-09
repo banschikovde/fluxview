@@ -206,7 +206,7 @@ func buildKSOutput(ctx context.Context, clusterPath, repoRoot, name string) ([]b
 	configMaps, _ := resolveConfigMaps(ctx, clusterPath)
 
 	builder := kustomize.NewBuilder()
-	return buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, false, false)
+	return buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, false)
 }
 
 // buildKSOutputAtRevision builds the Kustomization output at a specific git revision.
@@ -248,7 +248,7 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 	// Use worktreePath as repoRoot so that recursive discovery and postBuild
 	// substitution work identically to the current state. External GitRepository
 	// resolution is disabled for diff (too expensive — clones remote repos).
-	return buildKSContent(ctx, builder, kustomizations, worktreePath, worktreeClusterPath, configMaps, false, true)
+	return buildKSContent(ctx, builder, kustomizations, worktreePath, worktreeClusterPath, configMaps, true)
 }
 
 // buildHROutput builds the HelmRelease output for the current working tree.
@@ -316,8 +316,8 @@ func buildHROutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 // follows Flux controller behavior: recursive discovery, postBuild substitution,
 // optional external GitRepository resolution) and then appends native kustomize
 // overlay outputs.
-func buildKSContent(ctx context.Context, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot, clusterPath string, configMaps []flux.ConfigMap, resolveExternal, quiet bool) ([]byte, error) {
-	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, configMaps, resolveExternal, quiet)
+func buildKSContent(ctx context.Context, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot, clusterPath string, configMaps []flux.ConfigMap, quiet bool) ([]byte, error) {
+	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, configMaps, quiet)
 	if err != nil {
 		return nil, err
 	}
@@ -341,19 +341,10 @@ func buildKSContent(ctx context.Context, builder *kustomize.Builder, kustomizati
 // (following Flux Kustomize controller behavior). When resolveExternal is true,
 // Kustomizations referencing external GitRepositories are cloned and built;
 // otherwise they are gracefully skipped.
-func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot string, configMaps []flux.ConfigMap, resolveExternal, quiet bool) ([]byte, error) {
+func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot string, configMaps []flux.ConfigMap, quiet bool) ([]byte, error) {
 	// Track already-processed KS by "namespace/name" to prevent duplicates.
 	seen := make(map[string]bool)
-	// Track discovered GitRepository resources for external source resolution.
-	gitRepos := make(map[string]flux.GitRepository)
 	var results []string
-	// Track external repo clones for cleanup.
-	var externalClones []string
-	defer func() {
-		for _, dir := range externalClones {
-			os.RemoveAll(dir)
-		}
-	}()
 
 	// Queue of KS to process.
 	queue := make([]flux.Kustomization, len(kustomizations))
@@ -378,38 +369,20 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 			// Include the Flux Kustomization resource itself (controller behavior).
 			ksYAML, _ := yaml.Marshal(ks)
 
-			// Resolve source path: first try local repo, then external GitRepository.
+			// Resolve source path from local repo.
 			sourcePath := resolveSourcePath(repoRoot, ks)
 			if sourcePath != "" {
 				if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
-					sourcePath = "" // Will try external.
+					sourcePath = ""
 				}
 			}
 
 			if sourcePath == "" {
-				if resolveExternal {
-					// Try to resolve from an external GitRepository.
-					extPath, cleanup, err := resolveExternalSource(ctx, ks, gitRepos)
-					if cleanup != "" {
-						externalClones = append(externalClones, cleanup)
-					}
-					if err != nil || extPath == "" {
-						fmt.Fprintf(os.Stderr, "Skipping %s/%s (source %s/%s not found)\n",
-							ks.Metadata.Namespace, ks.Metadata.Name,
-							ks.Spec.SourceRef.Kind, ks.Spec.SourceRef.Name)
-						if ksYAML != nil {
-							results = append(results, string(ksYAML))
-						}
-						continue
-					}
-					sourcePath = extPath
-				} else {
-					// External source resolution disabled — skip gracefully.
-					if ksYAML != nil {
-						results = append(results, string(ksYAML))
-					}
-					continue
+				// Source not found locally — skip gracefully (KS resource only).
+				if ksYAML != nil {
+					results = append(results, string(ksYAML))
 				}
+				continue
 			}
 
 			if !quiet {
@@ -435,13 +408,10 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 				}
 			}
 
-			// Scan output for new resources (KS and GitRepository).
-			newKS, newGitRepos := discoverResourcesFromOutput(output, seen)
+			// Scan output for new resources (KS only).
+			newKS := discoverResourcesFromOutput(output, seen)
 			if len(newKS) > 0 {
 				discoveredKS = append(discoveredKS, newKS...)
-			}
-			for k, v := range newGitRepos {
-				gitRepos[k] = v
 			}
 
 			// Prepend the Kustomization resource to the build output.
@@ -479,46 +449,11 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 	return []byte(combined), nil
 }
 
-// resolveExternalSource attempts to clone an external GitRepository and return
-// the source path for a Kustomization. Returns the source path, temp dir for
-// cleanup, and any error.
-func resolveExternalSource(ctx context.Context, ks flux.Kustomization, gitRepos map[string]flux.GitRepository) (string, string, error) {
-	if ks.Spec.SourceRef.Kind != flux.KindGitRepository {
-		return "", "", fmt.Errorf("unsupported source kind: %s", ks.Spec.SourceRef.Kind)
-	}
-
-	repoNS := ks.Spec.SourceRef.Namespace
-	if repoNS == "" {
-		repoNS = ks.Metadata.Namespace
-	}
-	repoKey := fmt.Sprintf("%s/%s", repoNS, ks.Spec.SourceRef.Name)
-
-	gitRepo, ok := gitRepos[repoKey]
-	if !ok {
-		return "", "", fmt.Errorf("GitRepository %s not found", repoKey)
-	}
-
-	ref := git.ResolveGitRepositoryRef(gitRepo.Spec.Ref)
-	fmt.Fprintf(os.Stderr, "Cloning external repository %s (ref: %s)...\n", gitRepo.Spec.URL, ref)
-
-	tmpDir, err := git.CloneExternalRepo(ctx, gitRepo.Spec.URL, ref)
-	if err != nil {
-		return "", "", fmt.Errorf("cloning %s: %w", gitRepo.Spec.URL, err)
-	}
-
-	// Build path within the cloned repo.
-	if ks.Spec.Path == "" {
-		return tmpDir, tmpDir, nil
-	}
-	return filepath.Join(tmpDir, ks.Spec.Path), tmpDir, nil
-}
-
-// discoverResourcesFromOutput parses build output for Flux Kustomization and
-// GitRepository resources that haven't been seen yet.
-func discoverResourcesFromOutput(data []byte, seen map[string]bool) ([]flux.Kustomization, map[string]flux.GitRepository) {
+// discoverResourcesFromOutput parses build output for Flux Kustomization
+// resources that haven't been seen yet.
+func discoverResourcesFromOutput(data []byte, seen map[string]bool) []flux.Kustomization {
 	docs := flux.SplitYAMLDocuments(data)
 	var ksResults []flux.Kustomization
-	gitRepoResults := make(map[string]flux.GitRepository)
 
 	for _, doc := range docs {
 		trimmed := strings.TrimSpace(doc)
@@ -544,19 +479,9 @@ func discoverResourcesFromOutput(data []byte, seen map[string]bool) ([]flux.Kust
 				ksResults = append(ksResults, ks)
 			}
 		}
-
-		// Discover GitRepository resources.
-		if meta.Kind == "GitRepository" && strings.HasPrefix(meta.APIVersion, "source.toolkit.fluxcd.io") {
-			var gr flux.GitRepository
-			if err := yaml.Unmarshal([]byte(trimmed), &gr); err != nil {
-				continue
-			}
-			key := fmt.Sprintf("%s/%s", gr.Metadata.Namespace, gr.Metadata.Name)
-			gitRepoResults[key] = gr
-		}
 	}
 
-	return ksResults, gitRepoResults
+	return ksResults
 }
 
 // buildSourcePath processes a Kustomization source path following the Flux

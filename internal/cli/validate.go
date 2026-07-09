@@ -109,7 +109,7 @@ func runValidateKS(ctx context.Context, clusterPath, repoRoot, name, namespace s
 	}
 
 	builder := kustomize.NewBuilder()
-	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, false, false)
+	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, false)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}

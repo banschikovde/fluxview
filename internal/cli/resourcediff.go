@@ -165,28 +165,6 @@ func stripAttrsNode(node *yaml.Node, attrs map[string]bool) {
 	}
 }
 
-// stripAttrsRecursive removes keys in attrs from m and all nested maps/slices.
-// Used by stripAllAttrs for build path (not diff).
-func stripAttrsRecursive(m map[string]interface{}, attrs map[string]bool) {
-	for k := range m {
-		if attrs[k] {
-			delete(m, k)
-		}
-	}
-	for _, val := range m {
-		switch v := val.(type) {
-		case map[string]interface{}:
-			stripAttrsRecursive(v, attrs)
-		case []interface{}:
-			for _, item := range v {
-				if nested, ok := item.(map[string]interface{}); ok {
-					stripAttrsRecursive(nested, attrs)
-				}
-			}
-		}
-	}
-}
-
 // parseAttrs parses a comma-separated string into a set of keys.
 func parseAttrs(s string) map[string]bool {
 	if s == "" {
@@ -211,7 +189,7 @@ func filterCRDDocs(data []byte) []byte {
 			Kind string `yaml:"kind"`
 		}
 		if err := yaml.Unmarshal([]byte(doc), &meta); err != nil {
-			log.Printf("Warning: skipping unparseable document in filterCRDDocs: %v", err)
+			result = append(result, doc) // keep unparseable docs — don't lose data
 			continue
 		}
 		if meta.Kind != "CustomResourceDefinition" {

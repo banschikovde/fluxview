@@ -38,7 +38,7 @@ Supported resource types:
 
 Examples:
   fluxview build ks --path clusters/prod/
-  fluxview build ks --path clusters/prod/ --skip-crds --strip-attrs
+  fluxview build ks --path clusters/prod/ --skip-crds --strip-attrs status,creationTimestamp
   fluxview build hr podinfo --path clusters/prod/`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -127,7 +127,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 
 	// Build the kustomize resources via SDK (shared logic with diff command).
 	builder := kustomize.NewBuilder()
-	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, false, false)
+	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, false)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}
