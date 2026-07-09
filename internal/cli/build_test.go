@@ -106,6 +106,65 @@ func TestReorderSingleDoc_ListItem(t *testing.T) {
 	}
 }
 
+func TestFilterKustomizations_ByName(t *testing.T) {
+	ks := []flux.Kustomization{
+		{Metadata: flux.ObjectMeta{Name: "base", Namespace: "flux-system"}},
+		{Metadata: flux.ObjectMeta{Name: "crds", Namespace: "flux-system"}},
+		{Metadata: flux.ObjectMeta{Name: "system", Namespace: "flux-system"}},
+	}
+
+	tests := []struct {
+		name string
+		args []flux.Kustomization
+		filter string
+		wantCount int
+		wantName string
+	}{
+		{"no filter returns all", ks, "", 3, ""},
+		{"filter by name", ks, "base", 1, "base"},
+		{"filter nonexistent", ks, "nonexistent", 0, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := filterKustomizations(tt.args, tt.filter)
+			if len(result) != tt.wantCount {
+				t.Errorf("got %d, want %d", len(result), tt.wantCount)
+			}
+			if tt.wantName != "" && len(result) > 0 && result[0].Metadata.Name != tt.wantName {
+				t.Errorf("got name %q, want %q", result[0].Metadata.Name, tt.wantName)
+			}
+		})
+	}
+}
+
+func TestFilterHelmReleases_ByName(t *testing.T) {
+	hr := []flux.HelmRelease{
+		{Metadata: flux.ObjectMeta{Name: "podinfo", Namespace: "default"}},
+		{Metadata: flux.ObjectMeta{Name: "metallb", Namespace: "metallb-system"}},
+	}
+
+	tests := []struct {
+		name string
+		args []flux.HelmRelease
+		filter string
+		wantCount int
+	}{
+		{"no filter returns all", hr, "", 2},
+		{"filter by name", hr, "podinfo", 1},
+		{"filter nonexistent", hr, "xyz", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := filterHelmReleases(tt.args, tt.filter)
+			if len(result) != tt.wantCount {
+				t.Errorf("got %d, want %d", len(result), tt.wantCount)
+			}
+		})
+	}
+}
+
 func TestResolveOCIRepoURL(t *testing.T) {
 	ociRepos := []flux.OCIRepository{
 		{Metadata: flux.ObjectMeta{Name: "chart-a", Namespace: "ns1"}, Spec: flux.OCIRepositorySpec{URL: "oci://registry.io/chart-a"}},
