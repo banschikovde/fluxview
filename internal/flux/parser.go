@@ -334,6 +334,25 @@ func SplitYAMLDocuments(data []byte) []string {
 	return docs
 }
 
+// SplitYAMLText splits multi-doc YAML by --- separators using plain text
+// operations. Normalizes CRLF to LF first. Faster than SplitYAMLDocuments
+// (which round-trips through yaml.Node) but does not normalize YAML formatting.
+// Note: does not track block scalar context — a literal "---" inside a
+// multiline block scalar (| or >) would be incorrectly treated as a separator.
+func SplitYAMLText(data []byte) []string {
+	normalized := strings.ReplaceAll(string(data), "\r\n", "\n")
+	var docs []string
+	for _, doc := range strings.Split(normalized, "\n---") {
+		s := strings.TrimSpace(doc)
+		s = strings.TrimPrefix(s, "---")
+		s = strings.TrimSpace(s)
+		if s != "" {
+			docs = append(docs, s)
+		}
+	}
+	return docs
+}
+
 // isKustomizeAPI checks if the apiVersion belongs to kustomize.toolkit.fluxcd.io.
 func isKustomizeAPI(apiVersion string) bool {
 	return strings.HasPrefix(apiVersion, GroupKustomizeToolkitFluxHelmIO)

@@ -39,7 +39,7 @@ type resourceDiffResult struct {
 // replaces the previous multi-step pipeline that parsed YAML 4+ times.
 func buildResourceMap(data []byte, flags *DiffFlags) map[resourceKey]string {
 	stripAttrs := parseAttrs(flags.StripAttrs)
-	docs := splitYAMLText(data)
+	docs := flux.SplitYAMLText(data)
 	result := make(map[resourceKey]string)
 
 	for _, doc := range docs {
@@ -86,32 +86,13 @@ func buildResourceMap(data []byte, flags *DiffFlags) map[resourceKey]string {
 			Namespace: meta.Metadata.Namespace,
 			Name:      meta.Metadata.Name,
 		}
-		if existing, exists := result[key]; exists {
+		if _, exists := result[key]; exists {
 			log.Printf("Warning: duplicate resource %s — overwriting previous entry", key)
-			_ = existing
 		}
 		result[key] = processed
 	}
 
 	return result
-}
-
-// splitYAMLText splits multi-doc YAML by --- separators using plain text
-// operations. Normalizes CRLF to LF first. Note: does not track block scalar
-// context — a literal "---" inside a multiline block scalar (| or >) would
-// be incorrectly treated as a separator. This is uncommon in kustomize output.
-func splitYAMLText(data []byte) []string {
-	normalized := strings.ReplaceAll(string(data), "\r\n", "\n")
-	var docs []string
-	for _, doc := range strings.Split(normalized, "\n---") {
-		s := strings.TrimSpace(doc)
-		s = strings.TrimPrefix(s, "---")
-		s = strings.TrimSpace(s)
-		if s != "" {
-			docs = append(docs, s)
-		}
-	}
-	return docs
 }
 
 // stripAttrsFromDoc removes the specified keys recursively from a YAML document.
@@ -182,7 +163,7 @@ func parseAttrs(s string) map[string]bool {
 
 // filterCRDDocs removes CustomResourceDefinition documents from multi-doc YAML.
 func filterCRDDocs(data []byte) []byte {
-	docs := splitYAMLText(data)
+	docs := flux.SplitYAMLText(data)
 	var result []string
 	for _, doc := range docs {
 		var meta struct {
@@ -204,7 +185,7 @@ func filterByNamespace(data []byte, namespace string) []byte {
 	if namespace == "" {
 		return data
 	}
-	docs := splitYAMLText(data)
+	docs := flux.SplitYAMLText(data)
 	var result []string
 	for _, doc := range docs {
 		var meta struct {
@@ -229,7 +210,7 @@ func stripAllAttrs(data []byte, attrsList string) []byte {
 	if attrs == nil {
 		return data
 	}
-	docs := splitYAMLText(data)
+	docs := flux.SplitYAMLText(data)
 	var result []string
 	for _, doc := range docs {
 		result = append(result, stripAttrsFromDoc(doc, attrs))

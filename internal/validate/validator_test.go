@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/banschikovde/fluxview/internal/flux"
 )
 
 func TestNew_EmptyDir(t *testing.T) {
@@ -211,7 +213,7 @@ func TestParseAPIVersion(t *testing.T) {
 
 func TestSplitYAMLDocs(t *testing.T) {
 	data := []byte("doc1: val1\n---\ndoc2: val2\n---\n\ndoc3: val3")
-	docs := splitYAMLDocs(data)
+	docs := flux.SplitYAMLText(data)
 	if len(docs) != 3 {
 		t.Fatalf("expected 3 docs, got %d", len(docs))
 	}

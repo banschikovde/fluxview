@@ -2,9 +2,6 @@ package flux
 
 import (
 	"bytes"
-	"fmt"
-	"io"
-	"os"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -16,28 +13,31 @@ const SecretRedactedValue = "*** (SECRET) ***"
 // RedactSecrets scans multi-document YAML and replaces secret data values
 // with a visual placeholder. Secret kind resources are preserved but their
 // data/stringData fields are replaced with "*** (SECRET) ***".
+// Documents are split by text first, so a broken document does not prevent
+// processing of subsequent ones.
 func RedactSecrets(data []byte) []byte {
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	docs := SplitYAMLText(data)
 	var buf bytes.Buffer
-	encoder := yaml.NewEncoder(&buf)
-	encoder.SetIndent(2)
 
-	for {
+	for i, doc := range docs {
+		if i > 0 {
+			buf.WriteString("\n---\n")
+		}
+
 		var node yaml.Node
-		if err := decoder.Decode(&node); err != nil {
-			if err != io.EOF {
-				fmt.Fprintf(os.Stderr, "Warning: YAML parse error, remaining documents skipped: %v\n", err)
-			}
-			break
+		if err := yaml.Unmarshal([]byte(doc), &node); err != nil {
+			// Can't parse — keep original text to avoid data loss.
+			buf.WriteString(doc)
+			continue
 		}
 
 		_ = redactSecretNode(&node)
 
-		if err := encoder.Encode(&node); err != nil {
-			break
-		}
+		enc := yaml.NewEncoder(&buf)
+		enc.SetIndent(2)
+		_ = enc.Encode(&node)
+		enc.Close()
 	}
-	encoder.Close()
 
 	return buf.Bytes()
 }
@@ -110,39 +110,20 @@ func getMapValue(mapping *yaml.Node, key string) *yaml.Node {
 }
 
 // CountSecrets returns the number of Secret resources in the multi-document YAML.
+// Documents are split by text first, so a broken document does not prevent
+// counting secrets in subsequent ones.
 func CountSecrets(data []byte) int {
 	count := 0
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-
-	for {
-		var node yaml.Node
-		if err := decoder.Decode(&node); err != nil {
-			if err != io.EOF {
-				fmt.Fprintf(os.Stderr, "Warning: YAML parse error in CountSecrets: %v\n", err)
-			}
-			break
+	for _, doc := range SplitYAMLText(data) {
+		var meta struct {
+			Kind string `yaml:"kind"`
 		}
-
-		if node.Kind != yaml.DocumentNode {
+		if yaml.Unmarshal([]byte(doc), &meta) != nil {
 			continue
 		}
-
-		var mapping *yaml.Node
-		for _, child := range node.Content {
-			if child.Kind == yaml.MappingNode {
-				mapping = child
-				break
-			}
-		}
-		if mapping == nil {
-			continue
-		}
-
-		kind := getMapValue(mapping, "kind")
-		if kind != nil && strings.ToLower(kind.Value) == "secret" {
+		if strings.EqualFold(meta.Kind, "secret") {
 			count++
 		}
 	}
-
 	return count
 }

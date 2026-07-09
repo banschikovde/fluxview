@@ -18,6 +18,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/kube-openapi/pkg/validation/spec"
+
+	"github.com/banschikovde/fluxview/internal/flux"
 )
 
 // fluxSchemaKinds maps Flux crd-schemas.tar.gz filenames (without extension)
@@ -237,7 +239,7 @@ type resourceMeta struct {
 func (v *Validator) Validate(data []byte) []Result {
 	var results []Result
 
-	for _, doc := range splitYAMLDocs(data) {
+	for _, doc := range flux.SplitYAMLText(data) {
 		trimmed := strings.TrimSpace(doc)
 		if trimmed == "" {
 			continue
@@ -314,20 +316,4 @@ func parseAPIVersion(apiVersion string) (group, version string) {
 		return parts[0], parts[1]
 	}
 	return "", parts[0]
-}
-
-// splitYAMLDocs splits multi-doc YAML by --- separators (text-based, fast).
-// Normalizes CRLF to LF first.
-func splitYAMLDocs(data []byte) []string {
-	normalized := strings.ReplaceAll(string(data), "\r\n", "\n")
-	var docs []string
-	for _, doc := range strings.Split(normalized, "\n---") {
-		s := strings.TrimSpace(doc)
-		s = strings.TrimPrefix(s, "---")
-		s = strings.TrimSpace(s)
-		if s != "" {
-			docs = append(docs, s)
-		}
-	}
-	return docs
 }

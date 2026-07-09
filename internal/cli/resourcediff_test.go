@@ -103,6 +103,32 @@ metadata:
 	}
 }
 
+func TestFilterCRDDocs_KeepsUnparseable(t *testing.T) {
+	data := []byte(`apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: widgets.example.com
+---
+::: broken yaml :::
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kept
+`)
+	result := filterCRDDocs(data)
+	resultStr := string(result)
+	if !contains(resultStr, "name: kept") {
+		t.Error("expected ConfigMap to be kept")
+	}
+	if contains(resultStr, "CustomResourceDefinition") {
+		t.Error("expected CRD to be filtered out")
+	}
+	if !contains(resultStr, "broken yaml") {
+		t.Error("expected unparseable doc to be kept (conservative behavior)")
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStr(s, substr))
 }
