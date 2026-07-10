@@ -1,9 +1,13 @@
 package git
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 func TestIsWithinDir(t *testing.T) {
@@ -32,46 +36,113 @@ func TestIsWithinDir(t *testing.T) {
 	}
 }
 
-// TestCloneToDir_SymlinkEscape verifies that symlinks pointing outside the
-// checkout directory are NOT created. A malicious commit could create a
-// symlink to /etc/passwd; without validation, subsequent file reads would
-// leak arbitrary file contents.
+// TestCloneToDir_SymlinkEscape creates a real git repo with a malicious
+// symlink (absolute target /etc/passwd), commits it, then calls CloneToDir
+// and verifies the symlink is NOT present in the checkout.
 func TestCloneToDir_SymlinkEscape(t *testing.T) {
-	// This test validates the isWithinDir logic used by CloneToDir's symlink
-	// guard. A full integration test would require a git repo with a malicious
-	// symlink commit, which is complex to set up in a unit test.
+	repoDir := t.TempDir()
+	repo, err := git.PlainInit(repoDir, false)
+	if err != nil {
+		t.Fatalf("PlainInit: %v", err)
+	}
 
-	tmpDir := t.TempDir()
+	// Create a symlink in the worktree pointing to an absolute path outside.
+	linkPath := filepath.Join(repoDir, "escape.yaml")
+	if err := os.Symlink("/etc/passwd", linkPath); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
 
-	// Simulate a symlink target that escapes the checkout.
-	escapeTarget := filepath.Join(t.TempDir(), "secret.txt")
-	if err := os.WriteFile(escapeTarget, []byte("sensitive"), 0o644); err != nil {
+	// Stage and commit the symlink.
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	if _, err := w.Add("escape.yaml"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	commitHash, err := w.Commit("malicious symlink", &git.CommitOptions{
+		Author: &object.Signature{Name: "test", Email: "test@test.com"},
+	})
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// CloneToDir should succeed (symlink is skipped, not fatal).
+	ops, err := NewOperations(repoDir)
+	if err != nil {
+		t.Fatalf("NewOperations: %v", err)
+	}
+
+	tmpDir, err := ops.CloneToDir(context.Background(), commitHash.String())
+	if err != nil {
+		t.Fatalf("CloneToDir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// The malicious symlink must NOT exist in the checkout.
+	linkInCheckout := filepath.Join(tmpDir, "escape.yaml")
+	if _, err := os.Lstat(linkInCheckout); !os.IsNotExist(err) {
+		t.Errorf("malicious symlink should not exist in checkout, got err: %v", err)
+	}
+}
+
+// TestCloneToDir_LegitimateSymlink verifies that intra-checkout symlinks
+// are preserved by CloneToDir.
+func TestCloneToDir_LegitimateSymlink(t *testing.T) {
+	repoDir := t.TempDir()
+	repo, err := git.PlainInit(repoDir, false)
+	if err != nil {
+		t.Fatalf("PlainInit: %v", err)
+	}
+
+	// Create a real file and a symlink to it within the repo.
+	if err := os.WriteFile(filepath.Join(repoDir, "real.yaml"), []byte("content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	// An absolute path symlink target should be rejected.
-	// Simulate how CloneToDir resolves it: absolute targets are used as-is.
-	if isWithinDir("/etc/passwd", tmpDir) {
-		t.Error("absolute symlink target outside checkout should be rejected")
+	if err := os.Symlink("real.yaml", filepath.Join(repoDir, "link.yaml")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
 	}
 
-	// A relative traversal target (../../outside) should also be rejected.
-	linkPath := filepath.Join(tmpDir, "subdir", "escape.yaml")
-	relTarget := filepath.Join("..", "..", "outside")
-	resolved2 := filepath.Join(filepath.Dir(linkPath), relTarget)
-	absResolved2, _ := filepath.Abs(resolved2)
-
-	if isWithinDir(absResolved2, tmpDir) {
-		t.Error("relative traversal symlink target should be rejected")
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	w.Add("real.yaml")
+	w.Add("link.yaml")
+	commitHash, err := w.Commit("legitimate symlink", &git.CommitOptions{
+		Author: &object.Signature{Name: "test", Email: "test@test.com"},
+	})
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
 	}
 
-	// A legitimate intra-checkout symlink should be allowed.
-	linkPath3 := filepath.Join(tmpDir, "subdir", "link.yaml")
-	intraTarget := "real.yaml"
-	resolved3 := filepath.Join(filepath.Dir(linkPath3), intraTarget)
-	absResolved3, _ := filepath.Abs(resolved3)
+	ops, err := NewOperations(repoDir)
+	if err != nil {
+		t.Fatalf("NewOperations: %v", err)
+	}
 
-	if !isWithinDir(absResolved3, tmpDir) {
-		t.Error("intra-checkout symlink target should be allowed")
+	tmpDir, err := ops.CloneToDir(context.Background(), commitHash.String())
+	if err != nil {
+		t.Fatalf("CloneToDir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// The symlink should exist and resolve to real.yaml.
+	linkInCheckout := filepath.Join(tmpDir, "link.yaml")
+	info, err := os.Lstat(linkInCheckout)
+	if err != nil {
+		t.Fatalf("legitimate symlink should exist in checkout: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Error("expected symlink, got regular file")
+	}
+
+	// Reading through the symlink should work.
+	content, err := os.ReadFile(linkInCheckout)
+	if err != nil {
+		t.Fatalf("reading through symlink: %v", err)
+	}
+	if string(content) != "content" {
+		t.Errorf("symlink content = %q, want %q", string(content), "content")
 	}
 }
