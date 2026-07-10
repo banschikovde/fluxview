@@ -112,6 +112,13 @@ func (fs *restrictedFs) Open(path string) (filesys.File, error) {
 	return fs.FileSystem.Open(path)
 }
 
+func (fs *restrictedFs) Create(path string) (filesys.File, error) {
+	if !fs.isWithinRoot(path) {
+		return nil, fmt.Errorf("path %s is outside repository root", path)
+	}
+	return fs.FileSystem.Create(path)
+}
+
 func (fs *restrictedFs) IsDir(path string) bool {
 	if !fs.isWithinRoot(path) {
 		return false
@@ -131,6 +138,67 @@ func (fs *restrictedFs) ReadDir(path string) ([]string, error) {
 		return nil, fmt.Errorf("path %s is outside repository root", path)
 	}
 	return fs.FileSystem.ReadDir(path)
+}
+
+func (fs *restrictedFs) WriteFile(path string, data []byte) error {
+	if !fs.isWithinRoot(path) {
+		return fmt.Errorf("path %s is outside repository root", path)
+	}
+	return fs.FileSystem.WriteFile(path, data)
+}
+
+func (fs *restrictedFs) Mkdir(path string) error {
+	if !fs.isWithinRoot(path) {
+		return fmt.Errorf("path %s is outside repository root", path)
+	}
+	return fs.FileSystem.Mkdir(path)
+}
+
+func (fs *restrictedFs) MkdirAll(path string) error {
+	if !fs.isWithinRoot(path) {
+		return fmt.Errorf("path %s is outside repository root", path)
+	}
+	return fs.FileSystem.MkdirAll(path)
+}
+
+func (fs *restrictedFs) RemoveAll(path string) error {
+	if !fs.isWithinRoot(path) {
+		return fmt.Errorf("path %s is outside repository root", path)
+	}
+	return fs.FileSystem.RemoveAll(path)
+}
+
+func (fs *restrictedFs) Glob(pattern string) ([]string, error) {
+	// Glob patterns are hard to validate statically. Delegate and filter results.
+	matches, err := fs.FileSystem.Glob(pattern)
+	if err != nil {
+		return nil, err
+	}
+	var filtered []string
+	for _, m := range matches {
+		if fs.isWithinRoot(m) {
+			filtered = append(filtered, m)
+		}
+	}
+	return filtered, nil
+}
+
+func (fs *restrictedFs) Walk(path string, walkFn filepath.WalkFunc) error {
+	if !fs.isWithinRoot(path) {
+		return fmt.Errorf("path %s is outside repository root", path)
+	}
+	return fs.FileSystem.Walk(path, walkFn)
+}
+
+func (fs *restrictedFs) CleanedAbs(path string) (filesys.ConfirmedDir, string, error) {
+	dir, file, err := fs.FileSystem.CleanedAbs(path)
+	if err != nil {
+		return dir, file, err
+	}
+	if !fs.isWithinRoot(dir.String()) {
+		return dir, "", fmt.Errorf("path %s is outside repository root", path)
+	}
+	return dir, file, nil
 }
 
 // findKustomizationFile returns the path to the kustomization file, or empty string if not found.
