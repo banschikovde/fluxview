@@ -5,11 +5,11 @@ import (
 	"testing"
 )
 
-// TestRunBuild_AllWithName verifies that 'all' + name is rejected.
-func TestRunBuild_AllWithName(t *testing.T) {
-	err := runBuild(context.Background(), []string{"all", "podinfo"}, &BuildFlags{})
+// TestRunBuild_NoResourceType verifies that missing resource type is rejected.
+func TestRunBuild_NoResourceType(t *testing.T) {
+	err := runBuild(context.Background(), []string{}, &BuildFlags{})
 	if err == nil {
-		t.Fatal("expected error for 'all' with name")
+		t.Fatal("expected error for missing resource type")
 	}
 	exitErr, ok := err.(*DiffExitError)
 	if !ok {
@@ -20,11 +20,11 @@ func TestRunBuild_AllWithName(t *testing.T) {
 	}
 }
 
-// TestRunDiff_AllWithName verifies that 'all' + name is rejected.
-func TestRunDiff_AllWithName(t *testing.T) {
-	err := runDiff(context.Background(), []string{"all", "podinfo"}, &DiffFlags{})
+// TestRunDiff_NoResourceType verifies that missing resource type is rejected.
+func TestRunDiff_NoResourceType(t *testing.T) {
+	err := runDiff(context.Background(), []string{}, &DiffFlags{})
 	if err == nil {
-		t.Fatal("expected error for 'all' with name")
+		t.Fatal("expected error for missing resource type")
 	}
 	exitErr, ok := err.(*DiffExitError)
 	if !ok {
@@ -36,7 +36,7 @@ func TestRunDiff_AllWithName(t *testing.T) {
 }
 
 // TestRunBuild_UnsupportedResourceType verifies that unsupported resource
-// types produce a clear error message mentioning 'all' as an option.
+// types produce a clear error message.
 func TestRunBuild_UnsupportedResourceType(t *testing.T) {
 	tests := []struct {
 		resourceType string
@@ -46,7 +46,7 @@ func TestRunBuild_UnsupportedResourceType(t *testing.T) {
 		{"kustomization", false},
 		{"hr", false},
 		{"helmrelease", false},
-		{"all", false},
+		{"all", true},
 		{"xyz", true},
 		{"", true},
 	}
@@ -71,7 +71,7 @@ func TestRunBuild_UnsupportedResourceType(t *testing.T) {
 }
 
 // TestRunDiff_UnsupportedResourceType verifies that unsupported resource
-// types produce a clear error message mentioning 'all' as an option.
+// types produce a clear error message.
 func TestRunDiff_UnsupportedResourceType(t *testing.T) {
 	tests := []struct {
 		resourceType string
@@ -81,7 +81,7 @@ func TestRunDiff_UnsupportedResourceType(t *testing.T) {
 		{"kustomization", false},
 		{"hr", false},
 		{"helmrelease", false},
-		{"all", false},
+		{"all", true},
 		{"xyz", true},
 		{"", true},
 	}

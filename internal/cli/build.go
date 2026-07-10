@@ -30,20 +30,17 @@ func newBuildCmd() *cobra.Command {
 	flags := &BuildFlags{}
 
 	cmd := &cobra.Command{
-		Use:   "build [resource] [name] [flags]",
+		Use:   "build <resource> [name] [flags]",
 		Short: "Build (assemble) Flux Kustomization or HelmRelease resources",
 		Long: `Build Flux resources from a local git repository.
 
 Resource types:
   ks, kustomization   — build all Kustomizations (kustomize + helm inflation)
   hr, helmrelease     — inflate HelmRelease chart(s)
-  all                 — both ks and hr (default if not specified)
 
 If [name] is omitted, all resources of the type are processed.
 
 Examples:
-  fluxview build --path clusters/prod/flux/
-  fluxview build all --path clusters/prod/flux/
   fluxview build ks --path clusters/prod/flux/
   fluxview build ks --path clusters/prod/flux/ --skip-crds --strip-attrs status,creationTimestamp
   fluxview build hr --path clusters/prod/flux/
@@ -62,11 +59,12 @@ Examples:
 }
 
 func runBuild(ctx context.Context, args []string, flags *BuildFlags) error {
-	resourceType := "all"
-	var name string
-	if len(args) > 0 {
-		resourceType = args[0]
+	if len(args) == 0 {
+		return NewExitError(fmt.Errorf("resource type required (use 'ks' or 'hr')"), ExitCodeError)
 	}
+
+	resourceType := args[0]
+	var name string
 	if len(args) > 1 {
 		name = args[1]
 	}
@@ -99,16 +97,8 @@ func runBuild(ctx context.Context, args []string, flags *BuildFlags) error {
 		return runBuildKS(ctx, absClusterPath, repoRoot, name, flags)
 	case "hr", "helmrelease":
 		return runBuildHR(ctx, absClusterPath, repoRoot, name, flags)
-	case "all":
-		if name != "" {
-			return NewExitError(fmt.Errorf("cannot use name with 'all' — specify 'ks' or 'hr' when filtering by name"), ExitCodeError)
-		}
-		if err := runBuildKS(ctx, absClusterPath, repoRoot, name, flags); err != nil {
-			return err
-		}
-		return runBuildHR(ctx, absClusterPath, repoRoot, name, flags)
 	default:
-		return NewExitError(fmt.Errorf("unsupported resource type %q (use 'ks', 'hr', or 'all')", resourceType), ExitCodeError)
+		return NewExitError(fmt.Errorf("unsupported resource type %q (use 'ks' or 'hr')", resourceType), ExitCodeError)
 	}
 }
 
