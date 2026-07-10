@@ -107,6 +107,11 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 		return nil
 	}
 
+	// Check for interruption before validation
+	if err := CheckInterrupted(ctx); err != nil {
+		return err
+	}
+
 	// CRDs are schema definitions, not resources to validate — always skip.
 	output = filterCRDDocs(output)
 
