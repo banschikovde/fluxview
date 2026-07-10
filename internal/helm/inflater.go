@@ -86,6 +86,7 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 				return nil, fmt.Errorf("creating registry client: %w", err)
 			}
 			actionConfig.RegistryClient = registryClient
+			install.SetRegistryClient(registryClient)
 		case strings.HasPrefix(repoURL, "oci://"):
 			// HelmRepository type=oci: append chart name to repo URL.
 			chartRef = strings.TrimSuffix(repoURL, "/") + "/" + chartName
@@ -104,6 +105,7 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 				return nil, fmt.Errorf("creating registry client: %w", err)
 			}
 			actionConfig.RegistryClient = registryClient
+			install.SetRegistryClient(registryClient)
 		default:
 		// Traditional HTTP HelmRepository.
 		chartRef = chartName
