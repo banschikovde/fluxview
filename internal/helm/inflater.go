@@ -42,7 +42,7 @@ func NewInflater() (*Inflater, error) {
 // InflateHelmRelease inflates a Flux HelmRelease resource using the Helm Go SDK.
 // It locates/downloads the chart from the given repo URL and renders templates
 // equivalent to: helm template <name> <chart> --repo <url> --version <ver> --namespace <ns> --include-crds
-func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRelease, repoURL string, configMaps []fluxtypes.ConfigMap, secrets []fluxtypes.Secret) ([]byte, error) {
+func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRelease, repoURL string, username, password string, configMaps []fluxtypes.ConfigMap, secrets []fluxtypes.Secret) ([]byte, error) {
 	chartName := hr.Spec.Chart.Spec.Chart
 
 	// Set up the action configuration for template rendering (no k8s cluster needed).
@@ -76,6 +76,13 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 		if err != nil {
 			return nil, fmt.Errorf("creating registry client: %w", err)
 		}
+		// Set credentials for OCI registry if provided.
+		if username != "" && password != "" {
+			registryClient, err = registry.NewClient(registry.ClientOptBasicAuth(username, password))
+			if err != nil {
+				return nil, fmt.Errorf("creating registry client with auth: %w", err)
+			}
+		}
 		actionConfig.RegistryClient = registryClient
 	case strings.HasPrefix(repoURL, "oci://"):
 		// HelmRepository type=oci: append chart name to repo URL.
@@ -85,12 +92,24 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 		if err != nil {
 			return nil, fmt.Errorf("creating registry client: %w", err)
 		}
+		// Set credentials for OCI registry if provided.
+		if username != "" && password != "" {
+			registryClient, err = registry.NewClient(registry.ClientOptBasicAuth(username, password))
+			if err != nil {
+				return nil, fmt.Errorf("creating registry client with auth: %w", err)
+			}
+		}
 		actionConfig.RegistryClient = registryClient
 	default:
 		// Traditional HTTP HelmRepository.
 		chartRef = chartName
 		install.ChartPathOptions.RepoURL = repoURL
 		install.ChartPathOptions.Version = hr.Spec.Chart.Spec.Version
+		// Set credentials for HTTP repository if provided.
+		if username != "" && password != "" {
+			install.ChartPathOptions.Username = username
+			install.ChartPathOptions.Password = password
+		}
 	}
 
 	// Locate the chart (downloads from repo if necessary).
@@ -137,7 +156,7 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 // FindHelmRepoURL finds the URL for a HelmRepository referenced by a HelmRelease.
 // For OCI repositories (type: oci), the URL is prefixed with oci:// as required
 // by the Helm SDK.
-func FindHelmRepoURL(repos []fluxtypes.HelmRepository, name, namespace string) (string, error) {
+func FindHelmRepoURL(repos []fluxtypes.HelmRepository, name, namespace string, secrets []fluxtypes.Secret) (string, string, string, error) {
 	for _, repo := range repos {
 		if repo.Metadata.Name == name && repo.Metadata.Namespace == namespace {
 			url := repo.Spec.URL
@@ -146,8 +165,22 @@ func FindHelmRepoURL(repos []fluxtypes.HelmRepository, name, namespace string) (
 				url = strings.TrimPrefix(url, "http://")
 				url = "oci://" + url
 			}
-			return url, nil
+
+			username := ""
+			password := ""
+			if repo.Spec.SecretRef != nil {
+				secretNS := namespace
+				for _, secret := range secrets {
+					if secret.Metadata.Name == repo.Spec.SecretRef.Name && secret.Metadata.Namespace == secretNS {
+						username = secret.Data["username"]
+						password = secret.Data["password"]
+						break
+					}
+				}
+			}
+
+			return url, username, password, nil
 		}
 	}
-	return "", fmt.Errorf("HelmRepository %s/%s not found", namespace, name)
+	return "", "", "", fmt.Errorf("HelmRepository %s/%s not found", namespace, name)
 }

@@ -254,6 +254,8 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 		}
 
 		var repoURL string
+		var username string
+		var password string
 
 		// ChartRef-based HR (Flux v2 OCIRepository pattern).
 		if hr.Spec.ChartRef != nil && hr.Spec.ChartRef.Kind == flux.KindOCIRepository {
@@ -269,7 +271,7 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 			if hr.Spec.Chart.Spec.Chart == "" {
 				continue
 			}
-			repoURL = resolveHelmRepoURL(hr, helmRepos)
+			repoURL, username, password = resolveHelmRepoURL(hr, helmRepos, secrets)
 			if repoURL == "" {
 				continue
 			}
@@ -278,7 +280,7 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 		fmt.Fprintf(os.Stderr, "Inflating HelmRelease %s/%s (chart: %s)...\n",
 			hr.Metadata.Namespace, hr.Metadata.Name, hr.Spec.Chart.Spec.Chart)
 
-		output, err := inflater.InflateHelmRelease(ctx, hr, repoURL, configMaps, secrets)
+		output, err := inflater.InflateHelmRelease(ctx, hr, repoURL, username, password, configMaps, secrets)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to inflate HelmRelease %s/%s: %v\n",
 				hr.Metadata.Namespace, hr.Metadata.Name, err)
@@ -319,20 +321,20 @@ func resolveOCIRepoURL(hr flux.HelmRelease, ociRepos []flux.OCIRepository) (stri
 }
 
 // resolveHelmRepoURL finds the HelmRepository URL for a HelmRelease's chart.
-func resolveHelmRepoURL(hr flux.HelmRelease, helmRepos []flux.HelmRepository) string {
+func resolveHelmRepoURL(hr flux.HelmRelease, helmRepos []flux.HelmRepository, secrets []flux.Secret) (string, string, string) {
 	sourceRef := hr.Spec.Chart.Spec.SourceRef
 	if sourceRef.Kind != flux.KindHelmRepository {
-		return ""
+		return "", "", ""
 	}
 	repoNS := sourceRef.Namespace
 	if repoNS == "" {
 		repoNS = hr.Metadata.Namespace
 	}
-	url, err := helm.FindHelmRepoURL(helmRepos, sourceRef.Name, repoNS)
+	url, username, password, err := helm.FindHelmRepoURL(helmRepos, sourceRef.Name, repoNS, secrets)
 	if err != nil || url == "" {
-		return ""
+		return "", "", ""
 	}
-	return url
+	return url, username, password
 }
 
 // inflateHelmReleases scans for HelmRelease resources in the cluster path and inflates them.
