@@ -147,11 +147,13 @@ func runDiffKS(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 }
 
 func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, compareCommit string, flags *DiffFlags) error {
+	fmt.Fprintf(os.Stderr, "Building current state from %s\n", clusterPath)
 	currentOutput, err := buildHROutput(ctx, clusterPath, repoRoot, name)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building current state: %w", err), ExitCodeError)
 	}
 
+	fmt.Fprintf(os.Stderr, "Building comparison state at %s\n", compareCommit)
 	compareOutput, err := buildHROutputAtRevision(ctx, gitOps, clusterPath, repoRoot, name, compareCommit)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, err), ExitCodeError)
