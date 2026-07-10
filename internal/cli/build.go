@@ -170,7 +170,7 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return NewExitError(fmt.Errorf("no Kustomization files found in %s", clusterPath), ExitCodeError)
 	}
 
-	output, err := buildHRInflation(ctx, clusterPath, repoRoot, name, flags.Namespace)
+	output, err := buildHRInflation(ctx, clusterPath, repoRoot, name, flags.Namespace, false)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}

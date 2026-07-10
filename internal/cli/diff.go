@@ -155,7 +155,7 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	if !hasDirectKS {
 		return NewExitError(fmt.Errorf("no Kustomization files found in %s", clusterPath), ExitCodeError)
 	}
-	currentOutput, err := buildHRInflation(ctx, clusterPath, repoRoot, name, flags.Namespace)
+	currentOutput, err := buildHRInflation(ctx, clusterPath, repoRoot, name, flags.Namespace, false)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building current state: %w", err), ExitCodeError)
 	}
@@ -176,7 +176,7 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	if _, err := os.Stat(worktreeClusterPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Warning: path %s does not exist at revision %s\n", relPath, compareCommit)
 	} else {
-		compareOutput, err := buildHRInflation(ctx, worktreeClusterPath, worktreePath, name, flags.Namespace)
+		compareOutput, err := buildHRInflation(ctx, worktreeClusterPath, worktreePath, name, flags.Namespace, true)
 		if err != nil {
 			return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, err), ExitCodeError)
 		}
@@ -522,8 +522,8 @@ func readYAMLFilesRecursive(dir string) ([]byte, error) {
 }
 
 // inflateAllHelmReleases inflates all HelmRelease resources and returns combined YAML.
-func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository, configMaps []flux.ConfigMap, secrets []flux.Secret) ([]byte, error) {
-	outputs := inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets, false)
+func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository, configMaps []flux.ConfigMap, secrets []flux.Secret, quiet bool) ([]byte, error) {
+	outputs := inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets, false, quiet)
 	if len(outputs) == 0 {
 		return nil, nil
 	}

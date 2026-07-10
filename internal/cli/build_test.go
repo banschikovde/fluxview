@@ -735,7 +735,7 @@ func TestInflateHelmReleasesShared_WarnOnMissingSource(t *testing.T) {
 	}
 
 	stderr := captureStderr(func() {
-		outputs := inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false)
+		outputs := inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, false)
 		if len(outputs) != 0 {
 			t.Errorf("expected 0 outputs (source unresolved), got %d", len(outputs))
 		}
