@@ -195,6 +195,71 @@ func TopologicalSort(kustomizations []Kustomization) ([]Kustomization, error) {
 	return sorted, nil
 }
 
+// TopologicalSortHelmReleases sorts HelmReleases by their dependsOn dependencies.
+// Returns an ordered list where dependencies come before dependents.
+// Returns an error if a circular dependency is detected.
+func TopologicalSortHelmReleases(helmReleases []HelmRelease) ([]HelmRelease, error) {
+	// Build a name -> index map.
+	nameToIdx := make(map[string]int)
+	for i, hr := range helmReleases {
+		key := hr.Metadata.Namespace + "/" + hr.Metadata.Name
+		nameToIdx[key] = i
+	}
+
+	// Build adjacency list (dependency graph).
+	// edge from A -> B means A depends on B (B must come before A).
+	graph := make(map[int][]int)
+	inDegree := make(map[int]int)
+
+	for i := range helmReleases {
+		inDegree[i] = 0
+	}
+
+	for i, hr := range helmReleases {
+		for _, dep := range hr.Spec.DependsOn {
+			depNS := dep.Namespace
+			if depNS == "" {
+				depNS = hr.Metadata.Namespace
+			}
+			depKey := depNS + "/" + dep.Name
+			if depIdx, ok := nameToIdx[depKey]; ok {
+				graph[depIdx] = append(graph[depIdx], i)
+				inDegree[i]++
+			}
+			// If dependency not found in our list, ignore it
+			// (might be external or already processed)
+		}
+	}
+
+	// Kahn's algorithm for topological sort.
+	var queue []int
+	for i := range helmReleases {
+		if inDegree[i] == 0 {
+			queue = append(queue, i)
+		}
+	}
+
+	var sorted []HelmRelease
+	for len(queue) > 0 {
+		idx := queue[0]
+		queue = queue[1:]
+		sorted = append(sorted, helmReleases[idx])
+
+		for _, next := range graph[idx] {
+			inDegree[next]--
+			if inDegree[next] == 0 {
+				queue = append(queue, next)
+			}
+		}
+	}
+
+	if len(sorted) != len(helmReleases) {
+		return nil, fmt.Errorf("circular dependency detected in HelmRelease resources")
+	}
+
+	return sorted, nil
+}
+
 // SubstituteNeeded returns true if the Kustomization has postBuild substitution configured.
 func SubstituteNeeded(ks Kustomization) bool {
 	return ks.Spec.PostBuild != nil && !ks.Spec.PostBuild.DisableSubstitute &&

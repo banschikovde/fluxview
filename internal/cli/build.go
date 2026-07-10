@@ -183,6 +183,12 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return NewExitError(fmt.Errorf("parsing HelmRelease resources: %w", err), ExitCodeError)
 	}
 
+	// Sort HelmReleases by dependency order.
+	helmReleases, err = flux.TopologicalSortHelmReleases(helmReleases)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v, processing in original order\n", err)
+	}
+
 	helmReleases = filterHelmReleases(helmReleases, name)
 	if len(helmReleases) == 0 {
 		if name != "" {
