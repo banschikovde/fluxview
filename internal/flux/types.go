@@ -32,6 +32,19 @@ type Kustomization struct {
 	Spec       KustomizationSpec `yaml:"spec"`
 }
 
+func (k Kustomization) ident() string { return k.Metadata.Namespace + "/" + k.Metadata.Name }
+func (k Kustomization) depKeys() []string {
+	keys := make([]string, 0, len(k.Spec.DependsOn))
+	for _, dep := range k.Spec.DependsOn {
+		ns := dep.Namespace
+		if ns == "" {
+			ns = k.Metadata.Namespace
+		}
+		keys = append(keys, ns+"/"+dep.Name)
+	}
+	return keys
+}
+
 // KustomizationSpec holds the spec for a Flux Kustomization.
 type KustomizationSpec struct {
 	// SourceRef references a GitRepository or other source.
@@ -94,6 +107,19 @@ type HelmRelease struct {
 	Kind       string          `yaml:"kind"`
 	Metadata   ObjectMeta      `yaml:"metadata"`
 	Spec       HelmReleaseSpec `yaml:"spec"`
+}
+
+func (h HelmRelease) ident() string { return h.Metadata.Namespace + "/" + h.Metadata.Name }
+func (h HelmRelease) depKeys() []string {
+	keys := make([]string, 0, len(h.Spec.DependsOn))
+	for _, dep := range h.Spec.DependsOn {
+		ns := dep.Namespace
+		if ns == "" {
+			ns = h.Metadata.Namespace
+		}
+		keys = append(keys, ns+"/"+dep.Name)
+	}
+	return keys
 }
 
 // HelmReleaseSpec holds the spec for a Flux HelmRelease.

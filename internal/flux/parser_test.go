@@ -364,9 +364,9 @@ func TestIsYAMLFile(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
-			got := isYAMLFile(tt.path)
+			got := IsYAMLFile(tt.path)
 			if got != tt.want {
-				t.Errorf("isYAMLFile(%q) = %v, want %v", tt.path, got, tt.want)
+				t.Errorf("IsYAMLFile(%q) = %v, want %v", tt.path, got, tt.want)
 			}
 		})
 	}

@@ -82,135 +82,58 @@ func isNativeKustomize(kust nativeKustomization) bool {
 // name transformers applied by kustomize (e.g. a top-level `namespace:` field
 // in kustomization.yaml) are reflected, unlike parsing the raw HelmRelease
 // file directly from disk.
+// parseResourcesFromBytes is the generic implementation behind all
+// ParseXxxFromBytes functions: split YAML → filter by kind/apiVersion → unmarshal.
+func parseResourcesFromBytes[T any](data []byte, match func(kind, apiVersion string) bool) ([]T, error) {
+	var results []T
+
+	for _, doc := range SplitYAMLDocuments(data) {
+		trimmed := strings.TrimSpace(doc)
+		if trimmed == "" {
+			continue
+		}
+
+		var meta struct {
+			APIVersion string `yaml:"apiVersion"`
+			Kind       string `yaml:"kind"`
+		}
+		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
+			continue
+		}
+		if !match(meta.Kind, meta.APIVersion) {
+			continue
+		}
+
+		var item T
+		if err := yaml.Unmarshal([]byte(trimmed), &item); err != nil {
+			continue
+		}
+		results = append(results, item)
+	}
+
+	return results, nil
+}
+
 func ParseHelmReleasesFromBytes(data []byte) ([]HelmRelease, error) {
-	var results []HelmRelease
-
-	docs := SplitYAMLDocuments(data)
-	for _, doc := range docs {
-		trimmed := strings.TrimSpace(doc)
-		if trimmed == "" {
-			continue
-		}
-
-		var meta struct {
-			APIVersion string `yaml:"apiVersion"`
-			Kind       string `yaml:"kind"`
-		}
-		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
-			continue
-		}
-		if meta.Kind != KindHelmRelease || !isHelmAPI(meta.APIVersion) {
-			continue
-		}
-
-		var hr HelmRelease
-		if err := yaml.Unmarshal([]byte(trimmed), &hr); err != nil {
-			continue
-		}
-		results = append(results, hr)
-	}
-
-	return results, nil
+	return parseResourcesFromBytes[HelmRelease](data, func(kind, api string) bool {
+		return kind == KindHelmRelease && isHelmAPI(api)
+	})
 }
 
-// ParseHelmRepositoriesFromBytes parses HelmRepository resources from YAML
-// output bytes. Used to extract HelmRepositories from kustomize build output
-// so that namespace transformers are reflected (matching the HelmRelease's
-// transformed namespace).
 func ParseHelmRepositoriesFromBytes(data []byte) ([]HelmRepository, error) {
-	var results []HelmRepository
-
-	docs := SplitYAMLDocuments(data)
-	for _, doc := range docs {
-		trimmed := strings.TrimSpace(doc)
-		if trimmed == "" {
-			continue
-		}
-
-		var meta struct {
-			APIVersion string `yaml:"apiVersion"`
-			Kind       string `yaml:"kind"`
-		}
-		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
-			continue
-		}
-		if meta.Kind != KindHelmRepository || !isSourceAPI(meta.APIVersion) {
-			continue
-		}
-
-		var repo HelmRepository
-		if err := yaml.Unmarshal([]byte(trimmed), &repo); err != nil {
-			continue
-		}
-		results = append(results, repo)
-	}
-
-	return results, nil
+	return parseResourcesFromBytes[HelmRepository](data, func(kind, api string) bool {
+		return kind == KindHelmRepository && isSourceAPI(api)
+	})
 }
 
-// ParseOCIRepositoriesFromBytes parses OCIRepository resources from YAML
-// output bytes. Used to extract OCIRepositories from kustomize build output
-// so that namespace transformers are reflected.
 func ParseOCIRepositoriesFromBytes(data []byte) ([]OCIRepository, error) {
-	var results []OCIRepository
-
-	docs := SplitYAMLDocuments(data)
-	for _, doc := range docs {
-		trimmed := strings.TrimSpace(doc)
-		if trimmed == "" {
-			continue
-		}
-
-		var meta struct {
-			APIVersion string `yaml:"apiVersion"`
-			Kind       string `yaml:"kind"`
-		}
-		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
-			continue
-		}
-		if meta.Kind != KindOCIRepository || !isSourceAPI(meta.APIVersion) {
-			continue
-		}
-
-		var repo OCIRepository
-		if err := yaml.Unmarshal([]byte(trimmed), &repo); err != nil {
-			continue
-		}
-		results = append(results, repo)
-	}
-
-	return results, nil
+	return parseResourcesFromBytes[OCIRepository](data, func(kind, api string) bool {
+		return kind == KindOCIRepository && isSourceAPI(api)
+	})
 }
 
-// ParseConfigMapsFromBytes parses ConfigMap resources from YAML output bytes.
-// Used to extract ConfigMaps from kustomize build output.
 func ParseConfigMapsFromBytes(data []byte) ([]ConfigMap, error) {
-	var results []ConfigMap
-
-	docs := SplitYAMLDocuments(data)
-	for _, doc := range docs {
-		trimmed := strings.TrimSpace(doc)
-		if trimmed == "" {
-			continue
-		}
-
-		var meta struct {
-			APIVersion string `yaml:"apiVersion"`
-			Kind       string `yaml:"kind"`
-		}
-		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
-			continue
-		}
-		if meta.APIVersion != "v1" || meta.Kind != "ConfigMap" {
-			continue
-		}
-
-		var cm ConfigMap
-		if err := yaml.Unmarshal([]byte(trimmed), &cm); err != nil {
-			continue
-		}
-		results = append(results, cm)
-	}
-
-	return results, nil
+	return parseResourcesFromBytes[ConfigMap](data, func(kind, api string) bool {
+		return api == "v1" && kind == "ConfigMap"
+	})
 }

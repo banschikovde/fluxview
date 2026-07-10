@@ -37,7 +37,7 @@ func (p *Parser) ParseKustomizations(ctx context.Context) ([]Kustomization, erro
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if d.IsDir() || !isYAMLFile(path) {
+		if d.IsDir() || !IsYAMLFile(path) {
 			return nil
 		}
 
@@ -84,7 +84,7 @@ func (p *Parser) ParseHelmReleases(ctx context.Context) ([]HelmRelease, error) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if d.IsDir() || !isYAMLFile(path) {
+		if d.IsDir() || !IsYAMLFile(path) {
 			return nil
 		}
 
@@ -120,7 +120,7 @@ func (p *Parser) ParseHelmRepositories(ctx context.Context) ([]HelmRepository, e
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if d.IsDir() || !isYAMLFile(path) {
+		if d.IsDir() || !IsYAMLFile(path) {
 			return nil
 		}
 
@@ -156,7 +156,7 @@ func (p *Parser) ParseOCIRepositories(ctx context.Context) ([]OCIRepository, err
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if d.IsDir() || !isYAMLFile(path) {
+		if d.IsDir() || !IsYAMLFile(path) {
 			return nil
 		}
 
@@ -192,7 +192,7 @@ func (p *Parser) ParseConfigMaps(ctx context.Context) ([]ConfigMap, error) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if d.IsDir() || !isYAMLFile(path) {
+		if d.IsDir() || !IsYAMLFile(path) {
 			return nil
 		}
 
@@ -236,7 +236,7 @@ func (p *Parser) ParseSecrets(ctx context.Context) ([]Secret, error) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if d.IsDir() || !isYAMLFile(path) {
+		if d.IsDir() || !IsYAMLFile(path) {
 			return nil
 		}
 
@@ -500,8 +500,8 @@ func isSourceAPI(apiVersion string) bool {
 	return strings.HasPrefix(apiVersion, GroupSourceToolkitFluxHelmIO)
 }
 
-// isYAMLFile returns true if the file has a YAML extension.
-func isYAMLFile(path string) bool {
+// IsYAMLFile returns true if the file has a YAML extension.
+func IsYAMLFile(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	return ext == ".yaml" || ext == ".yml"
 }
