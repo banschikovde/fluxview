@@ -123,7 +123,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	buildCache := make(map[string][]byte)
 
 	// Resolve ConfigMaps for postBuild variable substitution.
-	configMaps, err := resolveConfigMapsWithCache(ctx, clusterPath, builder, buildCache)
+	configMaps, err := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not resolve ConfigMaps: %v\n", err)
 	}
@@ -602,11 +602,9 @@ func reorderSingleDoc(doc []byte) []byte {
 //  1. Raw ConfigMap YAML files found directly in the cluster path
 //  2. ConfigMaps produced by running kustomize build on native kustomize overlays
 //     (e.g. vars/ directories that generate ConfigMaps via patches)
-func resolveConfigMaps(ctx context.Context, clusterPath string) ([]flux.ConfigMap, error) {
-	return resolveConfigMapsWithCache(ctx, clusterPath, kustomize.NewBuilder(), make(map[string][]byte))
-}
-
-func resolveConfigMapsWithCache(ctx context.Context, clusterPath string, builder *kustomize.Builder, buildCache map[string][]byte) ([]flux.ConfigMap, error) {
+//
+// The builder and buildCache are used to avoid redundant builds of the same directories.
+func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomize.Builder, buildCache map[string][]byte) ([]flux.ConfigMap, error) {
 	parser := flux.NewParser(clusterPath)
 
 	// 1. Parse raw ConfigMap YAML files.
