@@ -338,7 +338,7 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 			}
 		}
 
-		for _, result := range inflateHelmReleasesShared(ctx, inflater, pathHelmReleases, pathHelmRepos, pathOciRepos, pathConfigMaps, pathSecrets) {
+		for _, result := range inflateHelmReleasesShared(ctx, inflater, pathHelmReleases, pathHelmRepos, pathOciRepos, pathConfigMaps, pathSecrets, flags.SkipCRDs) {
 			printRedacted(result)
 		}
 	}
@@ -364,7 +364,7 @@ func printRedacted(data []byte) int {
 
 // inflateHelmReleasesShared inflates all non-suspended HelmReleases and returns
 // a slice of YAML outputs. Shared by build and diff commands.
-func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository, configMaps []flux.ConfigMap, secrets []flux.Secret) [][]byte {
+func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository, configMaps []flux.ConfigMap, secrets []flux.Secret, skipCRDs bool) [][]byte {
 	var outputs [][]byte
 	for _, hr := range helmReleases {
 		if hr.Spec.Suspend {
@@ -405,6 +405,12 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 				hr.Metadata.Namespace, hr.Metadata.Name, err)
 			continue
 		}
+
+		// Filter CRDs if requested
+		if skipCRDs {
+			output = filterCRDDocs(output)
+		}
+
 		outputs = append(outputs, output)
 	}
 	return outputs
@@ -500,7 +506,7 @@ func inflateHelmReleases(ctx context.Context, clusterPath string) (int, error) {
 	}
 
 	var totalSecrets int
-	for _, output := range inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets) {
+	for _, output := range inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets, false) {
 		totalSecrets += printRedacted(output)
 	}
 

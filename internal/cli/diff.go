@@ -614,7 +614,7 @@ func readYAMLFilesRecursive(dir string) ([]byte, error) {
 
 // inflateAllHelmReleases inflates all HelmRelease resources and returns combined YAML.
 func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository, configMaps []flux.ConfigMap, secrets []flux.Secret) ([]byte, error) {
-	outputs := inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets)
+	outputs := inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets, false)
 	if len(outputs) == 0 {
 		return nil, nil
 	}
