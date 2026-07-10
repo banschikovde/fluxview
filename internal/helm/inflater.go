@@ -160,7 +160,7 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 
 	// Convert JSON-in-YAML to proper YAML format
 	// Helm v4 sometimes renders large objects (especially CRDs) as JSON in YAML
-	converted, err := convertJSONInYAMLToYAML([]byte(manifest))
+	converted, err := ConvertJSONInYAMLToYAML([]byte(manifest))
 	if err != nil {
 		// If conversion fails, return original manifest
 		return []byte(manifest), nil
@@ -201,13 +201,13 @@ func FindHelmRepoURL(repos []fluxtypes.HelmRepository, name, namespace string, s
 	return "", "", "", fmt.Errorf("HelmRepository %s/%s not found", namespace, name)
 }
 
-// convertJSONInYAMLToYAML converts JSON-in-YAML format (e.g., metadata: {...})
+// ConvertJSONInYAMLToYAML converts JSON-in-YAML format (e.g., metadata: {...})
 // to proper YAML format (e.g., metadata:\n  annotations: ...).
 // Helm v4 sometimes renders large objects like CRDs as JSON in YAML.
 // Handles multi-document YAML by decoding each document separately.
 // Removes nil map values (e.g. annotations: null) produced by Helm templates
 // with empty optional fields.
-func convertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
+func ConvertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
 	var docs []string
 
 	decoder := yaml.NewDecoder(bytes.NewReader(manifest))
@@ -222,7 +222,7 @@ func convertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
 		if doc == nil {
 			continue
 		}
-		doc = removeNilValues(doc)
+		doc = RemoveNilValues(doc)
 		marshaled, err := yaml.Marshal(doc)
 		if err != nil {
 			continue
@@ -236,8 +236,8 @@ func convertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
 	return []byte(strings.Join(docs, "\n---\n")), nil
 }
 
-// removeNilValues recursively removes map entries with nil values.
-func removeNilValues(in interface{}) interface{} {
+// RemoveNilValues recursively removes map entries with nil values.
+func RemoveNilValues(in interface{}) interface{} {
 	switch v := in.(type) {
 	case map[string]interface{}:
 		result := make(map[string]interface{})
@@ -245,12 +245,12 @@ func removeNilValues(in interface{}) interface{} {
 			if val == nil {
 				continue
 			}
-			result[k] = removeNilValues(val)
+			result[k] = RemoveNilValues(val)
 		}
 		return result
 	case []interface{}:
 		for i, val := range v {
-			v[i] = removeNilValues(val)
+			v[i] = RemoveNilValues(val)
 		}
 		return v
 	default:

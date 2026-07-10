@@ -491,8 +491,6 @@ spec:
 	}
 }
 
-// Test: convertJSONInYAMLToYAML preserves ALL documents in multi-doc YAML
-// (regression: yaml.Unmarshal only parsed the first document).
 func TestConvertJSONInYAMLToYAML_MultiDoc(t *testing.T) {
 	input := []byte(`apiVersion: v1
 kind: ServiceAccount
@@ -509,9 +507,9 @@ kind: ConfigMap
 metadata:
   name: cm1
 `)
-	result, err := convertJSONInYAMLToYAML(input)
+	result, err := helm.ConvertJSONInYAMLToYAML(input)
 	if err != nil {
-		t.Fatalf("convertJSONInYAMLToYAML: %v", err)
+		t.Fatalf("helm.ConvertJSONInYAMLToYAML: %v", err)
 	}
 	resultStr := string(result)
 
@@ -532,9 +530,9 @@ metadata:
 	}
 }
 
-// Test: convertJSONInYAMLToYAML returns nil for empty/nil input (no "null" output).
+// Test: helm.ConvertJSONInYAMLToYAML returns nil for empty/nil input (no "null" output).
 func TestConvertJSONInYAMLToYAML_Empty(t *testing.T) {
-	result, err := convertJSONInYAMLToYAML(nil)
+	result, err := helm.ConvertJSONInYAMLToYAML(nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -543,7 +541,7 @@ func TestConvertJSONInYAMLToYAML_Empty(t *testing.T) {
 	}
 }
 
-// Test: convertJSONInYAMLToYAML strips nil values (annotations: null, labels: null, etc.)
+// Test: helm.ConvertJSONInYAMLToYAML strips nil values (annotations: null, labels: null, etc.)
 // produced by Helm templates with empty optional fields.
 func TestConvertJSONInYAMLToYAML_StripsNilValues(t *testing.T) {
 	input := []byte(`apiVersion: v1
@@ -556,9 +554,9 @@ metadata:
   namespace: default
 spec: null
 `)
-	result, err := convertJSONInYAMLToYAML(input)
+	result, err := helm.ConvertJSONInYAMLToYAML(input)
 	if err != nil {
-		t.Fatalf("convertJSONInYAMLToYAML: %v", err)
+		t.Fatalf("helm.ConvertJSONInYAMLToYAML: %v", err)
 	}
 	resultStr := string(result)
 
@@ -579,7 +577,7 @@ spec: null
 	}
 }
 
-// Test: removeNilValues recursively removes nil map entries at any nesting depth.
+// Test: helm.RemoveNilValues recursively removes nil map entries at any nesting depth.
 func TestRemoveNilValues(t *testing.T) {
 	input := map[string]interface{}{
 		"keep": "value",
@@ -595,7 +593,7 @@ func TestRemoveNilValues(t *testing.T) {
 		"list": []interface{}{"a", nil, "b"},
 	}
 
-	result := removeNilValues(input)
+	result := helm.RemoveNilValues(input)
 	m := result.(map[string]interface{})
 
 	if _, exists := m["drop"]; exists {

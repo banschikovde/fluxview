@@ -147,19 +147,45 @@ func runDiffKS(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 }
 
 func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, compareCommit string, flags *DiffFlags) error {
+	// Current state.
 	fmt.Fprintf(os.Stderr, "Building current state from %s\n", clusterPath)
-	currentOutput, err := buildHROutput(ctx, clusterPath, repoRoot, name, flags.Namespace)
+	hasDirectKS, err := hasDirectKustomizations(clusterPath)
+	if err != nil {
+		return NewExitError(fmt.Errorf("checking for Kustomization files: %w", err), ExitCodeError)
+	}
+	if !hasDirectKS {
+		return NewExitError(fmt.Errorf("no Kustomization files found in %s", clusterPath), ExitCodeError)
+	}
+	currentOutput, err := buildHRInflation(ctx, clusterPath, repoRoot, name, flags.Namespace)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building current state: %w", err), ExitCodeError)
 	}
 
+	// Comparison state at revision.
 	fmt.Fprintf(os.Stderr, "Building comparison state at %s\n", compareCommit)
-	compareOutput, err := buildHROutputAtRevision(ctx, gitOps, clusterPath, repoRoot, name, compareCommit, flags.Namespace)
+	worktreePath, err := gitOps.CloneToDir(ctx, compareCommit)
 	if err != nil {
-		return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, err), ExitCodeError)
+		return NewExitError(fmt.Errorf("creating worktree at %s: %w", compareCommit, err), ExitCodeError)
+	}
+	defer gitOps.RemoveWorktree(ctx, worktreePath)
+
+	relPath, err := filepath.Rel(repoRoot, clusterPath)
+	if err != nil {
+		relPath = clusterPath
+	}
+	worktreeClusterPath := filepath.Join(worktreePath, relPath)
+
+	if _, err := os.Stat(worktreeClusterPath); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Warning: path %s does not exist at revision %s\n", relPath, compareCommit)
+	} else {
+		compareOutput, err := buildHRInflation(ctx, worktreeClusterPath, worktreePath, name, flags.Namespace)
+		if err != nil {
+			return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, err), ExitCodeError)
+		}
+		return computeAndOutputDiff(compareOutput, currentOutput, flags)
 	}
 
-	return computeAndOutputDiff(compareOutput, currentOutput, flags)
+	return computeAndOutputDiff(nil, currentOutput, flags)
 }
 
 // buildKSOutput builds the Kustomization output for the current working tree.
@@ -251,44 +277,6 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 	// substitution work identically to the current state. External GitRepository
 	// resolution is disabled for diff (too expensive — clones remote repos).
 	return buildKSContent(ctx, builder, kustomizations, worktreePath, worktreeClusterPath, configMaps, true, buildCache)
-}
-
-// buildHROutput builds the HelmRelease output for the current working tree.
-func buildHROutput(ctx context.Context, clusterPath, repoRoot, name, namespace string) ([]byte, error) {
-	hasDirectKS, err := hasDirectKustomizations(clusterPath)
-	if err != nil {
-		return nil, fmt.Errorf("checking for Kustomization files: %w", err)
-	}
-	if !hasDirectKS {
-		return nil, fmt.Errorf("no Kustomization files found in %s", clusterPath)
-	}
-
-	return buildHRInflation(ctx, clusterPath, repoRoot, name, namespace)
-}
-
-// buildHROutputAtRevision builds the HelmRelease output at a specific git revision.
-func buildHROutputAtRevision(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, revision, namespace string) ([]byte, error) {
-	// Create a git worktree at the target revision.
-	worktreePath, err := gitOps.CloneToDir(ctx, revision)
-	if err != nil {
-		return nil, fmt.Errorf("creating worktree at %s: %w", revision, err)
-	}
-	defer gitOps.RemoveWorktree(ctx, worktreePath)
-
-	// Determine the cluster path within the worktree.
-	relPath, err := filepath.Rel(repoRoot, clusterPath)
-	if err != nil {
-		relPath = clusterPath
-	}
-	worktreeClusterPath := filepath.Join(worktreePath, relPath)
-
-	// Check if the path exists in the worktree.
-	if _, err := os.Stat(worktreeClusterPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Warning: path %s does not exist at revision %s\n", relPath, revision)
-		return nil, nil
-	}
-
-	return buildHRInflation(ctx, worktreeClusterPath, worktreePath, name, namespace)
 }
 
 // buildKSContent is the shared build logic for Flux Kustomization resources,
