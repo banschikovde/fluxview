@@ -1,6 +1,10 @@
 // Package flux provides types and parsing for Flux GitOps resources.
 package flux
 
+import (
+	"encoding/base64"
+)
+
 // Supported Flux API versions and kinds.
 const (
 	KindKustomization  = "Kustomization"
@@ -216,6 +220,7 @@ type Secret struct {
 	Kind       string            `yaml:"kind"`
 	Metadata   ObjectMeta        `yaml:"metadata"`
 	Data       map[string]string `yaml:"data,omitempty"`
+	StringData map[string]string `yaml:"stringData,omitempty"`
 }
 
 // ValuesFromEntry represents a single entry in the valuesFrom list.
@@ -224,4 +229,24 @@ type ValuesFromEntry struct {
 	Name      string `yaml:"name"`
 	Namespace string `yaml:"namespace,omitempty"`
 	Optional  bool   `yaml:"optional,omitempty"`
+}
+
+// GetSecretValue returns the decoded value from a Secret.
+// It tries stringData first (plain text), then falls back to data (base64-encoded).
+// Returns empty string if value not found or decoding fails.
+func (s *Secret) GetSecretValue(key string) string {
+	if s.StringData != nil {
+		if value, ok := s.StringData[key]; ok {
+			return value
+		}
+	}
+	if s.Data != nil {
+		if value, ok := s.Data[key]; ok {
+			decoded, err := base64.StdEncoding.DecodeString(value)
+			if err == nil {
+				return string(decoded)
+			}
+		}
+	}
+	return ""
 }

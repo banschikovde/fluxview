@@ -283,3 +283,214 @@ func TestApplySubstitution_Defaults(t *testing.T) {
 		})
 	}
 }
+
+func TestTopologicalSortHelmReleases(t *testing.T) {
+	hr := []HelmRelease{
+		{
+			Metadata: ObjectMeta{Name: "app", Namespace: "flux-system"},
+			Spec: HelmReleaseSpec{
+				DependsOn: []DependsOnEntry{{Name: "db"}},
+			},
+		},
+		{
+			Metadata: ObjectMeta{Name: "db", Namespace: "flux-system"},
+			Spec:     HelmReleaseSpec{},
+		},
+	}
+
+	sorted, err := TopologicalSortHelmReleases(hr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(sorted) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(sorted))
+	}
+	if sorted[0].Metadata.Name != "db" {
+		t.Errorf("first item = %q, want %q (dependency should come first)", sorted[0].Metadata.Name, "db")
+	}
+	if sorted[1].Metadata.Name != "app" {
+		t.Errorf("second item = %q, want %q", sorted[1].Metadata.Name, "app")
+	}
+}
+
+func TestTopologicalSortHelmReleases_Circular(t *testing.T) {
+	hr := []HelmRelease{
+		{
+			Metadata: ObjectMeta{Name: "a", Namespace: "flux-system"},
+			Spec: HelmReleaseSpec{
+				DependsOn: []DependsOnEntry{{Name: "b"}},
+			},
+		},
+		{
+			Metadata: ObjectMeta{Name: "b", Namespace: "flux-system"},
+			Spec: HelmReleaseSpec{
+				DependsOn: []DependsOnEntry{{Name: "a"}},
+			},
+		},
+	}
+
+	_, err := TopologicalSortHelmReleases(hr)
+	if err == nil {
+		t.Fatal("expected error for circular dependency")
+	}
+}
+
+func TestTopologicalSortHelmReleases_Namespace(t *testing.T) {
+	hr := []HelmRelease{
+		{
+			Metadata: ObjectMeta{Name: "app", Namespace: "app-ns"},
+			Spec: HelmReleaseSpec{
+				DependsOn: []DependsOnEntry{{Name: "db", Namespace: "db-ns"}},
+			},
+		},
+		{
+			Metadata: ObjectMeta{Name: "db", Namespace: "db-ns"},
+			Spec:     HelmReleaseSpec{},
+		},
+	}
+
+	sorted, err := TopologicalSortHelmReleases(hr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(sorted) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(sorted))
+	}
+	if sorted[0].Metadata.Name != "db" || sorted[0].Metadata.Namespace != "db-ns" {
+		t.Errorf("first item = %q, want %q (dependency should come first)", sorted[0].Metadata.Name, "db")
+	}
+	if sorted[1].Metadata.Name != "app" || sorted[1].Metadata.Namespace != "app-ns" {
+		t.Errorf("second item = %q, want %q", sorted[1].Metadata.Name, "app")
+	}
+}
+
+func TestResolveValuesFrom(t *testing.T) {
+	hr := HelmRelease{
+		Metadata: ObjectMeta{Name: "app", Namespace: "flux-system"},
+		Spec: HelmReleaseSpec{
+			ValuesFrom: []interface{}{
+				map[string]interface{}{
+					"kind": "ConfigMap",
+					"name": "app-config",
+				},
+			},
+		},
+	}
+
+	configMaps := []ConfigMap{
+		{
+			Metadata: ObjectMeta{Name: "app-config", Namespace: "flux-system"},
+			Data: map[string]string{
+				"key1": "value1",
+				"key2": "value2",
+			},
+		},
+	}
+
+	result := ResolveValuesFrom(hr, configMaps, nil)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result["key1"] != "value1" {
+		t.Errorf("key1 = %q, want %q", result["key1"], "value1")
+	}
+	if result["key2"] != "value2" {
+		t.Errorf("key2 = %q, want %q", result["key2"], "value2")
+	}
+}
+
+func TestResolveValuesFrom_Secret(t *testing.T) {
+	hr := HelmRelease{
+		Metadata: ObjectMeta{Name: "app", Namespace: "flux-system"},
+		Spec: HelmReleaseSpec{
+			ValuesFrom: []interface{}{
+				map[string]interface{}{
+					"kind": "Secret",
+					"name": "app-secrets",
+				},
+			},
+		},
+	}
+
+	secrets := []Secret{
+		{
+			Metadata: ObjectMeta{Name: "app-secrets", Namespace: "flux-system"},
+			StringData: map[string]string{
+				"password": "secret-password",
+			},
+		},
+	}
+
+	result := ResolveValuesFrom(hr, nil, secrets)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result["password"] != "secret-password" {
+		t.Errorf("password = %q, want %q", result["password"], "secret-password")
+	}
+}
+
+func TestResolveValuesFrom_Base64Secret(t *testing.T) {
+	hr := HelmRelease{
+		Metadata: ObjectMeta{Name: "app", Namespace: "flux-system"},
+		Spec: HelmReleaseSpec{
+			ValuesFrom: []interface{}{
+				map[string]interface{}{
+					"kind": "Secret",
+					"name": "app-secrets",
+				},
+			},
+		},
+	}
+
+	secrets := []Secret{
+		{
+			Metadata: ObjectMeta{Name: "app-secrets", Namespace: "flux-system"},
+			Data: map[string]string{
+				"password": "c2VjcmV0LXBhc3N3b3Jk", // base64 of "secret-password"
+			},
+		},
+	}
+
+	result := ResolveValuesFrom(hr, nil, secrets)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result["password"] != "secret-password" {
+		t.Errorf("password = %q, want %q (should be decoded)", result["password"], "secret-password")
+	}
+}
+
+func TestResolveValuesFrom_StringDataPrecedence(t *testing.T) {
+	hr := HelmRelease{
+		Metadata: ObjectMeta{Name: "app", Namespace: "flux-system"},
+		Spec: HelmReleaseSpec{
+			ValuesFrom: []interface{}{
+				map[string]interface{}{
+					"kind": "Secret",
+					"name": "app-secrets",
+				},
+			},
+		},
+	}
+
+	secrets := []Secret{
+		{
+			Metadata: ObjectMeta{Name: "app-secrets", Namespace: "flux-system"},
+			StringData: map[string]string{
+				"password": "from-string-data",
+			},
+			Data: map[string]string{
+				"password": "ZnJvbS1kYXRh", // base64 of "from-data"
+			},
+		},
+	}
+
+	result := ResolveValuesFrom(hr, nil, secrets)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result["password"] != "from-string-data" {
+		t.Errorf("password = %q, want %q (stringData should take precedence)", result["password"], "from-string-data")
+	}
+}

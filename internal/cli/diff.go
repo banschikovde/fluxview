@@ -273,11 +273,13 @@ func buildHROutput(ctx context.Context, clusterPath, name string) ([]byte, error
 		return nil, fmt.Errorf("parsing HelmRelease resources: %w", err)
 	}
 
-	helmReleases = filterHelmReleases(helmReleases, name)
+	// Sort HelmReleases by dependency order.
+	helmReleases, err = flux.TopologicalSortHelmReleases(helmReleases)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v, processing in original order\n", err)
+	}
+
 	if len(helmReleases) == 0 {
-		if name != "" {
-			return nil, fmt.Errorf("HelmRelease %q not found", name)
-		}
 		return nil, nil // no HRs found, return empty
 	}
 
@@ -318,6 +320,12 @@ func buildHROutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 	helmReleases, err := parser.ParseHelmReleases(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("parsing HelmRelease resources at %s: %w", revision, err)
+	}
+
+	// Sort HelmReleases by dependency order.
+	helmReleases, err = flux.TopologicalSortHelmReleases(helmReleases)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v, processing in original order\n", err)
 	}
 
 	helmReleases = filterHelmReleases(helmReleases, name)

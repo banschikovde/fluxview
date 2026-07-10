@@ -294,8 +294,9 @@ func parseValuesFrom(raw interface{}) []ValuesFromEntry {
 }
 
 // ResolveValuesFrom resolves values from ConfigMaps and Secrets referenced in valuesFrom.
-// Returns a merged map of values with ConfigMap values taking precedence over Secret values,
-// and inline values taking precedence over both.
+// Returns a merged map of values where later entries in the valuesFrom list override earlier ones
+// (matching Flux behavior where the order matters). ConfigMap and Secret values are merged
+// by key, not by type precedence.
 func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret) map[string]interface{} {
 	entries := parseValuesFrom(hr.Spec.ValuesFrom)
 	if len(entries) == 0 {
@@ -324,7 +325,18 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 			for _, secret := range secrets {
 				if secret.Metadata.Name == entry.Name && secret.Metadata.Namespace == entryNS {
 					for k, v := range secret.Data {
-						result[k] = v
+						decodedValue := secret.GetSecretValue(k)
+						if decodedValue != "" {
+							result[k] = decodedValue
+						} else if v != "" {
+							result[k] = v
+						}
+					}
+					// Also handle stringData
+					if secret.StringData != nil {
+						for k, v := range secret.StringData {
+							result[k] = v
+						}
 					}
 					break
 				}

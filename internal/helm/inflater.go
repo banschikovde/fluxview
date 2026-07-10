@@ -124,18 +124,15 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 		return nil, fmt.Errorf("loading chart from %s: %w", chartPath, err)
 	}
 
-	// Get values from HelmRelease spec.
-	values := hr.Spec.Values
+	// Start with valuesFrom (ConfigMaps and Secrets) as base values.
+	values := fluxtypes.ResolveValuesFrom(hr, configMaps, secrets)
 	if values == nil {
 		values = make(map[string]interface{})
 	}
 
-	// Merge valuesFrom (ConfigMaps and Secrets) into values.
-	valuesFrom := fluxtypes.ResolveValuesFrom(hr, configMaps, secrets)
-	if valuesFrom != nil {
-		for k, v := range valuesFrom {
-			values[k] = v
-		}
+	// Merge inline values from HelmRelease spec (they have highest priority).
+	for k, v := range hr.Spec.Values {
+		values[k] = v
 	}
 
 	// Run template rendering.
@@ -172,8 +169,8 @@ func FindHelmRepoURL(repos []fluxtypes.HelmRepository, name, namespace string, s
 				secretNS := namespace
 				for _, secret := range secrets {
 					if secret.Metadata.Name == repo.Spec.SecretRef.Name && secret.Metadata.Namespace == secretNS {
-						username = secret.Data["username"]
-						password = secret.Data["password"]
+						username = secret.GetSecretValue("username")
+						password = secret.GetSecretValue("password")
 						break
 					}
 				}
