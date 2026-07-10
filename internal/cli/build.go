@@ -349,6 +349,12 @@ func inflateHelmReleases(ctx context.Context, clusterPath string) (int, error) {
 		return 0, nil
 	}
 
+	// Sort HelmReleases by dependency order.
+	helmReleases, err = flux.TopologicalSortHelmReleases(helmReleases)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v, processing in original order\n", err)
+	}
+
 	helmRepos, _ := parser.ParseHelmRepositories(ctx)
 	ociRepos, _ := parser.ParseOCIRepositories(ctx)
 	configMaps, _ := parser.ParseConfigMaps(ctx)
