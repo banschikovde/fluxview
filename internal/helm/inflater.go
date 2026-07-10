@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -204,19 +203,23 @@ func FindHelmRepoURL(repos []fluxtypes.HelmRepository, name, namespace string, s
 // ConvertJSONInYAMLToYAML converts JSON-in-YAML format (e.g., metadata: {...})
 // to proper YAML format (e.g., metadata:\n  annotations: ...).
 // Helm v4 sometimes renders large objects like CRDs as JSON in YAML.
-// Handles multi-document YAML by decoding each document separately.
 // Removes nil map values (e.g. annotations: null) produced by Helm templates
 // with empty optional fields.
+//
+// Documents are split by text first (not yaml.Decoder) so that a single
+// malformed document skips gracefully without dropping subsequent documents.
 func ConvertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
-	var docs []string
+	if len(bytes.TrimSpace(manifest)) == 0 {
+		return nil, nil
+	}
 
-	decoder := yaml.NewDecoder(bytes.NewReader(manifest))
-	for {
+	rawDocs := fluxtypes.SplitYAMLText(manifest)
+
+	var docs []string
+	for _, rawDoc := range rawDocs {
 		var doc interface{}
-		if err := decoder.Decode(&doc); err != nil {
-			if err == io.EOF {
-				break
-			}
+		if err := yaml.Unmarshal([]byte(rawDoc), &doc); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: skipping unparseable YAML document: %v\n", err)
 			continue
 		}
 		if doc == nil {

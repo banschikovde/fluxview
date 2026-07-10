@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/banschikovde/fluxview/internal/flux"
 	"github.com/banschikovde/fluxview/internal/helm"
@@ -580,6 +581,37 @@ func TestConvertJSONInYAMLToYAML_Empty(t *testing.T) {
 	}
 	if result != nil {
 		t.Errorf("expected nil for empty input, got %q", string(result))
+	}
+}
+
+// Test: helm.ConvertJSONInYAMLToYAML terminates (doesn't infinite-loop) on
+// malformed YAML input, and preserves subsequent valid documents.
+func TestConvertJSONInYAMLToYAML_MalformedTerminates(t *testing.T) {
+	// Broken document followed by a valid one.
+	input := []byte(`::: broken yaml :::
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: survives
+`)
+
+	done := make(chan struct{})
+	var result []byte
+	go func() {
+		result, _ = helm.ConvertJSONInYAMLToYAML(input)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ConvertJSONInYAMLToYAML hung on malformed input — infinite loop")
+	}
+
+	// The valid document after the broken one must be preserved.
+	resultStr := string(result)
+	if !strings.Contains(resultStr, "survives") {
+		t.Errorf("valid document after broken one was dropped:\n%s", resultStr)
 	}
 }
 
