@@ -139,67 +139,41 @@ func runDiff(ctx context.Context, args []string, flags *DiffFlags) error {
 	}
 }
 
-// buildResult holds the output from building one diff state.
-type buildResult struct {
-	output []byte
-	err    error
-}
-
 func runDiffKS(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, compareCommit string, flags *DiffFlags) error {
-	currentCh := make(chan buildResult, 1)
-	compareCh := make(chan buildResult, 1)
-
-	// Build current and revision states in parallel.
-	go func() {
-		output, err := buildKSOutput(ctx, clusterPath, repoRoot, name)
-		currentCh <- buildResult{output, err}
-	}()
-	go func() {
-		output, err := buildKSOutputAtRevision(ctx, gitOps, clusterPath, repoRoot, name, compareCommit)
-		compareCh <- buildResult{output, err}
-	}()
-
-	current := <-currentCh
-	if current.err != nil {
-		return NewExitError(fmt.Errorf("building current state: %w", current.err), ExitCodeError)
+	currentOutput, err := buildKSOutput(ctx, clusterPath, repoRoot, name)
+	if err != nil {
+		return NewExitError(fmt.Errorf("building current state: %w", err), ExitCodeError)
 	}
 
-	compare := <-compareCh
-	if compare.err != nil {
-		return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, compare.err), ExitCodeError)
+	compareOutput, err := buildKSOutputAtRevision(ctx, gitOps, clusterPath, repoRoot, name, compareCommit)
+	if err != nil {
+		return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, err), ExitCodeError)
 	}
 
-	return computeAndOutputDiff(compare.output, current.output, flags)
+	return computeAndOutputDiff(compareOutput, currentOutput, flags)
 }
 
 func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, compareCommit string, flags *DiffFlags) error {
-	currentCh := make(chan buildResult, 1)
-	compareCh := make(chan buildResult, 1)
-
-	go func() {
-		output, err := buildHROutput(ctx, clusterPath, name)
-		currentCh <- buildResult{output, err}
-	}()
-	go func() {
-		output, err := buildHROutputAtRevision(ctx, gitOps, clusterPath, repoRoot, name, compareCommit)
-		compareCh <- buildResult{output, err}
-	}()
-
-	current := <-currentCh
-	if current.err != nil {
-		return NewExitError(fmt.Errorf("building current state: %w", current.err), ExitCodeError)
+	currentOutput, err := buildHROutput(ctx, clusterPath, name)
+	if err != nil {
+		return NewExitError(fmt.Errorf("building current state: %w", err), ExitCodeError)
 	}
 
-	compare := <-compareCh
-	if compare.err != nil {
-		return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, compare.err), ExitCodeError)
+	compareOutput, err := buildHROutputAtRevision(ctx, gitOps, clusterPath, repoRoot, name, compareCommit)
+	if err != nil {
+		return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, err), ExitCodeError)
 	}
 
-	return computeAndOutputDiff(compare.output, current.output, flags)
+	return computeAndOutputDiff(compareOutput, currentOutput, flags)
 }
 
 // buildKSOutput builds the Kustomization output for the current working tree.
 func buildKSOutput(ctx context.Context, clusterPath, repoRoot, name string) ([]byte, error) {
+	return buildKSOutputWithCache(ctx, clusterPath, repoRoot, name, make(map[string][]byte))
+}
+
+// buildKSOutputWithCache builds the Kustomization output for the current working tree with build cache.
+func buildKSOutputWithCache(ctx context.Context, clusterPath, repoRoot, name string, buildCache map[string][]byte) ([]byte, error) {
 	parser := flux.NewParser(clusterPath)
 	kustomizations, err := parser.ParseKustomizations(ctx)
 	if err != nil {
@@ -213,11 +187,11 @@ func buildKSOutput(ctx context.Context, clusterPath, repoRoot, name string) ([]b
 		}
 	}
 
-	// Resolve ConfigMaps for postBuild substitution.
-	configMaps, _ := resolveConfigMaps(ctx, clusterPath)
-
 	builder := kustomize.NewBuilder()
-	return buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, false)
+	// Resolve ConfigMaps for postBuild substitution.
+	configMaps, _ := resolveConfigMapsWithCache(ctx, clusterPath, builder, buildCache)
+
+	return buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, false, buildCache)
 }
 
 // buildKSOutputAtRevision builds the Kustomization output at a specific git revision.
@@ -255,14 +229,15 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 		}
 	}
 
-	// Resolve ConfigMaps for postBuild substitution from the worktree.
-	configMaps, _ := resolveConfigMaps(ctx, worktreeClusterPath)
-
 	builder := kustomize.NewBuilder()
+	buildCache := make(map[string][]byte)
+	// Resolve ConfigMaps for postBuild substitution from the worktree.
+	configMaps, _ := resolveConfigMapsWithCache(ctx, worktreeClusterPath, builder, buildCache)
+
 	// Use worktreePath as repoRoot so that recursive discovery and postBuild
 	// substitution work identically to the current state. External GitRepository
 	// resolution is disabled for diff (too expensive — clones remote repos).
-	return buildKSContent(ctx, builder, kustomizations, worktreePath, worktreeClusterPath, configMaps, true)
+	return buildKSContent(ctx, builder, kustomizations, worktreePath, worktreeClusterPath, configMaps, true, buildCache)
 }
 
 // buildHROutput builds the HelmRelease output for the current working tree.
@@ -354,7 +329,7 @@ func buildHROutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 // follows Flux controller behavior: recursive discovery, postBuild substitution,
 // optional external GitRepository resolution) and then appends native kustomize
 // overlay outputs.
-func buildKSContent(ctx context.Context, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot, clusterPath string, configMaps []flux.ConfigMap, quiet bool) ([]byte, error) {
+func buildKSContent(ctx context.Context, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot, clusterPath string, configMaps []flux.ConfigMap, quiet bool, buildCache map[string][]byte) ([]byte, error) {
 	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, configMaps, quiet)
 	if err != nil {
 		return nil, err
@@ -364,7 +339,7 @@ func buildKSContent(ctx context.Context, builder *kustomize.Builder, kustomizati
 	// Skip overlays when no KS are selected (name filter returned empty).
 	if len(kustomizations) > 0 {
 		ksPaths := collectKustomizationPaths(repoRoot, kustomizations)
-		overlayOutputs := buildKustomizeOverlays(clusterPath, ksPaths)
+		overlayOutputs := buildKustomizeOverlays(clusterPath, ksPaths, buildCache)
 		for _, overlay := range overlayOutputs {
 			if len(output) > 0 {
 				output = append(output, []byte("\n---\n")...)

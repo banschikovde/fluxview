@@ -118,8 +118,12 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return nil
 	}
 
+	// Build the kustomize resources via SDK (shared logic with diff command).
+	builder := kustomize.NewBuilder()
+	buildCache := make(map[string][]byte)
+
 	// Resolve ConfigMaps for postBuild variable substitution.
-	configMaps, err := resolveConfigMaps(ctx, clusterPath)
+	configMaps, err := resolveConfigMapsWithCache(ctx, clusterPath, builder, buildCache)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not resolve ConfigMaps: %v\n", err)
 	}
@@ -138,9 +142,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		}
 	}
 
-	// Build the kustomize resources via SDK (shared logic with diff command).
-	builder := kustomize.NewBuilder()
-	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, false)
+	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, false, buildCache)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}
@@ -422,7 +424,7 @@ func collectKustomizationPaths(repoRoot string, kustomizations []flux.Kustomizat
 // (e.g. vars/) under the cluster path. Returns the full build output
 // for each overlay, containing ALL resources (ConfigMaps, Secrets, etc.).
 // Excludes directories that are already built as Flux Kustomization sources.
-func buildKustomizeOverlays(clusterPath string, excludePaths map[string]bool) [][]byte {
+func buildKustomizeOverlays(clusterPath string, excludePaths map[string]bool, buildCache map[string][]byte) [][]byte {
 	kustomizeDirs, err := flux.DiscoverKustomizeDirs(clusterPath)
 	if err != nil || len(kustomizeDirs) == 0 {
 		return nil
@@ -437,10 +439,19 @@ func buildKustomizeOverlays(clusterPath string, excludePaths map[string]bool) []
 		if isExcludedDir(dir, excludePaths) {
 			continue
 		}
-		output, err := builder.Build(dir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: kustomize build %s failed: %v\n", dir, err)
-			continue
+		var output []byte
+		var err error
+
+		// Check cache first
+		if cached, ok := buildCache[dir]; ok {
+			output = cached
+		} else {
+			output, err = builder.Build(dir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: kustomize build %s failed: %v\n", dir, err)
+				continue
+			}
+			buildCache[dir] = output
 		}
 		outputs = append(outputs, output)
 	}
@@ -592,6 +603,10 @@ func reorderSingleDoc(doc []byte) []byte {
 //  2. ConfigMaps produced by running kustomize build on native kustomize overlays
 //     (e.g. vars/ directories that generate ConfigMaps via patches)
 func resolveConfigMaps(ctx context.Context, clusterPath string) ([]flux.ConfigMap, error) {
+	return resolveConfigMapsWithCache(ctx, clusterPath, kustomize.NewBuilder(), make(map[string][]byte))
+}
+
+func resolveConfigMapsWithCache(ctx context.Context, clusterPath string, builder *kustomize.Builder, buildCache map[string][]byte) ([]flux.ConfigMap, error) {
 	parser := flux.NewParser(clusterPath)
 
 	// 1. Parse raw ConfigMap YAML files.
@@ -607,13 +622,22 @@ func resolveConfigMaps(ctx context.Context, clusterPath string) ([]flux.ConfigMa
 	}
 
 	if len(kustomizeDirs) > 0 {
-		builder := kustomize.NewBuilder()
 		for _, dir := range kustomizeDirs {
-			output, err := builder.Build(dir)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: kustomize build %s failed: %v\n", dir, err)
-				continue
+			var output []byte
+			var err error
+
+			// Check cache first
+			if cached, ok := buildCache[dir]; ok {
+				output = cached
+			} else {
+				output, err = builder.Build(dir)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: kustomize build %s failed: %v\n", dir, err)
+					continue
+				}
+				buildCache[dir] = output
 			}
+
 			builtCMs, err := flux.ParseConfigMapsFromBytes(output)
 			if err != nil {
 				continue

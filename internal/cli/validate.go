@@ -99,7 +99,9 @@ func runValidateKS(ctx context.Context, clusterPath, repoRoot, name, namespace s
 		return NewExitError(fmt.Errorf("parsing Kustomization resources: %w", err), ExitCodeError)
 	}
 
-	configMaps, _ := resolveConfigMaps(ctx, clusterPath)
+	builder := kustomize.NewBuilder()
+	buildCache := make(map[string][]byte)
+	configMaps, _ := resolveConfigMapsWithCache(ctx, clusterPath, builder, buildCache)
 
 	if name != "" {
 		kustomizations = filterKustomizations(kustomizations, name)
@@ -108,8 +110,7 @@ func runValidateKS(ctx context.Context, clusterPath, repoRoot, name, namespace s
 		}
 	}
 
-	builder := kustomize.NewBuilder()
-	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, false)
+	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, false, buildCache)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}

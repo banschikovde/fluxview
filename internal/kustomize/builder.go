@@ -15,6 +15,8 @@ import (
 type Builder struct {
 	// Options for kustomize build.
 	options *krusty.Options
+	// Reusable kustomizer instance.
+	kustomizer *krusty.Kustomizer
 }
 
 // NewBuilder creates a new kustomize Builder with options that allow
@@ -24,7 +26,8 @@ func NewBuilder() *Builder {
 	opts := krusty.MakeDefaultOptions()
 	opts.LoadRestrictions = types.LoadRestrictionsNone
 	return &Builder{
-		options: opts,
+		options:    opts,
+		kustomizer: krusty.MakeKustomizer(opts),
 	}
 }
 
@@ -40,11 +43,8 @@ func (b *Builder) Build(dir string) ([]byte, error) {
 	// Use the on-disk filesystem.
 	fsys := filesys.MakeFsOnDisk()
 
-	// Create the kustomizer.
-	k := krusty.MakeKustomizer(b.options)
-
-	// Run kustomize build.
-	resMap, err := k.Run(fsys, dir)
+	// Run kustomize build using the reusable kustomizer.
+	resMap, err := b.kustomizer.Run(fsys, dir)
 	if err != nil {
 		return nil, fmt.Errorf("kustomize build in %s: %w", dir, err)
 	}
