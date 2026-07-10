@@ -585,22 +585,33 @@ func TestConvertJSONInYAMLToYAML_Empty(t *testing.T) {
 }
 
 // Test: helm.ConvertJSONInYAMLToYAML terminates (doesn't infinite-loop) on
-// malformed YAML input. Previously, a non-EOF decode error caused `continue`
-// without advancing the stream, hanging the process.
+// malformed YAML input, and preserves subsequent valid documents.
 func TestConvertJSONInYAMLToYAML_MalformedTerminates(t *testing.T) {
-	// Deliberately broken YAML: unclosed flow mapping.
-	input := []byte("apiVersion: v1\nkind: ConfigMap\nmetadata: {name: broken\n")
+	// Broken document followed by a valid one.
+	input := []byte(`::: broken yaml :::
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: survives
+`)
 
-	// If the bug is present, this test will hang instead of failing.
 	done := make(chan struct{})
+	var result []byte
 	go func() {
-		helm.ConvertJSONInYAMLToYAML(input)
+		result, _ = helm.ConvertJSONInYAMLToYAML(input)
 		close(done)
 	}()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("ConvertJSONInYAMLToYAML hung on malformed input — infinite loop")
+	}
+
+	// The valid document after the broken one must be preserved.
+	resultStr := string(result)
+	if !strings.Contains(resultStr, "survives") {
+		t.Errorf("valid document after broken one was dropped:\n%s", resultStr)
 	}
 }
 
