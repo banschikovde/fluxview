@@ -66,47 +66,47 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 	// Chart resolution: OCI repos need special handling.
 	// See helm/helm#10191: setting RepoURL for OCI causes index.yaml fetch failure.
 	var chartRef string
-		switch {
-		case strings.HasPrefix(chartName, "oci://"):
-			// OCIRepository pattern: chartName is the full OCI reference
-			// (URL + optional @digest). Use directly, don't append anything.
-			chartRef = chartName
-			install.ChartPathOptions.Version = hr.Spec.Chart.Spec.Version
-			
-			// Create registry client with necessary options for OCI charts
-			opts := []registry.ClientOption{
-				registry.ClientOptEnableCache(true),
-			}
-			if username != "" && password != "" {
-				opts = append(opts, registry.ClientOptBasicAuth(username, password))
-			}
-			
-			registryClient, err := registry.NewClient(opts...)
-			if err != nil {
-				return nil, fmt.Errorf("creating registry client: %w", err)
-			}
-			actionConfig.RegistryClient = registryClient
-			install.SetRegistryClient(registryClient)
-		case strings.HasPrefix(repoURL, "oci://"):
-			// HelmRepository type=oci: append chart name to repo URL.
-			chartRef = strings.TrimSuffix(repoURL, "/") + "/" + chartName
-			install.ChartPathOptions.Version = hr.Spec.Chart.Spec.Version
-			
-			// Create registry client with necessary options for OCI charts
-			opts := []registry.ClientOption{
-				registry.ClientOptEnableCache(true),
-			}
-			if username != "" && password != "" {
-				opts = append(opts, registry.ClientOptBasicAuth(username, password))
-			}
-			
-			registryClient, err := registry.NewClient(opts...)
-			if err != nil {
-				return nil, fmt.Errorf("creating registry client: %w", err)
-			}
-			actionConfig.RegistryClient = registryClient
-			install.SetRegistryClient(registryClient)
-		default:
+	switch {
+	case strings.HasPrefix(chartName, "oci://"):
+		// OCIRepository pattern: chartName is the full OCI reference
+		// (URL + optional @digest). Use directly, don't append anything.
+		chartRef = chartName
+		install.ChartPathOptions.Version = hr.Spec.Chart.Spec.Version
+
+		// Create registry client with necessary options for OCI charts
+		opts := []registry.ClientOption{
+			registry.ClientOptEnableCache(true),
+		}
+		if username != "" && password != "" {
+			opts = append(opts, registry.ClientOptBasicAuth(username, password))
+		}
+
+		registryClient, err := registry.NewClient(opts...)
+		if err != nil {
+			return nil, fmt.Errorf("creating registry client: %w", err)
+		}
+		actionConfig.RegistryClient = registryClient
+		install.SetRegistryClient(registryClient)
+	case strings.HasPrefix(repoURL, "oci://"):
+		// HelmRepository type=oci: append chart name to repo URL.
+		chartRef = strings.TrimSuffix(repoURL, "/") + "/" + chartName
+		install.ChartPathOptions.Version = hr.Spec.Chart.Spec.Version
+
+		// Create registry client with necessary options for OCI charts
+		opts := []registry.ClientOption{
+			registry.ClientOptEnableCache(true),
+		}
+		if username != "" && password != "" {
+			opts = append(opts, registry.ClientOptBasicAuth(username, password))
+		}
+
+		registryClient, err := registry.NewClient(opts...)
+		if err != nil {
+			return nil, fmt.Errorf("creating registry client: %w", err)
+		}
+		actionConfig.RegistryClient = registryClient
+		install.SetRegistryClient(registryClient)
+	default:
 		// Traditional HTTP HelmRepository.
 		chartRef = chartName
 		install.ChartPathOptions.RepoURL = repoURL

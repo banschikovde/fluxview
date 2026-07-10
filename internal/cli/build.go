@@ -206,7 +206,7 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 			path string
 		}{hr, clusterPath})
 	}
-	
+
 	if len(helmReleases) == 0 {
 		kustomizations, err := parser.ParseKustomizations(ctx)
 		if err != nil {
@@ -215,24 +215,24 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 			builder := kustomize.NewBuilder()
 			buildCache := make(map[string][]byte)
 			_ = resolveConfigMaps(ctx, clusterPath, builder, buildCache)
-			
+
 			kustomizations, err = flux.TopologicalSort(kustomizations)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: %v, processing in original order\n", err)
 			}
-			
+
 			for _, ks := range kustomizations {
 				ksPath := ks.Spec.Path
 				if ksPath == "" {
 					continue
 				}
-				
+
 				absKSPath := filepath.Join(repoRoot, ksPath)
 				if _, err := os.Stat(absKSPath); os.IsNotExist(err) {
 					fmt.Fprintf(os.Stderr, "Warning: path %s does not exist\n", absKSPath)
 					continue
 				}
-				
+
 				ksParser := flux.NewParser(absKSPath)
 				ksHelmReleases, err := ksParser.ParseHelmReleases(ctx)
 				if err != nil {
@@ -262,7 +262,7 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		}
 		helmReleasesWithPaths = filteredHR
 	}
-	
+
 	if len(helmReleasesWithPaths) == 0 {
 		if name != "" {
 			return NewExitError(fmt.Errorf("HelmRelease %q not found", name), ExitCodeError)
@@ -285,7 +285,7 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	// Inflate HelmReleases for each path separately with proper resource resolution
 	for hrPath, pathHelmReleases := range helmReleasesByPath {
 		pathParser := flux.NewParser(hrPath)
-		
+
 		pathHelmRepos, err := pathParser.ParseHelmRepositories(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not parse HelmRepositories in %s: %v\n", hrPath, err)
@@ -298,7 +298,7 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 				fmt.Fprintf(os.Stderr, "Warning: could not parse HelmRepositories in repo root: %v\n", err)
 			}
 		}
-		
+
 		pathOciRepos, err := pathParser.ParseOCIRepositories(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not parse OCIRepositories in %s: %v\n", hrPath, err)
@@ -311,7 +311,7 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 				fmt.Fprintf(os.Stderr, "Warning: could not parse OCIRepositories in repo root: %v\n", err)
 			}
 		}
-		
+
 		pathConfigMaps, err := pathParser.ParseConfigMaps(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMaps in %s: %v\n", hrPath, err)
@@ -324,7 +324,7 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 				fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMaps in repo root: %v\n", err)
 			}
 		}
-		
+
 		pathSecrets, err := pathParser.ParseSecrets(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not parse Secrets in %s: %v\n", hrPath, err)
@@ -337,7 +337,7 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 				fmt.Fprintf(os.Stderr, "Warning: could not parse Secrets in repo root: %v\n", err)
 			}
 		}
-		
+
 		for _, result := range inflateHelmReleasesShared(ctx, inflater, pathHelmReleases, pathHelmRepos, pathOciRepos, pathConfigMaps, pathSecrets) {
 			printRedacted(result)
 		}
