@@ -148,13 +148,13 @@ func runDiffKS(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 
 func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, compareCommit string, flags *DiffFlags) error {
 	fmt.Fprintf(os.Stderr, "Building current state from %s\n", clusterPath)
-	currentOutput, err := buildHROutput(ctx, clusterPath, repoRoot, name)
+	currentOutput, err := buildHROutput(ctx, clusterPath, repoRoot, name, flags.Namespace)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building current state: %w", err), ExitCodeError)
 	}
 
 	fmt.Fprintf(os.Stderr, "Building comparison state at %s\n", compareCommit)
-	compareOutput, err := buildHROutputAtRevision(ctx, gitOps, clusterPath, repoRoot, name, compareCommit)
+	compareOutput, err := buildHROutputAtRevision(ctx, gitOps, clusterPath, repoRoot, name, compareCommit, flags.Namespace)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, err), ExitCodeError)
 	}
@@ -254,7 +254,7 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 }
 
 // buildHROutput builds the HelmRelease output for the current working tree.
-func buildHROutput(ctx context.Context, clusterPath, repoRoot, name string) ([]byte, error) {
+func buildHROutput(ctx context.Context, clusterPath, repoRoot, name, namespace string) ([]byte, error) {
 	hasDirectKS, err := hasDirectKustomizations(clusterPath)
 	if err != nil {
 		return nil, fmt.Errorf("checking for Kustomization files: %w", err)
@@ -263,11 +263,11 @@ func buildHROutput(ctx context.Context, clusterPath, repoRoot, name string) ([]b
 		return nil, fmt.Errorf("no Kustomization files found in %s", clusterPath)
 	}
 
-	return buildHRInflation(ctx, clusterPath, repoRoot, name)
+	return buildHRInflation(ctx, clusterPath, repoRoot, name, namespace)
 }
 
 // buildHROutputAtRevision builds the HelmRelease output at a specific git revision.
-func buildHROutputAtRevision(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, revision string) ([]byte, error) {
+func buildHROutputAtRevision(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, revision, namespace string) ([]byte, error) {
 	// Create a git worktree at the target revision.
 	worktreePath, err := gitOps.CloneToDir(ctx, revision)
 	if err != nil {
@@ -288,7 +288,7 @@ func buildHROutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 		return nil, nil
 	}
 
-	return buildHRInflation(ctx, worktreeClusterPath, worktreePath, name)
+	return buildHRInflation(ctx, worktreeClusterPath, worktreePath, name, namespace)
 }
 
 // buildKSContent is the shared build logic for Flux Kustomization resources,

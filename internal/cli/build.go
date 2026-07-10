@@ -185,7 +185,7 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return NewExitError(fmt.Errorf("no Kustomization files found in %s", clusterPath), ExitCodeError)
 	}
 
-	output, err := buildHRInflation(ctx, clusterPath, repoRoot, name)
+	output, err := buildHRInflation(ctx, clusterPath, repoRoot, name, flags.Namespace)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}
@@ -194,13 +194,6 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return nil
 	}
 
-	if flags.Namespace != "" {
-		output = filterByNamespace(output, flags.Namespace)
-		if len(output) == 0 {
-			fmt.Fprintf(os.Stderr, "No resources found in namespace %q\n", flags.Namespace)
-			return nil
-		}
-	}
 	if flags.SkipCRDs {
 		output = filterCRDDocs(output)
 	}
@@ -216,7 +209,10 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 // (same discovery logic as runBuildHR), resolves sources, inflates the charts,
 // and returns combined YAML. Returns nil if no Flux Kustomizations or no
 // HelmReleases are found (valid for diff comparison state).
-func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name string) ([]byte, error) {
+//
+// namespace filters the HelmRelease list BEFORE inflation — when set, only
+// matching HRs are inflated, avoiding unnecessary chart downloads.
+func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespace string) ([]byte, error) {
 	kustomizations, err := flux.NewParser(clusterPath).ParseKustomizations(ctx)
 	if err != nil {
 		return nil, nil // no Flux KS — valid for diff
@@ -248,6 +244,14 @@ func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name string) (
 		helmReleases = filterHelmReleases(helmReleases, name)
 		if len(helmReleases) == 0 {
 			return nil, fmt.Errorf("HelmRelease %q not found", name)
+		}
+	}
+
+	// Namespace filter — applied before inflation to avoid downloading unneeded charts.
+	if namespace != "" {
+		helmReleases = filterHelmReleasesByNamespace(helmReleases, namespace)
+		if len(helmReleases) == 0 {
+			return nil, nil
 		}
 	}
 
