@@ -217,7 +217,8 @@ func ConvertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
 			if err == io.EOF {
 				break
 			}
-			continue
+			fmt.Fprintf(os.Stderr, "Warning: YAML parse error in ConvertJSONInYAMLToYAML: %v\n", err)
+			break
 		}
 		if doc == nil {
 			continue

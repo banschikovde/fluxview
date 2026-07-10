@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/banschikovde/fluxview/internal/flux"
 	"github.com/banschikovde/fluxview/internal/helm"
@@ -580,6 +581,26 @@ func TestConvertJSONInYAMLToYAML_Empty(t *testing.T) {
 	}
 	if result != nil {
 		t.Errorf("expected nil for empty input, got %q", string(result))
+	}
+}
+
+// Test: helm.ConvertJSONInYAMLToYAML terminates (doesn't infinite-loop) on
+// malformed YAML input. Previously, a non-EOF decode error caused `continue`
+// without advancing the stream, hanging the process.
+func TestConvertJSONInYAMLToYAML_MalformedTerminates(t *testing.T) {
+	// Deliberately broken YAML: unclosed flow mapping.
+	input := []byte("apiVersion: v1\nkind: ConfigMap\nmetadata: {name: broken\n")
+
+	// If the bug is present, this test will hang instead of failing.
+	done := make(chan struct{})
+	go func() {
+		helm.ConvertJSONInYAMLToYAML(input)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ConvertJSONInYAMLToYAML hung on malformed input — infinite loop")
 	}
 }
 
