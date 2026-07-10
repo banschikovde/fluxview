@@ -72,8 +72,7 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 			// (URL + optional @digest). Use directly, don't append anything.
 			chartRef = chartName
 			install.ChartPathOptions.Version = hr.Spec.Chart.Spec.Version
-			var registryClient *registry.Client
-			var err error
+			
 			// Create registry client with necessary options for OCI charts
 			opts := []registry.ClientOption{
 				registry.ClientOptEnableCache(true),
@@ -81,7 +80,8 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 			if username != "" && password != "" {
 				opts = append(opts, registry.ClientOptBasicAuth(username, password))
 			}
-			registryClient, err = registry.NewClient(opts...)
+			
+			registryClient, err := registry.NewClient(opts...)
 			if err != nil {
 				return nil, fmt.Errorf("creating registry client: %w", err)
 			}
@@ -90,8 +90,7 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 			// HelmRepository type=oci: append chart name to repo URL.
 			chartRef = strings.TrimSuffix(repoURL, "/") + "/" + chartName
 			install.ChartPathOptions.Version = hr.Spec.Chart.Spec.Version
-			var registryClient *registry.Client
-			var err error
+			
 			// Create registry client with necessary options for OCI charts
 			opts := []registry.ClientOption{
 				registry.ClientOptEnableCache(true),
@@ -99,7 +98,8 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 			if username != "" && password != "" {
 				opts = append(opts, registry.ClientOptBasicAuth(username, password))
 			}
-			registryClient, err = registry.NewClient(opts...)
+			
+			registryClient, err := registry.NewClient(opts...)
 			if err != nil {
 				return nil, fmt.Errorf("creating registry client: %w", err)
 			}
