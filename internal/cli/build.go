@@ -180,7 +180,13 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	}
 
 	parser := flux.NewParser(clusterPath)
-	helmReleases, err := parser.ParseHelmReleases(ctx)
+
+	// Resolve HelmReleases with namespace/name transformers applied by any
+	// native kustomize overlay taken into account (see
+	// resolveHelmReleasesWithKustomizeNamespaces for why this matters).
+	builder := kustomize.NewBuilder()
+	buildCache := make(map[string][]byte)
+	helmReleases, err := resolveHelmReleasesWithKustomizeNamespaces(ctx, clusterPath, builder, buildCache)
 	if err != nil {
 		return NewExitError(fmt.Errorf("parsing HelmRelease resources: %w", err), ExitCodeError)
 	}
@@ -193,9 +199,9 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		}
 	}
 
-	// Apply namespace filter if specified (filter HRs by their target namespace)
+	// Apply namespace filter if specified (filter HRs by namespace or target namespace)
 	if flags.Namespace != "" {
-		helmReleases = filterHelmReleasesByTargetNamespace(helmReleases, flags.Namespace)
+		helmReleases = filterHelmReleasesByNamespace(helmReleases, flags.Namespace)
 		if len(helmReleases) == 0 {
 			return NewExitError(fmt.Errorf("no HelmReleases found in namespace %q", flags.Namespace), ExitCodeError)
 		}
@@ -446,16 +452,16 @@ func filterHelmReleases(resources []flux.HelmRelease, name string) []flux.HelmRe
 	return result
 }
 
-// filterHelmReleasesByTargetNamespace filters HelmRelease resources by their target namespace.
-// The target namespace is hr.Spec.TargetNamespace if set, otherwise hr.Metadata.Namespace.
-func filterHelmReleasesByTargetNamespace(resources []flux.HelmRelease, namespace string) []flux.HelmRelease {
+// filterHelmReleasesByNamespace filters HelmRelease resources by namespace.
+// Includes HRs whose metadata.namespace matches OR whose targetNamespace matches.
+func filterHelmReleasesByNamespace(resources []flux.HelmRelease, namespace string) []flux.HelmRelease {
 	var result []flux.HelmRelease
 	for _, hr := range resources {
 		targetNamespace := hr.Spec.TargetNamespace
 		if targetNamespace == "" {
 			targetNamespace = hr.Metadata.Namespace
 		}
-		if targetNamespace == namespace {
+		if hr.Metadata.Namespace == namespace || targetNamespace == namespace {
 			result = append(result, hr)
 		}
 	}
@@ -732,6 +738,94 @@ func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomi
 	return configMaps
 }
 
+// resolveHelmReleasesWithKustomizeNamespaces returns HelmRelease resources
+// found under clusterPath, with namespace/name transformers applied by
+// kustomize (e.g. a top-level `namespace:` field in kustomization.yaml)
+// correctly reflected.
+//
+// Reading a HelmRelease YAML file directly (as flux.Parser.ParseHelmReleases
+// does) only sees whatever `metadata.namespace` is literally written in that
+// file. If the HelmRelease is actually managed by a native kustomize overlay
+// that sets `namespace:` (or namePrefix/nameSuffix) for everything it builds,
+// the file on disk may have no namespace at all, or a different one than what
+// Flux will actually apply on the cluster — the transformer only takes effect
+// when kustomize itself builds the resource.
+//
+// To account for this, HelmReleases are additionally extracted from the
+// output of `kustomize build` for every native kustomize directory discovered
+// under clusterPath (mirrors resolveConfigMaps' approach for ConfigMaps).
+// A kustomize-resolved HelmRelease (identified by name) takes precedence over
+// the raw-parsed one; HelmReleases not covered by any kustomize directory
+// (loose files with no owning kustomization.yaml) fall back to the raw parse,
+// since there is no transformer to apply for them anyway.
+//
+// Note: dedup is by name only. If a kustomize overlay also applies a
+// namePrefix/nameSuffix transformer, the transformed name won't match the
+// raw-parsed name, and both the raw and the kustomize-resolved HelmRelease
+// may appear in the result. Fully correct name matching would require
+// tracking resource identity through the kustomize build graph, which this
+// function does not attempt.
+func resolveHelmReleasesWithKustomizeNamespaces(ctx context.Context, clusterPath string, builder *kustomize.Builder, buildCache map[string][]byte) ([]flux.HelmRelease, error) {
+	parser := flux.NewParser(clusterPath)
+
+	// 1. Parse raw HelmRelease YAML files (namespace as literally written).
+	rawHelmReleases, err := parser.ParseHelmReleases(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. Discover native kustomize directories and build them to resolve
+	// namespace/name transformers.
+	kustomizeDirs, dErr := flux.DiscoverKustomizeDirs(clusterPath)
+	if dErr != nil {
+		// Discovery failure isn't fatal — fall back to the raw parse.
+		return rawHelmReleases, nil
+	}
+
+	var resolvedHelmReleases []flux.HelmRelease
+	resolvedNames := make(map[string]bool)
+
+	for _, dir := range kustomizeDirs {
+		if err := CheckInterrupted(ctx); err != nil {
+			return nil, err
+		}
+
+		var output []byte
+		var buildErr error
+
+		if cached, ok := buildCache[dir]; ok {
+			output = cached
+		} else {
+			output, buildErr = builder.Build(dir)
+			if buildErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: kustomize build %s failed: %v\n", dir, buildErr)
+				continue
+			}
+			buildCache[dir] = output
+		}
+
+		builtHRs, parseErr := flux.ParseHelmReleasesFromBytes(output)
+		if parseErr != nil {
+			continue
+		}
+		for _, hr := range builtHRs {
+			resolvedHelmReleases = append(resolvedHelmReleases, hr)
+			resolvedNames[hr.Metadata.Name] = true
+		}
+	}
+
+	// 3. Combine: kustomize-resolved HelmReleases (correct namespace) plus
+	// any raw-parsed HelmRelease not already covered by a kustomize build.
+	result := resolvedHelmReleases
+	for _, hr := range rawHelmReleases {
+		if !resolvedNames[hr.Metadata.Name] {
+			result = append(result, hr)
+		}
+	}
+
+	return result, nil
+}
+
 // hasDirectKustomizations checks if the given path contains Flux Kustomization
 // resources directly (not in subdirectories).
 func hasDirectKustomizations(path string) (bool, error) {
@@ -786,7 +880,9 @@ func isYAMLFile(filename string) bool {
 
 // convertJSONInYAMLToYAML converts JSON-in-YAML format (e.g., metadata: {...})
 // to proper YAML format (e.g., metadata:
-//   annotations: ...).
+//
+//	annotations: ...).
+//
 // Helm v4 sometimes renders large objects like CRDs as JSON in YAML.
 func convertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
 	var result interface{}

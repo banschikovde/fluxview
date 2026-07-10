@@ -77,6 +77,42 @@ func isNativeKustomize(kust nativeKustomization) bool {
 		strings.HasPrefix(kust.APIVersion, "kustomize.config.k8s.io")
 }
 
+// ParseHelmReleasesFromBytes parses HelmRelease resources from YAML output bytes.
+// Used to extract HelmReleases from kustomize build output so that namespace/
+// name transformers applied by kustomize (e.g. a top-level `namespace:` field
+// in kustomization.yaml) are reflected, unlike parsing the raw HelmRelease
+// file directly from disk.
+func ParseHelmReleasesFromBytes(data []byte) ([]HelmRelease, error) {
+	var results []HelmRelease
+
+	docs := SplitYAMLDocuments(data)
+	for _, doc := range docs {
+		trimmed := strings.TrimSpace(doc)
+		if trimmed == "" {
+			continue
+		}
+
+		var meta struct {
+			APIVersion string `yaml:"apiVersion"`
+			Kind       string `yaml:"kind"`
+		}
+		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
+			continue
+		}
+		if meta.Kind != KindHelmRelease || !isHelmAPI(meta.APIVersion) {
+			continue
+		}
+
+		var hr HelmRelease
+		if err := yaml.Unmarshal([]byte(trimmed), &hr); err != nil {
+			continue
+		}
+		results = append(results, hr)
+	}
+
+	return results, nil
+}
+
 // ParseConfigMapsFromBytes parses ConfigMap resources from YAML output bytes.
 // Used to extract ConfigMaps from kustomize build output.
 func ParseConfigMapsFromBytes(data []byte) ([]ConfigMap, error) {

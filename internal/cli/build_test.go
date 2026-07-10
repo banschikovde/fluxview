@@ -1,10 +1,14 @@
 package cli
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/banschikovde/fluxview/internal/flux"
+	"github.com/banschikovde/fluxview/internal/kustomize"
 )
 
 func TestReorderYAMLFields(t *testing.T) {
@@ -296,6 +300,98 @@ func TestResolveOCIRepoURL_WithRef(t *testing.T) {
 	}
 	if ver != "" {
 		t.Errorf("digest: version = %q, want empty", ver)
+	}
+}
+
+func TestResolveHelmReleasesWithKustomizeNamespaces_InheritsKustomizeNamespace(t *testing.T) {
+	clusterPath := t.TempDir()
+
+	overlayDir := filepath.Join(clusterPath, "cert-manager")
+	if err := os.MkdirAll(overlayDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	// HelmRelease with NO explicit metadata.namespace — relies entirely on
+	// the kustomize overlay's `namespace:` transformer, as is common in
+	// base/overlay layouts.
+	hrYAML := `apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cert-manager
+spec:
+  chart:
+    spec:
+      chart: cert-manager
+`
+	if err := os.WriteFile(filepath.Join(overlayDir, "helmrelease.yaml"), []byte(hrYAML), 0o644); err != nil {
+		t.Fatalf("WriteFile helmrelease.yaml: %v", err)
+	}
+
+	kustYAML := `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: cert-manager
+resources:
+  - helmrelease.yaml
+`
+	if err := os.WriteFile(filepath.Join(overlayDir, "kustomization.yaml"), []byte(kustYAML), 0o644); err != nil {
+		t.Fatalf("WriteFile kustomization.yaml: %v", err)
+	}
+
+	// A second, loose HelmRelease outside any kustomize overlay, with an
+	// explicit namespace — should still be found via the raw-parse fallback.
+	looseYAML := `apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: podinfo
+  namespace: apps
+spec:
+  chart:
+    spec:
+      chart: podinfo
+`
+	if err := os.WriteFile(filepath.Join(clusterPath, "podinfo.yaml"), []byte(looseYAML), 0o644); err != nil {
+		t.Fatalf("WriteFile podinfo.yaml: %v", err)
+	}
+
+	builder := kustomize.NewBuilder()
+	buildCache := make(map[string][]byte)
+	helmReleases, err := resolveHelmReleasesWithKustomizeNamespaces(context.Background(), clusterPath, builder, buildCache)
+	if err != nil {
+		t.Fatalf("resolveHelmReleasesWithKustomizeNamespaces: %v", err)
+	}
+
+	var certManagerHR, podinfoHR *flux.HelmRelease
+	for i := range helmReleases {
+		switch helmReleases[i].Metadata.Name {
+		case "cert-manager":
+			certManagerHR = &helmReleases[i]
+		case "podinfo":
+			podinfoHR = &helmReleases[i]
+		}
+	}
+
+	if certManagerHR == nil {
+		t.Fatalf("cert-manager HelmRelease not found in result: %+v", helmReleases)
+	}
+	if certManagerHR.Metadata.Namespace != "cert-manager" {
+		t.Errorf("cert-manager HelmRelease namespace = %q, want %q (inherited from kustomize namespace: transformer)",
+			certManagerHR.Metadata.Namespace, "cert-manager")
+	}
+
+	if podinfoHR == nil {
+		t.Fatalf("podinfo HelmRelease (loose file, no kustomize overlay) not found in result: %+v", helmReleases)
+	}
+	if podinfoHR.Metadata.Namespace != "apps" {
+		t.Errorf("podinfo HelmRelease namespace = %q, want %q (explicit, no transformer involved)",
+			podinfoHR.Metadata.Namespace, "apps")
+	}
+
+	// filterHelmReleasesByTargetNamespace should now correctly match the
+	// kustomize-inherited namespace, reproducing the reported bug fix.
+	filtered := filterHelmReleasesByNamespace(helmReleases, "cert-manager")
+	if len(filtered) != 1 || filtered[0].Metadata.Name != "cert-manager" {
+		t.Errorf("filterHelmReleasesByNamespace(%q) = %+v, want exactly the cert-manager HelmRelease",
+			"cert-manager", filtered)
 	}
 }
 
