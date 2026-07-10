@@ -399,38 +399,11 @@ func TestResolveValuesFrom(t *testing.T) {
 	}
 }
 
-func TestResolveValuesFrom_Secret(t *testing.T) {
-	hr := HelmRelease{
-		Metadata: ObjectMeta{Name: "app", Namespace: "flux-system"},
-		Spec: HelmReleaseSpec{
-			ValuesFrom: []interface{}{
-				map[string]interface{}{
-					"kind": "Secret",
-					"name": "app-secrets",
-				},
-			},
-		},
-	}
-
-	secrets := []Secret{
-		{
-			Metadata: ObjectMeta{Name: "app-secrets", Namespace: "flux-system"},
-			StringData: map[string]string{
-				"password": "secret-password",
-			},
-		},
-	}
-
-	result := ResolveValuesFrom(hr, nil, secrets)
-	if result == nil {
-		t.Fatal("expected non-nil result")
-	}
-	if result["password"] != "secret-password" {
-		t.Errorf("password = %q, want %q", result["password"], "secret-password")
-	}
-}
-
-func TestResolveValuesFrom_Base64Secret(t *testing.T) {
+// TestResolveValuesFrom_SecretsNotResolved verifies that secret values are
+// NOT injected into Helm rendering. This prevents leakage of real secret
+// values through rendered non-Secret resources (ConfigMaps, annotations, etc.)
+// that RedactSecrets does not cover.
+func TestResolveValuesFrom_SecretsNotResolved(t *testing.T) {
 	hr := HelmRelease{
 		Metadata: ObjectMeta{Name: "app", Namespace: "flux-system"},
 		Spec: HelmReleaseSpec{
@@ -449,23 +422,37 @@ func TestResolveValuesFrom_Base64Secret(t *testing.T) {
 			Data: map[string]string{
 				"password": "c2VjcmV0LXBhc3N3b3Jk", // base64 of "secret-password"
 			},
+			StringData: map[string]string{
+				"token": "real-token-value",
+			},
 		},
 	}
 
 	result := ResolveValuesFrom(hr, nil, secrets)
-	if result == nil {
-		t.Fatal("expected non-nil result")
-	}
-	if result["password"] != "secret-password" {
-		t.Errorf("password = %q, want %q (should be decoded)", result["password"], "secret-password")
+
+	// Secret values must NOT appear in the result map.
+	if result != nil {
+		if v, ok := result["password"]; ok {
+			t.Errorf("secret value for 'password' leaked into Helm values: %v", v)
+		}
+		if v, ok := result["token"]; ok {
+			t.Errorf("secret value for 'token' leaked into Helm values: %v", v)
+		}
 	}
 }
 
-func TestResolveValuesFrom_StringDataPrecedence(t *testing.T) {
+// TestResolveValuesFrom_MixedConfigMapAndSecret verifies that ConfigMap values
+// are resolved while Secret values are skipped, even when both are referenced
+// in the same valuesFrom list.
+func TestResolveValuesFrom_MixedConfigMapAndSecret(t *testing.T) {
 	hr := HelmRelease{
 		Metadata: ObjectMeta{Name: "app", Namespace: "flux-system"},
 		Spec: HelmReleaseSpec{
 			ValuesFrom: []interface{}{
+				map[string]interface{}{
+					"kind": "ConfigMap",
+					"name": "app-config",
+				},
 				map[string]interface{}{
 					"kind": "Secret",
 					"name": "app-secrets",
@@ -474,23 +461,31 @@ func TestResolveValuesFrom_StringDataPrecedence(t *testing.T) {
 		},
 	}
 
+	configMaps := []ConfigMap{
+		{
+			Metadata: ObjectMeta{Name: "app-config", Namespace: "flux-system"},
+			Data: map[string]string{
+				"replicas": "2",
+			},
+		},
+	}
 	secrets := []Secret{
 		{
 			Metadata: ObjectMeta{Name: "app-secrets", Namespace: "flux-system"},
 			StringData: map[string]string{
-				"password": "from-string-data",
-			},
-			Data: map[string]string{
-				"password": "ZnJvbS1kYXRh", // base64 of "from-data"
+				"password": "leaked-if-not-fixed",
 			},
 		},
 	}
 
-	result := ResolveValuesFrom(hr, nil, secrets)
-	if result == nil {
-		t.Fatal("expected non-nil result")
+	result := ResolveValuesFrom(hr, configMaps, secrets)
+
+	// ConfigMap value should be present.
+	if result["replicas"] != "2" {
+		t.Errorf("ConfigMap value should be resolved, got %v", result["replicas"])
 	}
-	if result["password"] != "from-string-data" {
-		t.Errorf("password = %q, want %q (stringData should take precedence)", result["password"], "from-string-data")
+	// Secret value must NOT be present.
+	if v, ok := result["password"]; ok {
+		t.Errorf("secret value leaked: %v", v)
 	}
 }

@@ -295,9 +295,20 @@ func parseValuesFrom(raw any) []ValuesFromEntry {
 
 // ResolveValuesFrom resolves values from ConfigMaps and Secrets referenced in valuesFrom.
 // Returns a merged map of values where later entries in the valuesFrom list override earlier ones
-// (matching Flux behavior where the order matters). ConfigMap and Secret values are merged
-// by key, not by type precedence.
+// (matching Flux behavior where the order matters).
+//
+// Secret values are intentionally NOT resolved — consistent with the
+// postBuild.substituteFrom behavior ("we cannot read actual secret values").
+// Injecting real secret values into Helm rendering risks leaking them through
+// rendered resources (ConfigMaps, annotations, env vars) that RedactSecrets
+// does not cover (it only masks kind: Secret documents). Charts render with
+// placeholder/missing values; structural correctness is preserved.
 func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret) map[string]any {
+	// secrets parameter is intentionally unused: real secret values are not
+	// injected into Helm rendering (see function doc comment). Kept in the
+	// signature for API symmetry with configMaps and call-site compatibility.
+	_ = secrets
+
 	entries := parseValuesFrom(hr.Spec.ValuesFrom)
 	if len(entries) == 0 {
 		return nil
@@ -322,25 +333,8 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 				}
 			}
 		case "secret":
-			for _, secret := range secrets {
-				if secret.Metadata.Name == entry.Name && secret.Metadata.Namespace == entryNS {
-					for k := range secret.Data {
-						decodedValue := secret.GetSecretValue(k)
-						if decodedValue != "" {
-							result[k] = decodedValue
-						}
-					}
-					// Also handle stringData (keys not in data)
-					if secret.StringData != nil {
-						for k, v := range secret.StringData {
-							if _, exists := secret.Data[k]; !exists {
-								result[k] = v
-							}
-						}
-					}
-					break
-				}
-			}
+			// Deliberately skip: real secret values are not injected into Helm
+			// rendering to prevent leakage through non-Secret resources.
 		}
 	}
 
