@@ -154,6 +154,16 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	// (they are invisible to a naive scan of clusterPath alone).
 	helmReleasesFromBuild, _ := flux.ParseHelmReleasesFromBytes(output)
 
+	// Apply namespace filter to the HR list so only matching HelmReleases are
+	// inflated (avoids noise from unrelated namespaces).
+	if flags.Namespace != "" {
+		helmReleasesFromBuild = filterHelmReleasesByNamespace(helmReleasesFromBuild, flags.Namespace)
+	}
+
+	// Keep the original build output for source extraction — sources from all
+	// namespaces are needed to match HRs correctly.
+	buildOutput := output
+
 	if output != nil {
 		if flags.Namespace != "" {
 			output = filterByNamespace(output, flags.Namespace)
@@ -172,7 +182,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	}
 
 	// Inflate HelmReleases discovered in the build output.
-	inflateAndPrintHelmReleases(ctx, helmReleasesFromBuild, clusterPath, repoRoot, output, flags.SkipCRDs)
+	inflateAndPrintHelmReleases(ctx, helmReleasesFromBuild, clusterPath, repoRoot, buildOutput, flags.SkipCRDs)
 
 	return nil
 }
