@@ -36,7 +36,7 @@ func newBuildCmd() *cobra.Command {
 		Long: `Build Flux resources from a local git repository.
 
 Resource types:
-  ks, kustomization   — build all Kustomizations (kustomize + helm inflation)
+  ks, kustomization   — build all Kustomizations (kustomize output only)
   hr, helmrelease     — inflate HelmRelease chart(s)
 
 If [name] is omitted, all resources of the type are processed.
@@ -148,22 +148,6 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return NewExitError(err, ExitCodeError)
 	}
 
-	// Extract HelmReleases from the already-computed build output before any
-	// filtering is applied, so that HelmReleases in shared bases outside
-	// clusterPath — pulled in via Kustomization.spec.path — are discovered
-	// (they are invisible to a naive scan of clusterPath alone).
-	helmReleasesFromBuild, _ := flux.ParseHelmReleasesFromBytes(output)
-
-	// Apply namespace filter to the HR list so only matching HelmReleases are
-	// inflated (avoids noise from unrelated namespaces).
-	if flags.Namespace != "" {
-		helmReleasesFromBuild = filterHelmReleasesByNamespace(helmReleasesFromBuild, flags.Namespace)
-	}
-
-	// Keep the original build output for source extraction — sources from all
-	// namespaces are needed to match HRs correctly.
-	buildOutput := output
-
 	if output != nil {
 		if flags.Namespace != "" {
 			output = filterByNamespace(output, flags.Namespace)
@@ -180,9 +164,6 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		}
 		printRedacted(output)
 	}
-
-	// Inflate HelmReleases discovered in the build output.
-	inflateAndPrintHelmReleases(ctx, helmReleasesFromBuild, clusterPath, repoRoot, buildOutput, flags.SkipCRDs)
 
 	return nil
 }
