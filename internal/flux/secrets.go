@@ -31,11 +31,14 @@ func RedactSecrets(data []byte) []byte {
 			continue
 		}
 
-		_ = redactSecretNode(&node)
+		redactSecretNode(&node)
 
 		enc := yaml.NewEncoder(&buf)
 		enc.SetIndent(2)
-		_ = enc.Encode(&node)
+		if err := enc.Encode(&node); err != nil {
+			// Encoding failed — keep original text to avoid data loss.
+			buf.WriteString(doc)
+		}
 		enc.Close()
 	}
 
@@ -43,10 +46,9 @@ func RedactSecrets(data []byte) []byte {
 }
 
 // redactSecretNode checks if the YAML document is a Secret and redacts data fields.
-// Returns true if the document was redacted.
-func redactSecretNode(node *yaml.Node) bool {
+func redactSecretNode(node *yaml.Node) {
 	if node.Kind != yaml.DocumentNode {
-		return false
+		return
 	}
 
 	// Find the mapping node (the actual YAML content).
@@ -58,13 +60,13 @@ func redactSecretNode(node *yaml.Node) bool {
 		}
 	}
 	if mapping == nil {
-		return false
+		return
 	}
 
 	// Check kind field.
 	kind := getMapValue(mapping, "kind")
 	if kind == nil || strings.ToLower(kind.Value) != "secret" {
-		return false
+		return
 	}
 
 	// Redact data and stringData fields.
@@ -76,8 +78,6 @@ func redactSecretNode(node *yaml.Node) bool {
 
 		redactMappingValues(dataNode)
 	}
-
-	return true
 }
 
 // redactMappingValues replaces all values in a mapping node with the redacted placeholder.

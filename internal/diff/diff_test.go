@@ -221,3 +221,73 @@ func TestMyers_MultipleNonAdjacent(t *testing.T) {
 		t.Error("expected both +X and +Y")
 	}
 }
+
+// TestGreedyDiff_LargeInput exercises the greedyDiff fallback path that
+// triggers when total input exceeds maxMyersInputSize (50000 lines).
+// Verifies correct prefix/suffix matching and middle-block diff output.
+func TestGreedyDiff_LargeInput(t *testing.T) {
+	// Generate >50000 total lines: common prefix, diff block, common suffix.
+	var origLines, modLines []string
+
+	// 20000 lines common prefix.
+	for i := 0; i < 20000; i++ {
+		origLines = append(origLines, "prefix-"+itos(i))
+		modLines = append(modLines, "prefix-"+itos(i))
+	}
+
+	// 5000 lines that differ.
+	for i := 0; i < 5000; i++ {
+		origLines = append(origLines, "old-"+itos(i))
+		modLines = append(modLines, "new-"+itos(i))
+	}
+
+	// 20000 lines common suffix.
+	for i := 0; i < 20000; i++ {
+		origLines = append(origLines, "suffix-"+itos(i))
+		modLines = append(modLines, "suffix-"+itos(i))
+	}
+
+	original := strings.Join(origLines, "\n")
+	modified := strings.Join(modLines, "\n")
+
+	result := Compute(original, modified)
+	if !result.HasDiff {
+		t.Fatal("expected diff for large input")
+	}
+
+	// Middle block should produce -old and +new lines.
+	if !strings.Contains(result.RawDiff, "-old-0") {
+		t.Error("expected '-old-0' in diff (deleted prefix line)")
+	}
+	if !strings.Contains(result.RawDiff, "+new-0") {
+		t.Error("expected '+new-0' in diff (inserted prefix line)")
+	}
+
+	// Common prefix and suffix should NOT appear as changes.
+	if strings.Contains(result.RawDiff, "-prefix-0") {
+		t.Error("common prefix line should not appear as deletion")
+	}
+	if strings.Contains(result.RawDiff, "+suffix-0") {
+		t.Error("common suffix line should not appear as insertion")
+	}
+}
+
+// itos is a minimal int-to-string helper to avoid strconv import in test.
+func itos(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf []byte
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	for n > 0 {
+		buf = append([]byte{byte('0' + n%10)}, buf...)
+		n /= 10
+	}
+	if neg {
+		buf = append([]byte{'-'}, buf...)
+	}
+	return string(buf)
+}
