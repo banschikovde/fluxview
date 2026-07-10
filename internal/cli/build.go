@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/cyphar/filepath-securejoin"
@@ -162,7 +163,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		if flags.StripAttrs != "" {
 			output = stripAllAttrs(output, flags.StripAttrs)
 		}
-		printRedacted(output)
+		printResourcesBoxed(output)
 	}
 
 	return nil
@@ -247,6 +248,80 @@ func printRedacted(data []byte) int {
 	count := flux.CountSecrets(converted)
 	fmt.Print(string(redacted))
 	return count
+}
+
+// resourceEntry holds a single YAML document with its resource key for sorting.
+type resourceEntry struct {
+	key     resourceKey
+	content string
+}
+
+// printResourcesBoxed splits multi-doc YAML into individual resources, sorts
+// them by kind/namespace/name, and prints each with a box header (same format
+// as diff output). This replaces the flat YAML output of printRedacted.
+func printResourcesBoxed(data []byte) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return
+	}
+
+	docs := flux.SplitYAMLText(data)
+	var entries []resourceEntry
+
+	for _, doc := range docs {
+		trimmed := strings.TrimSpace(doc)
+		if trimmed == "" {
+			continue
+		}
+
+		var meta struct {
+			Kind     string `yaml:"kind"`
+			Metadata struct {
+				Name      string `yaml:"name"`
+				Namespace string `yaml:"namespace"`
+			} `yaml:"metadata"`
+		}
+		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
+			continue
+		}
+		if meta.Kind == "" || meta.Metadata.Name == "" {
+			continue
+		}
+
+		// Process: reorder fields, convert JSON-in-YAML, redact secrets.
+		normalized := reorderYAMLFields([]byte(trimmed))
+		converted, err := convertJSONInYAMLToYAML(normalized)
+		if err != nil || converted == nil {
+			continue
+		}
+		redacted := string(flux.RedactSecrets(converted))
+
+		entries = append(entries, resourceEntry{
+			key: resourceKey{
+				Kind:      meta.Kind,
+				Namespace: meta.Metadata.Namespace,
+				Name:      meta.Metadata.Name,
+			},
+			content: strings.TrimSpace(redacted),
+		})
+	}
+
+	// Sort by kind, namespace, name — same order as diff output.
+	sort.Slice(entries, func(i, j int) bool {
+		a, b := entries[i].key, entries[j].key
+		if a.Kind != b.Kind {
+			return a.Kind < b.Kind
+		}
+		if a.Namespace != b.Namespace {
+			return a.Namespace < b.Namespace
+		}
+		return a.Name < b.Name
+	})
+
+	for _, e := range entries {
+		header := e.key.String()
+		border := strings.Repeat("-", len(header)+2)
+		fmt.Printf("%s\n %s\n%s\n%s\n\n", border, header, border, e.content)
+	}
 }
 
 // inflateHelmReleasesShared inflates all non-suspended HelmReleases and returns
@@ -417,7 +492,7 @@ func inflateAndPrintHelmReleases(ctx context.Context, helmReleases []flux.HelmRe
 		if err := CheckInterrupted(ctx); err != nil {
 			return
 		}
-		printRedacted(output)
+		printResourcesBoxed(output)
 	}
 }
 
