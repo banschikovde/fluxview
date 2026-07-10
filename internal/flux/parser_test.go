@@ -65,21 +65,6 @@ spec:
 			wantName: "podinfo",
 		},
 		{
-			name: "GitRepository resource",
-			yaml: `apiVersion: source.toolkit.fluxcd.io/v1
-kind: GitRepository
-metadata:
-  name: flux-system
-  namespace: flux-system
-spec:
-  url: https://github.com/example/repo.git
-  ref:
-    branch: main
-`,
-			wantKind: KindGitRepository,
-			wantName: "flux-system",
-		},
-		{
 			name:    "empty document",
 			yaml:    ``,
 			wantNil: true,
@@ -120,9 +105,6 @@ metadata:
 				gotName = v.Metadata.Name
 				gotKind = v.Kind
 			case HelmRepository:
-				gotName = v.Metadata.Name
-				gotKind = v.Kind
-			case GitRepository:
 				gotName = v.Metadata.Name
 				gotKind = v.Kind
 			default:

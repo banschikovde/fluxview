@@ -6,7 +6,6 @@ const (
 	KindKustomization  = "Kustomization"
 	KindHelmRelease    = "HelmRelease"
 	KindHelmRepository = "HelmRepository"
-	KindGitRepository  = "GitRepository"
 	KindOCIRepository  = "OCIRepository"
 
 	GroupSourceToolkitFluxHelmIO    = "source.toolkit.fluxcd.io"
@@ -201,24 +200,6 @@ type HelmRepositorySpec struct {
 		Name string `yaml:"name"`
 	} `yaml:"secretRef,omitempty"`
 	Type string `yaml:"type,omitempty"`
-}
-
-// GitRepository represents a Flux GitRepository resource.
-type GitRepository struct {
-	APIVersion string            `yaml:"apiVersion"`
-	Kind       string            `yaml:"kind"`
-	Metadata   ObjectMeta        `yaml:"metadata"`
-	Spec       GitRepositorySpec `yaml:"spec"`
-}
-
-// GitRepositorySpec holds the spec for a Flux GitRepository.
-type GitRepositorySpec struct {
-	URL       string      `yaml:"url"`
-	Ref       interface{} `yaml:"ref,omitempty"`
-	Interval  interface{} `yaml:"interval,omitempty"`
-	SecretRef *struct {
-		Name string `yaml:"name"`
-	} `yaml:"secretRef,omitempty"`
 }
 
 // ConfigMap represents a Kubernetes ConfigMap resource.

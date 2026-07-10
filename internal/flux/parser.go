@@ -323,14 +323,6 @@ func parseSingleDocument(data []byte) (interface{}, error) {
 			}
 			return repo, nil
 		}
-	case KindGitRepository:
-		if isSourceAPI(meta.APIVersion) {
-			var repo GitRepository
-			if err := yaml.Unmarshal(data, &repo); err != nil {
-				return nil, fmt.Errorf("unmarshaling GitRepository: %w", err)
-			}
-			return repo, nil
-		}
 	case KindOCIRepository:
 		if isSourceAPI(meta.APIVersion) {
 			var repo OCIRepository
