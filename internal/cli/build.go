@@ -744,6 +744,73 @@ func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomi
 	return configMaps
 }
 
+// resolveHelmInflationSources parses the source resources needed for HelmRelease
+// inflation (HelmRepository, OCIRepository, ConfigMap, Secret). Each resource
+// type is first parsed from clusterPath; if none are found there, the search
+// falls back to repoRoot so that sources defined outside the cluster path
+// (e.g. a shared sources/ or flux-system/ directory) are still resolved.
+//
+// Errors are logged as warnings and the corresponding slice may be nil — the
+// caller (inflateHelmReleasesShared) handles missing sources gracefully by
+// emitting a per-HelmRelease warning and skipping.
+func resolveHelmInflationSources(ctx context.Context, clusterPath, repoRoot string) (helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository, configMaps []flux.ConfigMap, secrets []flux.Secret) {
+	parser := flux.NewParser(clusterPath)
+
+	helmRepos, err := parser.ParseHelmRepositories(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse HelmRepositories: %v\n", err)
+		helmRepos = nil
+	}
+	if len(helmRepos) == 0 && repoRoot != "" && repoRoot != clusterPath {
+		if rootRepos, rErr := flux.NewParser(repoRoot).ParseHelmRepositories(ctx); rErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not parse HelmRepositories from %s: %v\n", repoRoot, rErr)
+		} else {
+			helmRepos = rootRepos
+		}
+	}
+
+	ociRepos, err = parser.ParseOCIRepositories(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse OCIRepositories: %v\n", err)
+		ociRepos = nil
+	}
+	if len(ociRepos) == 0 && repoRoot != "" && repoRoot != clusterPath {
+		if rootOCI, rErr := flux.NewParser(repoRoot).ParseOCIRepositories(ctx); rErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not parse OCIRepositories from %s: %v\n", repoRoot, rErr)
+		} else {
+			ociRepos = rootOCI
+		}
+	}
+
+	configMaps, err = parser.ParseConfigMaps(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMaps: %v\n", err)
+		configMaps = nil
+	}
+	if len(configMaps) == 0 && repoRoot != "" && repoRoot != clusterPath {
+		if rootCMs, rErr := flux.NewParser(repoRoot).ParseConfigMaps(ctx); rErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMaps from %s: %v\n", repoRoot, rErr)
+		} else {
+			configMaps = rootCMs
+		}
+	}
+
+	secrets, err = parser.ParseSecrets(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse Secrets: %v\n", err)
+		secrets = nil
+	}
+	if len(secrets) == 0 && repoRoot != "" && repoRoot != clusterPath {
+		if rootSecrets, rErr := flux.NewParser(repoRoot).ParseSecrets(ctx); rErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not parse Secrets from %s: %v\n", repoRoot, rErr)
+		} else {
+			secrets = rootSecrets
+		}
+	}
+
+	return helmRepos, ociRepos, configMaps, secrets
+}
+
 // resolveHelmReleasesWithKustomizeNamespaces returns HelmRelease resources
 // found under clusterPath, with namespace/name transformers applied by
 // kustomize (e.g. a top-level `namespace:` field in kustomization.yaml)
