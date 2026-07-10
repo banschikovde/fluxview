@@ -72,32 +72,30 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 		// (URL + optional @digest). Use directly, don't append anything.
 		chartRef = chartName
 		install.ChartPathOptions.Version = hr.Spec.Chart.Spec.Version
-		registryClient, err := registry.NewClient()
-		if err != nil {
-			return nil, fmt.Errorf("creating registry client: %w", err)
-		}
-		// Set credentials for OCI registry if provided.
+		var registryClient *registry.Client
+		var err error
 		if username != "" && password != "" {
 			registryClient, err = registry.NewClient(registry.ClientOptBasicAuth(username, password))
-			if err != nil {
-				return nil, fmt.Errorf("creating registry client with auth: %w", err)
-			}
+		} else {
+			registryClient, err = registry.NewClient()
+		}
+		if err != nil {
+			return nil, fmt.Errorf("creating registry client: %w", err)
 		}
 		actionConfig.RegistryClient = registryClient
 	case strings.HasPrefix(repoURL, "oci://"):
 		// HelmRepository type=oci: append chart name to repo URL.
 		chartRef = strings.TrimSuffix(repoURL, "/") + "/" + chartName
 		install.ChartPathOptions.Version = hr.Spec.Chart.Spec.Version
-		registryClient, err := registry.NewClient()
-		if err != nil {
-			return nil, fmt.Errorf("creating registry client: %w", err)
-		}
-		// Set credentials for OCI registry if provided.
+		var registryClient *registry.Client
+		var err error
 		if username != "" && password != "" {
 			registryClient, err = registry.NewClient(registry.ClientOptBasicAuth(username, password))
-			if err != nil {
-				return nil, fmt.Errorf("creating registry client with auth: %w", err)
-			}
+		} else {
+			registryClient, err = registry.NewClient()
+		}
+		if err != nil {
+			return nil, fmt.Errorf("creating registry client: %w", err)
 		}
 		actionConfig.RegistryClient = registryClient
 	default:
