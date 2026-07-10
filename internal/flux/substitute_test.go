@@ -465,7 +465,7 @@ func TestResolveValuesFrom_MixedConfigMapAndSecret(t *testing.T) {
 		{
 			Metadata: ObjectMeta{Name: "app-config", Namespace: "flux-system"},
 			Data: map[string]string{
-				" replicas": "2",
+				"replicas": "2",
 			},
 		},
 	}
@@ -481,8 +481,8 @@ func TestResolveValuesFrom_MixedConfigMapAndSecret(t *testing.T) {
 	result := ResolveValuesFrom(hr, configMaps, secrets)
 
 	// ConfigMap value should be present.
-	if result[" replicas"] != "2" {
-		t.Errorf("ConfigMap value should be resolved, got %v", result[" replicas"])
+	if result["replicas"] != "2" {
+		t.Errorf("ConfigMap value should be resolved, got %v", result["replicas"])
 	}
 	// Secret value must NOT be present.
 	if v, ok := result["password"]; ok {

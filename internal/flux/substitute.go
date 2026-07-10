@@ -304,6 +304,11 @@ func parseValuesFrom(raw any) []ValuesFromEntry {
 // does not cover (it only masks kind: Secret documents). Charts render with
 // placeholder/missing values; structural correctness is preserved.
 func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret) map[string]any {
+	// secrets parameter is intentionally unused: real secret values are not
+	// injected into Helm rendering (see function doc comment). Kept in the
+	// signature for API symmetry with configMaps and call-site compatibility.
+	_ = secrets
+
 	entries := parseValuesFrom(hr.Spec.ValuesFrom)
 	if len(entries) == 0 {
 		return nil
