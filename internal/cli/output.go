@@ -96,7 +96,9 @@ func reorderYAMLFields(data []byte) []byte {
 	var currentLines []string
 
 	for _, line := range strings.Split(string(data), "\n") {
-		if strings.TrimSpace(line) == "---" {
+		// Same separator logic as SplitYAMLText: only "---" at column 0,
+		// not indented "---" inside block scalars.
+		if strings.TrimRight(line, " \t") == "---" {
 			if len(currentLines) > 0 {
 				docs = append(docs, []byte(strings.Join(currentLines, "\n")))
 				currentLines = nil

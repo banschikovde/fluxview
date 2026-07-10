@@ -441,22 +441,47 @@ func SplitYAMLDocuments(data []byte) []string {
 	return docs
 }
 
-// SplitYAMLText splits multi-doc YAML by --- separators using plain text
-// operations. Normalizes CRLF to LF first. Faster than SplitYAMLDocuments
-// (which round-trips through yaml.Node) but does not normalize YAML formatting.
-// Note: does not track block scalar context — a literal "---" inside a
-// multiline block scalar (| or >) would be incorrectly treated as a separator.
+// SplitYAMLText splits multi-doc YAML into individual documents.
+// A document separator is a line that is exactly "---" at column 0
+// (no indentation). This correctly avoids splitting on "---" that appears:
+//   - Inside block scalars (| or >) — content is always indented
+//   - Inside PEM headers like "-----BEGIN CERTIFICATE-----"
+//   - As part of a longer string value
+//
+// Unparseable documents are preserved (conservative behavior) so that
+// downstream functions like RedactSecrets can process all documents.
 func SplitYAMLText(data []byte) []string {
 	normalized := strings.ReplaceAll(string(data), "\r\n", "\n")
+	lines := strings.Split(normalized, "\n")
+
 	var docs []string
-	for _, doc := range strings.Split(normalized, "\n---") {
-		s := strings.TrimSpace(doc)
-		s = strings.TrimPrefix(s, "---")
-		s = strings.TrimSpace(s)
-		if s != "" {
-			docs = append(docs, s)
+	var currentLines []string
+
+	flush := func() {
+		if len(currentLines) == 0 {
+			return
 		}
+		doc := strings.TrimSpace(strings.Join(currentLines, "\n"))
+		doc = strings.TrimPrefix(doc, "---")
+		doc = strings.TrimSpace(doc)
+		if doc != "" {
+			docs = append(docs, doc)
+		}
+		currentLines = nil
 	}
+
+	for _, line := range lines {
+		// A document separator is "---" at column 0, optionally with
+		// trailing whitespace. Indented "---" (inside block scalars) or
+		// longer strings like "-----BEGIN" are NOT separators.
+		if strings.TrimRight(line, " \t") == "---" {
+			flush()
+			continue
+		}
+		currentLines = append(currentLines, line)
+	}
+	flush()
+
 	return docs
 }
 
