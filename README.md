@@ -193,3 +193,7 @@ fluxview:diff:
 ## License
 
 Apache-2.0
+
+## TODO
+
+- **Security: Docker image runs as root** — add non-root user to the runtime stage. Requires fixed UID/GID and `--user` documentation for bind-mount compatibility (see #4 in code review).
