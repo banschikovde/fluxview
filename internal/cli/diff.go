@@ -279,7 +279,11 @@ func buildHROutput(ctx context.Context, clusterPath, name string) ([]byte, error
 		fmt.Fprintf(os.Stderr, "Warning: %v, processing in original order\n", err)
 	}
 
+	helmReleases = filterHelmReleases(helmReleases, name)
 	if len(helmReleases) == 0 {
+		if name != "" {
+			return nil, fmt.Errorf("HelmRelease %q not found", name)
+		}
 		return nil, nil // no HRs found, return empty
 	}
 
