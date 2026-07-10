@@ -184,41 +184,32 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		fmt.Fprintf(os.Stderr, "Building all HelmReleases in %s...\n", clusterPath)
 	}
 
+	// Require Flux Kustomization resources in the path — same contract as build ks.
+	hasDirectKS, err := hasDirectKustomizations(clusterPath)
+	if err != nil {
+		return NewExitError(fmt.Errorf("checking for Kustomization files: %w", err), ExitCodeError)
+	}
+	if !hasDirectKS {
+		return NewExitError(fmt.Errorf("no Kustomization files found in %s", clusterPath), ExitCodeError)
+	}
+
+	kustomizations, err := flux.NewParser(clusterPath).ParseKustomizations(ctx)
+	if err != nil {
+		return NewExitError(fmt.Errorf("parsing Kustomization resources: %w", err), ExitCodeError)
+	}
+
 	builder := kustomize.NewBuilder()
 	buildCache := make(map[string][]byte)
+	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
 
-	// Primary path: discover HelmReleases through Flux Kustomization build.
-	// buildAllKustomizations recursively follows Kustomization.spec.path
-	// (including shared bases outside clusterPath), applies all kustomize
-	// transforms, and discovers new Kustomizations — mirroring the real
-	// kustomize-controller. A HelmRelease in a shared base is already present,
-	// fully transformed, in this output.
-	var primaryHRs []flux.HelmRelease
-	var buildOutput []byte
-	kustomizations, ksErr := flux.NewParser(clusterPath).ParseKustomizations(ctx)
-	if ksErr == nil && len(kustomizations) > 0 {
-		configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
-		output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, true, buildCache)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: kustomize build failed: %v\n", err)
-		} else {
-			buildOutput = output
-			primaryHRs, _ = flux.ParseHelmReleasesFromBytes(output)
-		}
-	}
-
-	// Fallback: resolve HelmReleases via native kustomize overlays and raw
-	// YAML parse. Covers the case where clusterPath has no Flux Kustomization
-	// at all — raw HelmRelease files or native-kustomize dirs without a Flux
-	// wrapper (e.g. k8s/apps/base used directly).
-	fallbackHRs, err := resolveHelmReleasesWithKustomizeNamespaces(ctx, clusterPath, builder, buildCache)
+	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, true, buildCache)
 	if err != nil {
-		return NewExitError(fmt.Errorf("parsing HelmRelease resources: %w", err), ExitCodeError)
+		return NewExitError(err, ExitCodeError)
 	}
 
-	// Merge with dedup by namespace/name; the primary (buildAllKustomizations)
-	// version takes precedence on collision.
-	helmReleases := dedupHelmReleases(primaryHRs, fallbackHRs)
+	// Extract HelmReleases from the build output — they have kustomize-transformed
+	// namespaces and include HRs in shared bases pulled via spec.path.
+	helmReleases, _ := flux.ParseHelmReleasesFromBytes(output)
 
 	// Apply name filter if specified.
 	if name != "" {
@@ -241,7 +232,7 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return nil
 	}
 
-	inflateAndPrintHelmReleases(ctx, helmReleases, clusterPath, repoRoot, buildOutput, flags.SkipCRDs)
+	inflateAndPrintHelmReleases(ctx, helmReleases, clusterPath, repoRoot, output, flags.SkipCRDs)
 
 	return nil
 }
@@ -387,6 +378,20 @@ func resolveHelmRepoURL(hr flux.HelmRelease, helmRepos []flux.HelmRepository, se
 // extracted from it and prepended to the raw-parsed sources — build-output
 // sources have kustomize-transformed namespaces that match the HelmReleases.
 func inflateAndPrintHelmReleases(ctx context.Context, helmReleases []flux.HelmRelease, clusterPath, repoRoot string, buildOutput []byte, skipCRDs bool) {
+	// Deduplicate by namespace/name — two Flux Kustomizations may reference
+	// the same shared base, causing the same HelmRelease to appear twice in
+	// the build output.
+	seen := make(map[string]bool)
+	deduped := helmReleases[:0]
+	for _, hr := range helmReleases {
+		key := hr.Metadata.Namespace + "/" + hr.Metadata.Name
+		if !seen[key] {
+			seen[key] = true
+			deduped = append(deduped, hr)
+		}
+	}
+	helmReleases = deduped
+
 	if len(helmReleases) == 0 {
 		return
 	}
@@ -462,33 +467,6 @@ func filterHelmReleasesByNamespace(resources []flux.HelmRelease, namespace strin
 			result = append(result, hr)
 		}
 	}
-	return result
-}
-
-// dedupHelmReleases merges two HelmRelease lists, deduplicating by
-// namespace/name. Entries from the primary list take precedence on collision
-// (they come from buildAllKustomizations and have the fullest set of
-// kustomize transforms applied). Entries from fallback fill in any gaps
-// (e.g. raw HR files not covered by any Flux Kustomization).
-func dedupHelmReleases(primary, fallback []flux.HelmRelease) []flux.HelmRelease {
-	seen := make(map[string]bool)
-	var result []flux.HelmRelease
-
-	for _, hr := range primary {
-		key := hr.Metadata.Namespace + "/" + hr.Metadata.Name
-		if !seen[key] {
-			seen[key] = true
-			result = append(result, hr)
-		}
-	}
-	for _, hr := range fallback {
-		key := hr.Metadata.Namespace + "/" + hr.Metadata.Name
-		if !seen[key] {
-			seen[key] = true
-			result = append(result, hr)
-		}
-	}
-
 	return result
 }
 
@@ -827,94 +805,6 @@ func resolveHelmInflationSources(ctx context.Context, clusterPath, repoRoot stri
 	}
 
 	return helmRepos, ociRepos, configMaps, secrets
-}
-
-// resolveHelmReleasesWithKustomizeNamespaces returns HelmRelease resources
-// found under clusterPath, with namespace/name transformers applied by
-// kustomize (e.g. a top-level `namespace:` field in kustomization.yaml)
-// correctly reflected.
-//
-// Reading a HelmRelease YAML file directly (as flux.Parser.ParseHelmReleases
-// does) only sees whatever `metadata.namespace` is literally written in that
-// file. If the HelmRelease is actually managed by a native kustomize overlay
-// that sets `namespace:` (or namePrefix/nameSuffix) for everything it builds,
-// the file on disk may have no namespace at all, or a different one than what
-// Flux will actually apply on the cluster — the transformer only takes effect
-// when kustomize itself builds the resource.
-//
-// To account for this, HelmReleases are additionally extracted from the
-// output of `kustomize build` for every native kustomize directory discovered
-// under clusterPath (mirrors resolveConfigMaps' approach for ConfigMaps).
-// A kustomize-resolved HelmRelease (identified by name) takes precedence over
-// the raw-parsed one; HelmReleases not covered by any kustomize directory
-// (loose files with no owning kustomization.yaml) fall back to the raw parse,
-// since there is no transformer to apply for them anyway.
-//
-// Note: dedup is by name only. If a kustomize overlay also applies a
-// namePrefix/nameSuffix transformer, the transformed name won't match the
-// raw-parsed name, and both the raw and the kustomize-resolved HelmRelease
-// may appear in the result. Fully correct name matching would require
-// tracking resource identity through the kustomize build graph, which this
-// function does not attempt.
-func resolveHelmReleasesWithKustomizeNamespaces(ctx context.Context, clusterPath string, builder *kustomize.Builder, buildCache map[string][]byte) ([]flux.HelmRelease, error) {
-	parser := flux.NewParser(clusterPath)
-
-	// 1. Parse raw HelmRelease YAML files (namespace as literally written).
-	rawHelmReleases, err := parser.ParseHelmReleases(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	// 2. Discover native kustomize directories and build them to resolve
-	// namespace/name transformers.
-	kustomizeDirs, dErr := flux.DiscoverKustomizeDirs(clusterPath)
-	if dErr != nil {
-		// Discovery failure isn't fatal — fall back to the raw parse.
-		return rawHelmReleases, nil
-	}
-
-	var resolvedHelmReleases []flux.HelmRelease
-	resolvedNames := make(map[string]bool)
-
-	for _, dir := range kustomizeDirs {
-		if err := CheckInterrupted(ctx); err != nil {
-			return nil, err
-		}
-
-		var output []byte
-		var buildErr error
-
-		if cached, ok := buildCache[dir]; ok {
-			output = cached
-		} else {
-			output, buildErr = builder.Build(dir)
-			if buildErr != nil {
-				fmt.Fprintf(os.Stderr, "Warning: kustomize build %s failed: %v\n", dir, buildErr)
-				continue
-			}
-			buildCache[dir] = output
-		}
-
-		builtHRs, parseErr := flux.ParseHelmReleasesFromBytes(output)
-		if parseErr != nil {
-			continue
-		}
-		for _, hr := range builtHRs {
-			resolvedHelmReleases = append(resolvedHelmReleases, hr)
-			resolvedNames[hr.Metadata.Name] = true
-		}
-	}
-
-	// 3. Combine: kustomize-resolved HelmReleases (correct namespace) plus
-	// any raw-parsed HelmRelease not already covered by a kustomize build.
-	result := resolvedHelmReleases
-	for _, hr := range rawHelmReleases {
-		if !resolvedNames[hr.Metadata.Name] {
-			result = append(result, hr)
-		}
-	}
-
-	return result, nil
 }
 
 // hasDirectKustomizations checks if the given path contains Flux Kustomization

@@ -306,98 +306,6 @@ func TestResolveOCIRepoURL_WithRef(t *testing.T) {
 	}
 }
 
-func TestResolveHelmReleasesWithKustomizeNamespaces_InheritsKustomizeNamespace(t *testing.T) {
-	clusterPath := t.TempDir()
-
-	overlayDir := filepath.Join(clusterPath, "cert-manager")
-	if err := os.MkdirAll(overlayDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-
-	// HelmRelease with NO explicit metadata.namespace — relies entirely on
-	// the kustomize overlay's `namespace:` transformer, as is common in
-	// base/overlay layouts.
-	hrYAML := `apiVersion: helm.toolkit.fluxcd.io/v2
-kind: HelmRelease
-metadata:
-  name: cert-manager
-spec:
-  chart:
-    spec:
-      chart: cert-manager
-`
-	if err := os.WriteFile(filepath.Join(overlayDir, "helmrelease.yaml"), []byte(hrYAML), 0o644); err != nil {
-		t.Fatalf("WriteFile helmrelease.yaml: %v", err)
-	}
-
-	kustYAML := `apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-namespace: cert-manager
-resources:
-  - helmrelease.yaml
-`
-	if err := os.WriteFile(filepath.Join(overlayDir, "kustomization.yaml"), []byte(kustYAML), 0o644); err != nil {
-		t.Fatalf("WriteFile kustomization.yaml: %v", err)
-	}
-
-	// A second, loose HelmRelease outside any kustomize overlay, with an
-	// explicit namespace — should still be found via the raw-parse fallback.
-	looseYAML := `apiVersion: helm.toolkit.fluxcd.io/v2
-kind: HelmRelease
-metadata:
-  name: podinfo
-  namespace: apps
-spec:
-  chart:
-    spec:
-      chart: podinfo
-`
-	if err := os.WriteFile(filepath.Join(clusterPath, "podinfo.yaml"), []byte(looseYAML), 0o644); err != nil {
-		t.Fatalf("WriteFile podinfo.yaml: %v", err)
-	}
-
-	builder := kustomize.NewBuilder()
-	buildCache := make(map[string][]byte)
-	helmReleases, err := resolveHelmReleasesWithKustomizeNamespaces(context.Background(), clusterPath, builder, buildCache)
-	if err != nil {
-		t.Fatalf("resolveHelmReleasesWithKustomizeNamespaces: %v", err)
-	}
-
-	var certManagerHR, podinfoHR *flux.HelmRelease
-	for i := range helmReleases {
-		switch helmReleases[i].Metadata.Name {
-		case "cert-manager":
-			certManagerHR = &helmReleases[i]
-		case "podinfo":
-			podinfoHR = &helmReleases[i]
-		}
-	}
-
-	if certManagerHR == nil {
-		t.Fatalf("cert-manager HelmRelease not found in result: %+v", helmReleases)
-	}
-	if certManagerHR.Metadata.Namespace != "cert-manager" {
-		t.Errorf("cert-manager HelmRelease namespace = %q, want %q (inherited from kustomize namespace: transformer)",
-			certManagerHR.Metadata.Namespace, "cert-manager")
-	}
-
-	if podinfoHR == nil {
-		t.Fatalf("podinfo HelmRelease (loose file, no kustomize overlay) not found in result: %+v", helmReleases)
-	}
-	if podinfoHR.Metadata.Namespace != "apps" {
-		t.Errorf("podinfo HelmRelease namespace = %q, want %q (explicit, no transformer involved)",
-			podinfoHR.Metadata.Namespace, "apps")
-	}
-
-	// filterHelmReleasesByTargetNamespace should now correctly match the
-	// kustomize-inherited namespace, reproducing the reported bug fix.
-	filtered := filterHelmReleasesByNamespace(helmReleases, "cert-manager")
-	if len(filtered) != 1 || filtered[0].Metadata.Name != "cert-manager" {
-		t.Errorf("filterHelmReleasesByNamespace(%q) = %+v, want exactly the cert-manager HelmRelease",
-			"cert-manager", filtered)
-	}
-}
-
 // --- Tests for unified HelmRelease discovery (Steps 1-5) ---
 
 // writeHelper writes a file under dir, creating the directory if needed.
@@ -494,66 +402,10 @@ spec:
 
 // Test 3 (regression): A HelmRelease directly in clusterPath with no Flux
 // Kustomization at all must still be found via the fallback scanner.
-func TestResolveHelmReleasesWithKustomizeNamespaces_RawFileOnly(t *testing.T) {
-	clusterPath := t.TempDir()
-	writeHelper(t, clusterPath, "podinfo.yaml", `apiVersion: helm.toolkit.fluxcd.io/v2
-kind: HelmRelease
-metadata:
-  name: podinfo
-  namespace: apps
-spec:
-  chart:
-    spec:
-      chart: podinfo
-`)
-
-	builder := kustomize.NewBuilder()
-	buildCache := make(map[string][]byte)
-	helmReleases, err := resolveHelmReleasesWithKustomizeNamespaces(context.Background(), clusterPath, builder, buildCache)
-	if err != nil {
-		t.Fatalf("resolveHelmReleasesWithKustomizeNamespaces: %v", err)
-	}
-	if len(helmReleases) != 1 {
-		t.Fatalf("expected 1 raw HelmRelease, got %d: %+v", len(helmReleases), helmReleases)
-	}
-	if helmReleases[0].Metadata.Name != "podinfo" {
-		t.Errorf("name = %q, want %q", helmReleases[0].Metadata.Name, "podinfo")
-	}
-}
-
-// Test 4a: dedupHelmReleases — primary takes precedence on collision.
-func TestDedupHelmReleases_PrimaryPrecedence(t *testing.T) {
-	primary := []flux.HelmRelease{
-		{Metadata: flux.ObjectMeta{Name: "podinfo", Namespace: "apps"}, Spec: flux.HelmReleaseSpec{Chart: flux.HelmReleaseChart{Spec: flux.HelmReleaseChartSpec{Chart: "from-primary"}}}},
-	}
-	fallback := []flux.HelmRelease{
-		{Metadata: flux.ObjectMeta{Name: "podinfo", Namespace: "apps"}, Spec: flux.HelmReleaseSpec{Chart: flux.HelmReleaseChart{Spec: flux.HelmReleaseChartSpec{Chart: "from-fallback"}}}},
-		{Metadata: flux.ObjectMeta{Name: "other", Namespace: "infra"}, Spec: flux.HelmReleaseSpec{Chart: flux.HelmReleaseChart{Spec: flux.HelmReleaseChartSpec{Chart: "other-chart"}}}},
-	}
-
-	result := dedupHelmReleases(primary, fallback)
-	if len(result) != 2 {
-		t.Fatalf("expected 2 after dedup, got %d: %+v", len(result), result)
-	}
-
-	// podinfo should come from primary.
-	var podinfo *flux.HelmRelease
-	for i := range result {
-		if result[i].Metadata.Name == "podinfo" {
-			podinfo = &result[i]
-		}
-	}
-	if podinfo == nil {
-		t.Fatal("podinfo not found in result")
-	}
-	if podinfo.Spec.Chart.Spec.Chart != "from-primary" {
-		t.Errorf("podinfo chart = %q, want %q (primary should win)", podinfo.Spec.Chart.Spec.Chart, "from-primary")
-	}
-}
-
-// Test 4b: Two Flux Kustomizations referencing the same shared base produce
-// only one HelmRelease instance after dedup.
-func TestDedupHelmReleases_SharedBaseReferencedTwice(t *testing.T) {
+// Test 4: Two Flux Kustomizations referencing the same shared base — the
+// HelmRelease appears in the build output (possibly twice), dedup is handled
+// internally by inflateAndPrintHelmReleases.
+func TestBuildKSContent_SharedBaseReferencedTwice(t *testing.T) {
 	repoRoot := t.TempDir()
 
 	baseDir := filepath.Join(repoRoot, "apps", "base")
@@ -611,11 +463,118 @@ spec:
 		t.Fatalf("buildKSContent: %v", err)
 	}
 
-	primaryHRs, _ := flux.ParseHelmReleasesFromBytes(output)
-	// Without dedup, the same HR may appear twice (once per KS). Dedup must collapse to one.
-	deduped := dedupHelmReleases(primaryHRs, nil)
-	if len(deduped) != 1 {
-		t.Errorf("expected 1 HelmRelease after dedup (same base referenced twice), got %d", len(deduped))
+	// The HR should be present in the build output.
+	helmReleases, _ := flux.ParseHelmReleasesFromBytes(output)
+	if len(helmReleases) == 0 {
+		t.Fatal("expected at least 1 HelmRelease from shared base, got 0")
+	}
+
+	// Dedup by namespace/name (same logic as inflateAndPrintHelmReleases).
+	seen := make(map[string]bool)
+	for _, hr := range helmReleases {
+		key := hr.Metadata.Namespace + "/" + hr.Metadata.Name
+		seen[key] = true
+	}
+	if len(seen) != 1 {
+		t.Errorf("expected 1 unique HelmRelease after dedup, got %d: %v", len(seen), seen)
+	}
+}
+
+// Test: convertJSONInYAMLToYAML preserves ALL documents in multi-doc YAML
+// (regression: yaml.Unmarshal only parsed the first document).
+func TestConvertJSONInYAMLToYAML_MultiDoc(t *testing.T) {
+	input := []byte(`apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa1
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa2
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm1
+`)
+	result, err := convertJSONInYAMLToYAML(input)
+	if err != nil {
+		t.Fatalf("convertJSONInYAMLToYAML: %v", err)
+	}
+	resultStr := string(result)
+
+	// All three documents must be present.
+	if !strings.Contains(resultStr, "sa1") {
+		t.Error("first document (sa1) was dropped")
+	}
+	if !strings.Contains(resultStr, "sa2") {
+		t.Error("second document (sa2) was dropped")
+	}
+	if !strings.Contains(resultStr, "cm1") {
+		t.Error("third document (cm1) was dropped")
+	}
+
+	// Must have document separators.
+	if strings.Count(resultStr, "\n---\n") < 2 {
+		t.Errorf("expected at least 2 document separators, got %d in:\n%s", strings.Count(resultStr, "\n---\n"), resultStr)
+	}
+}
+
+// Test: convertJSONInYAMLToYAML returns nil for empty/nil input (no "null" output).
+func TestConvertJSONInYAMLToYAML_Empty(t *testing.T) {
+	result, err := convertJSONInYAMLToYAML(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != nil {
+		t.Errorf("expected nil for empty input, got %q", string(result))
+	}
+}
+
+// Test: hasDirectKustomizations — build hr requires Flux Kustomization files
+// directly in the path (same contract as build ks).
+func TestHasDirectKustomizations(t *testing.T) {
+	// Path with a Flux Kustomization file.
+	withKS := t.TempDir()
+	writeHelper(t, withKS, "base.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: base
+  namespace: flux-system
+spec:
+  path: ./base
+`)
+	has, err := hasDirectKustomizations(withKS)
+	if err != nil {
+		t.Fatalf("hasDirectKustomizations: %v", err)
+	}
+	if !has {
+		t.Error("expected true for directory with Flux Kustomization file")
+	}
+
+	// Path with only native kustomize (no Flux Kustomization).
+	nativeOnly := t.TempDir()
+	writeHelper(t, nativeOnly, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: []
+`)
+	has, err = hasDirectKustomizations(nativeOnly)
+	if err != nil {
+		t.Fatalf("hasDirectKustomizations: %v", err)
+	}
+	if has {
+		t.Error("expected false for directory with only native kustomization")
+	}
+
+	// Empty directory.
+	empty := t.TempDir()
+	has, err = hasDirectKustomizations(empty)
+	if err != nil {
+		t.Fatalf("hasDirectKustomizations: %v", err)
+	}
+	if has {
+		t.Error("expected false for empty directory")
 	}
 }
 
