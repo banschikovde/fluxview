@@ -358,7 +358,7 @@ func hasDirectKustomizations(path string) (bool, error) {
 			continue
 		}
 
-		if !isYAMLFile(entry.Name()) {
+		if !flux.IsYAMLFile(entry.Name()) {
 			continue
 		}
 
@@ -390,9 +390,4 @@ func hasDirectKustomizations(path string) (bool, error) {
 	}
 
 	return false, nil
-}
-
-func isYAMLFile(filename string) bool {
-	ext := strings.ToLower(filepath.Ext(filename))
-	return ext == ".yaml" || ext == ".yml"
 }

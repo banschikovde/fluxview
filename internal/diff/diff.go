@@ -211,12 +211,24 @@ func buildHunk(ops []editOp, firstChange, lastChange, ctxLines int) hunk {
 	return h
 }
 
+// maxMyersInputSize is the threshold above which the Myers algorithm falls
+// back to a greedy diff to avoid excessive memory/CPU on very large manifests.
+const maxMyersInputSize = 50000
+
 // computeEditScript computes a minimal edit script using the Myers diff
 // algorithm. Time: O((N+M)D), Space: O((N+M)D) where D = number of edits.
 // For typical diffs where D is small, this is dramatically faster and uses
 // less memory than the O(NM) LCS approach.
+//
+// Falls back to a greedy common-prefix/suffix diff for very large inputs
+// (total lines > maxMyersInputSize) to avoid excessive memory usage.
 func computeEditScript(a, b []string) []editOp {
 	n, m := len(a), len(b)
+
+	// Fallback for very large inputs: greedy prefix/suffix matching.
+	if n+m > maxMyersInputSize {
+		return greedyDiff(a, b)
+	}
 
 	// Fast paths for empty inputs.
 	if n == 0 {
@@ -318,6 +330,40 @@ func computeEditScript(a, b []string) []editOp {
 	// Reverse.
 	for l, r := 0, len(ops)-1; l < r; l, r = l+1, r-1 {
 		ops[l], ops[r] = ops[r], ops[l]
+	}
+
+	return ops
+}
+
+// greedyDiff is an O(n+m) fallback for large inputs. Matches common prefix
+// and suffix, then emits all middle lines as delete+insert. Less precise than
+// Myers but bounded in memory and time.
+func greedyDiff(a, b []string) []editOp {
+	// Common prefix.
+	prefix := 0
+	for prefix < len(a) && prefix < len(b) && a[prefix] == b[prefix] {
+		prefix++
+	}
+
+	// Common suffix.
+	suffix := 0
+	for suffix < len(a)-prefix && suffix < len(b)-prefix && a[len(a)-1-suffix] == b[len(b)-1-suffix] {
+		suffix++
+	}
+
+	var ops []editOp
+
+	for i := 0; i < prefix; i++ {
+		ops = append(ops, editOp{op: 'e', line: a[i]})
+	}
+	for i := prefix; i < len(a)-suffix; i++ {
+		ops = append(ops, editOp{op: 'd', line: a[i]})
+	}
+	for i := prefix; i < len(b)-suffix; i++ {
+		ops = append(ops, editOp{op: 'i', line: b[i]})
+	}
+	for i := len(a) - suffix; i < len(a); i++ {
+		ops = append(ops, editOp{op: 'e', line: a[i]})
 	}
 
 	return ops

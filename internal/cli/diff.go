@@ -342,7 +342,10 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 			var ksYAMLBuf bytes.Buffer
 			ksEnc := yaml.NewEncoder(&ksYAMLBuf)
 			ksEnc.SetIndent(2)
-			ksEnc.Encode(ks)
+			if err := ksEnc.Encode(ks); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to encode Kustomization %s/%s: %v\n",
+					ks.Metadata.Namespace, ks.Metadata.Name, err)
+			}
 			ksEnc.Close()
 			ksYAML := ksYAMLBuf.Bytes()
 

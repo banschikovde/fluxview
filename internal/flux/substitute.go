@@ -130,55 +130,46 @@ func parseSubstituteFrom(raw any) []substituteFromEntry {
 	return entries
 }
 
-// TopologicalSort sorts Kustomizations by their dependsOn dependencies.
-// Returns an ordered list where dependencies come before dependents.
-// Returns an error if a circular dependency is detected.
-func TopologicalSort(kustomizations []Kustomization) ([]Kustomization, error) {
-	// Build a name -> index map.
-	nameToIdx := make(map[string]int)
-	for i, ks := range kustomizations {
-		key := ks.Metadata.Namespace + "/" + ks.Metadata.Name
-		nameToIdx[key] = i
+// dependencyNode is the interface for topological sort.
+// Each type resolves its own dependency keys (including namespace fallback logic).
+type dependencyNode interface {
+	ident() string     // "namespace/name"
+	depKeys() []string // resolved dependency keys
+}
+
+func topologicalSortGeneric[T dependencyNode](items []T, typeName string) ([]T, error) {
+	idxMap := make(map[string]int)
+	for i, item := range items {
+		idxMap[item.ident()] = i
 	}
 
-	// Build adjacency list (dependency graph).
-	// edge from A -> B means A depends on B (B must come before A).
 	graph := make(map[int][]int)
 	inDegree := make(map[int]int)
-
-	for i := range kustomizations {
+	for i := range items {
 		inDegree[i] = 0
 	}
 
-	for i, ks := range kustomizations {
-		for _, dep := range ks.Spec.DependsOn {
-			depNS := dep.Namespace
-			if depNS == "" {
-				depNS = ks.Metadata.Namespace
-			}
-			depKey := depNS + "/" + dep.Name
-			if depIdx, ok := nameToIdx[depKey]; ok {
+	for i, item := range items {
+		for _, depKey := range item.depKeys() {
+			if depIdx, ok := idxMap[depKey]; ok {
 				graph[depIdx] = append(graph[depIdx], i)
 				inDegree[i]++
 			}
-			// If dependency not found in our list, ignore it
-			// (might be external or already processed)
 		}
 	}
 
-	// Kahn's algorithm for topological sort.
 	var queue []int
-	for i := range kustomizations {
+	for i := range items {
 		if inDegree[i] == 0 {
 			queue = append(queue, i)
 		}
 	}
 
-	var sorted []Kustomization
+	var sorted []T
 	for len(queue) > 0 {
 		idx := queue[0]
 		queue = queue[1:]
-		sorted = append(sorted, kustomizations[idx])
+		sorted = append(sorted, items[idx])
 
 		for _, next := range graph[idx] {
 			inDegree[next]--
@@ -188,76 +179,21 @@ func TopologicalSort(kustomizations []Kustomization) ([]Kustomization, error) {
 		}
 	}
 
-	if len(sorted) != len(kustomizations) {
-		return nil, fmt.Errorf("circular dependency detected in Kustomization resources")
+	if len(sorted) != len(items) {
+		return nil, fmt.Errorf("circular dependency detected in %s resources", typeName)
 	}
 
 	return sorted, nil
 }
 
+// TopologicalSort sorts Kustomizations by their dependsOn dependencies.
+func TopologicalSort(items []Kustomization) ([]Kustomization, error) {
+	return topologicalSortGeneric(items, "Kustomization")
+}
+
 // TopologicalSortHelmReleases sorts HelmReleases by their dependsOn dependencies.
-// Returns an ordered list where dependencies come before dependents.
-// Returns an error if a circular dependency is detected.
-func TopologicalSortHelmReleases(helmReleases []HelmRelease) ([]HelmRelease, error) {
-	// Build a name -> index map.
-	nameToIdx := make(map[string]int)
-	for i, hr := range helmReleases {
-		key := hr.Metadata.Namespace + "/" + hr.Metadata.Name
-		nameToIdx[key] = i
-	}
-
-	// Build adjacency list (dependency graph).
-	// edge from A -> B means A depends on B (B must come before A).
-	graph := make(map[int][]int)
-	inDegree := make(map[int]int)
-
-	for i := range helmReleases {
-		inDegree[i] = 0
-	}
-
-	for i, hr := range helmReleases {
-		for _, dep := range hr.Spec.DependsOn {
-			depNS := dep.Namespace
-			if depNS == "" {
-				depNS = hr.Metadata.Namespace
-			}
-			depKey := depNS + "/" + dep.Name
-			if depIdx, ok := nameToIdx[depKey]; ok {
-				graph[depIdx] = append(graph[depIdx], i)
-				inDegree[i]++
-			}
-			// If dependency not found in our list, ignore it
-			// (might be external or already processed)
-		}
-	}
-
-	// Kahn's algorithm for topological sort.
-	var queue []int
-	for i := range helmReleases {
-		if inDegree[i] == 0 {
-			queue = append(queue, i)
-		}
-	}
-
-	var sorted []HelmRelease
-	for len(queue) > 0 {
-		idx := queue[0]
-		queue = queue[1:]
-		sorted = append(sorted, helmReleases[idx])
-
-		for _, next := range graph[idx] {
-			inDegree[next]--
-			if inDegree[next] == 0 {
-				queue = append(queue, next)
-			}
-		}
-	}
-
-	if len(sorted) != len(helmReleases) {
-		return nil, fmt.Errorf("circular dependency detected in HelmRelease resources")
-	}
-
-	return sorted, nil
+func TopologicalSortHelmReleases(items []HelmRelease) ([]HelmRelease, error) {
+	return topologicalSortGeneric(items, "HelmRelease")
 }
 
 // parseValuesFrom parses the valuesFrom field which can be a list of objects.
