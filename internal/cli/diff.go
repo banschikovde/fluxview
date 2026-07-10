@@ -412,6 +412,10 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 		var discoveredKS []flux.Kustomization
 
 		for _, ks := range queue {
+			if err := CheckInterrupted(ctx); err != nil {
+				return nil, err
+			}
+
 			key := fmt.Sprintf("%s/%s", ks.Metadata.Namespace, ks.Metadata.Name)
 			if seen[key] {
 				continue
@@ -615,6 +619,9 @@ func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, helmRe
 
 	var buf bytes.Buffer
 	for i, out := range outputs {
+		if err := CheckInterrupted(ctx); err != nil {
+			return nil, err
+		}
 		if i > 0 {
 			buf.WriteString("\n---\n")
 		}
@@ -638,6 +645,11 @@ func computeAndOutputDiff(original, modified []byte, flags *DiffFlags) error {
 
 	origMap := buildResourceMap(original, flags)
 	modMap := buildResourceMap(modified, flags)
+
+	// Check for interruption before expensive diff computation
+	if origMap == nil || modMap == nil {
+		return nil
+	}
 
 	diffs := diffResourceMaps(origMap, modMap, flags.Unified)
 

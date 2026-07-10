@@ -255,6 +255,10 @@ func printRedacted(data []byte) int {
 func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository, configMaps []flux.ConfigMap, secrets []flux.Secret, skipCRDs bool) [][]byte {
 	var outputs [][]byte
 	for _, hr := range helmReleases {
+		if err := CheckInterrupted(ctx); err != nil {
+			return nil
+		}
+
 		if hr.Spec.Suspend {
 			fmt.Fprintf(os.Stderr, "Skipping suspended HelmRelease %s/%s\n", hr.Metadata.Namespace, hr.Metadata.Name)
 			continue
@@ -395,6 +399,9 @@ func inflateHelmReleases(ctx context.Context, clusterPath string) (int, error) {
 
 	var totalSecrets int
 	for _, output := range inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets, false) {
+		if err := CheckInterrupted(ctx); err != nil {
+			return 0, nil
+		}
 		totalSecrets += printRedacted(output)
 	}
 
