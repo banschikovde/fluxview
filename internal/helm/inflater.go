@@ -205,6 +205,8 @@ func FindHelmRepoURL(repos []fluxtypes.HelmRepository, name, namespace string, s
 // to proper YAML format (e.g., metadata:\n  annotations: ...).
 // Helm v4 sometimes renders large objects like CRDs as JSON in YAML.
 // Handles multi-document YAML by decoding each document separately.
+// Removes nil map values (e.g. annotations: null) produced by Helm templates
+// with empty optional fields.
 func convertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
 	var docs []string
 
@@ -220,6 +222,7 @@ func convertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
 		if doc == nil {
 			continue
 		}
+		doc = removeNilValues(doc)
 		marshaled, err := yaml.Marshal(doc)
 		if err != nil {
 			continue
@@ -231,4 +234,26 @@ func convertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
 		return nil, nil
 	}
 	return []byte(strings.Join(docs, "\n---\n")), nil
+}
+
+// removeNilValues recursively removes map entries with nil values.
+func removeNilValues(in interface{}) interface{} {
+	switch v := in.(type) {
+	case map[string]interface{}:
+		result := make(map[string]interface{})
+		for k, val := range v {
+			if val == nil {
+				continue
+			}
+			result[k] = removeNilValues(val)
+		}
+		return result
+	case []interface{}:
+		for i, val := range v {
+			v[i] = removeNilValues(val)
+		}
+		return v
+	default:
+		return in
+	}
 }
