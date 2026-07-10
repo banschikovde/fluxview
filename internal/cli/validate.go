@@ -25,7 +25,7 @@ func newValidateCmd() *cobra.Command {
 	flags := &ValidateFlags{}
 
 	cmd := &cobra.Command{
-		Use:   "validate <resource> [name] [flags]",
+		Use:   "validate [flags]",
 		Short: "Validate Flux resources against CRD schemas",
 		Long: `Validate built Flux resources against bundled CRD schemas.
 
@@ -33,11 +33,11 @@ Resources without a matching CRD schema are silently skipped.
 Schemas are loaded from --schema-dir (default: ./crds/).
 
 Examples:
-  fluxview validate ks --path clusters/prod/
-  fluxview validate ks --path clusters/prod/ --schema-dir /crds`,
-		Args: cobra.MinimumNArgs(1),
+  fluxview validate --path clusters/prod/
+  fluxview validate --path clusters/prod/ --schema-dir /crds`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runValidate(cmd.Context(), args, flags)
+			return runValidate(cmd.Context(), flags)
 		},
 	}
 
@@ -48,13 +48,7 @@ Examples:
 	return cmd
 }
 
-func runValidate(ctx context.Context, args []string, flags *ValidateFlags) error {
-	resourceType := args[0]
-	var name string
-	if len(args) > 1 {
-		name = args[1]
-	}
-
+func runValidate(ctx context.Context, flags *ValidateFlags) error {
 	clusterPath := flags.Path
 	if clusterPath == "" {
 		clusterPath = "."
@@ -84,15 +78,6 @@ func runValidate(ctx context.Context, args []string, flags *ValidateFlags) error
 
 	fmt.Fprintf(os.Stderr, "Loaded %d CRD schemas from %s\n", validator.SchemaCount(), schemaDir)
 
-	switch resourceType {
-	case "ks", "kustomization":
-		return runValidateKS(ctx, absClusterPath, repoRoot, name, flags.Namespace, validator)
-	default:
-		return NewExitError(fmt.Errorf("unsupported resource type %q (currently only 'ks' is supported)", resourceType), ExitCodeError)
-	}
-}
-
-func runValidateKS(ctx context.Context, clusterPath, repoRoot, name, namespace string, validator *validate.Validator) error {
 	parser := flux.NewParser(clusterPath)
 	kustomizations, err := parser.ParseKustomizations(ctx)
 	if err != nil {
@@ -102,13 +87,6 @@ func runValidateKS(ctx context.Context, clusterPath, repoRoot, name, namespace s
 	builder := kustomize.NewBuilder()
 	buildCache := make(map[string][]byte)
 	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
-
-	if name != "" {
-		kustomizations = filterKustomizations(kustomizations, name)
-		if len(kustomizations) == 0 {
-			return NewExitError(fmt.Errorf("Kustomization %q not found", name), ExitCodeError)
-		}
-	}
 
 	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, false, buildCache)
 	if err != nil {
@@ -123,10 +101,10 @@ func runValidateKS(ctx context.Context, clusterPath, repoRoot, name, namespace s
 	// CRDs are schema definitions, not resources to validate — always skip.
 	output = filterCRDDocs(output)
 
-	if namespace != "" {
-		output = filterByNamespace(output, namespace)
+	if flags.Namespace != "" {
+		output = filterByNamespace(output, flags.Namespace)
 		if len(output) == 0 {
-			fmt.Fprintf(os.Stderr, "No resources found in namespace %q\n", namespace)
+			fmt.Fprintf(os.Stderr, "No resources found in namespace %q\n", flags.Namespace)
 			return nil
 		}
 	}
