@@ -260,6 +260,81 @@ func TopologicalSortHelmReleases(helmReleases []HelmRelease) ([]HelmRelease, err
 	return sorted, nil
 }
 
+// parseValuesFrom parses the valuesFrom field which can be a list of objects.
+func parseValuesFrom(raw interface{}) []ValuesFromEntry {
+	if raw == nil {
+		return nil
+	}
+
+	var entries []ValuesFromEntry
+
+	switch v := raw.(type) {
+	case []interface{}:
+		for _, item := range v {
+			if m, ok := item.(map[string]interface{}); ok {
+				entry := ValuesFromEntry{}
+				if kind, ok := m["kind"].(string); ok {
+					entry.Kind = kind
+				}
+				if name, ok := m["name"].(string); ok {
+					entry.Name = name
+				}
+				if ns, ok := m["namespace"].(string); ok {
+					entry.Namespace = ns
+				}
+				if optional, ok := m["optional"].(bool); ok {
+					entry.Optional = optional
+				}
+				entries = append(entries, entry)
+			}
+		}
+	}
+
+	return entries
+}
+
+// ResolveValuesFrom resolves values from ConfigMaps and Secrets referenced in valuesFrom.
+// Returns a merged map of values with ConfigMap values taking precedence over Secret values,
+// and inline values taking precedence over both.
+func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret) map[string]interface{} {
+	entries := parseValuesFrom(hr.Spec.ValuesFrom)
+	if len(entries) == 0 {
+		return nil
+	}
+
+	result := make(map[string]interface{})
+
+	for _, entry := range entries {
+		entryNS := entry.Namespace
+		if entryNS == "" {
+			entryNS = hr.Metadata.Namespace
+		}
+
+		switch strings.ToLower(entry.Kind) {
+		case "configmap":
+			for _, cm := range configMaps {
+				if cm.Metadata.Name == entry.Name && cm.Metadata.Namespace == entryNS {
+					for k, v := range cm.Data {
+						result[k] = v
+					}
+					break
+				}
+			}
+		case "secret":
+			for _, secret := range secrets {
+				if secret.Metadata.Name == entry.Name && secret.Metadata.Namespace == entryNS {
+					for k, v := range secret.Data {
+						result[k] = v
+					}
+					break
+				}
+			}
+		}
+	}
+
+	return result
+}
+
 // SubstituteNeeded returns true if the Kustomization has postBuild substitution configured.
 func SubstituteNeeded(ks Kustomization) bool {
 	return ks.Spec.PostBuild != nil && !ks.Spec.PostBuild.DisableSubstitute &&

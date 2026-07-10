@@ -225,6 +225,50 @@ func (p *Parser) ParseConfigMaps(ctx context.Context) ([]ConfigMap, error) {
 	return result, nil
 }
 
+// ParseSecrets discovers all Kubernetes Secret resources under the root path.
+func (p *Parser) ParseSecrets(ctx context.Context) ([]Secret, error) {
+	var result []Secret
+
+	err := filepath.WalkDir(p.RootPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if d.IsDir() || !isYAMLFile(path) {
+			return nil
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+
+		docs := SplitYAMLDocuments(data)
+		for _, doc := range docs {
+			trimmed := strings.TrimSpace(doc)
+			if trimmed == "" {
+				continue
+			}
+			secret, err := parseSecretDoc([]byte(trimmed))
+			if err != nil {
+				continue
+			}
+			if secret != nil {
+				result = append(result, *secret)
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("walking directory %s: %w", p.RootPath, err)
+	}
+
+	return result, nil
+}
+
 // parseConfigMapDoc parses a single YAML document as a ConfigMap.
 func parseConfigMapDoc(data []byte) (*ConfigMap, error) {
 	var meta struct {
@@ -242,6 +286,25 @@ func parseConfigMapDoc(data []byte) (*ConfigMap, error) {
 		return nil, err
 	}
 	return &cm, nil
+}
+
+// parseSecretDoc parses a single YAML document as a Secret.
+func parseSecretDoc(data []byte) (*Secret, error) {
+	var meta struct {
+		APIVersion string `yaml:"apiVersion"`
+		Kind       string `yaml:"kind"`
+	}
+	if err := yaml.Unmarshal(data, &meta); err != nil {
+		return nil, err
+	}
+	if meta.APIVersion != "v1" || meta.Kind != "Secret" {
+		return nil, nil
+	}
+	var secret Secret
+	if err := yaml.Unmarshal(data, &secret); err != nil {
+		return nil, err
+	}
+	return &secret, nil
 }
 
 // parseFile reads a YAML file and splits it into individual documents,
@@ -338,6 +401,14 @@ func parseSingleDocument(data []byte) (interface{}, error) {
 				return nil, fmt.Errorf("unmarshaling ConfigMap: %w", err)
 			}
 			return cm, nil
+		}
+	case "Secret":
+		if meta.APIVersion == "v1" {
+			var secret Secret
+			if err := yaml.Unmarshal(data, &secret); err != nil {
+				return nil, fmt.Errorf("unmarshaling Secret: %w", err)
+			}
+			return secret, nil
 		}
 	}
 

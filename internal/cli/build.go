@@ -210,7 +210,17 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 
 	ociRepos, _ := parser.ParseOCIRepositories(ctx)
 
-	for _, result := range inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos) {
+	configMaps, err := parser.ParseConfigMaps(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMaps: %v\n", err)
+	}
+
+	secrets, err := parser.ParseSecrets(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse Secrets: %v\n", err)
+	}
+
+	for _, result := range inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets) {
 		printRedacted(result)
 	}
 
@@ -235,7 +245,7 @@ func printRedacted(data []byte) int {
 
 // inflateHelmReleasesShared inflates all non-suspended HelmReleases and returns
 // a slice of YAML outputs. Shared by build and diff commands.
-func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository) [][]byte {
+func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository, configMaps []flux.ConfigMap, secrets []flux.Secret) [][]byte {
 	var outputs [][]byte
 	for _, hr := range helmReleases {
 		if hr.Spec.Suspend {
@@ -268,7 +278,7 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 		fmt.Fprintf(os.Stderr, "Inflating HelmRelease %s/%s (chart: %s)...\n",
 			hr.Metadata.Namespace, hr.Metadata.Name, hr.Spec.Chart.Spec.Chart)
 
-		output, err := inflater.InflateHelmRelease(ctx, hr, repoURL)
+		output, err := inflater.InflateHelmRelease(ctx, hr, repoURL, configMaps, secrets)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to inflate HelmRelease %s/%s: %v\n",
 				hr.Metadata.Namespace, hr.Metadata.Name, err)
@@ -339,6 +349,8 @@ func inflateHelmReleases(ctx context.Context, clusterPath string) (int, error) {
 
 	helmRepos, _ := parser.ParseHelmRepositories(ctx)
 	ociRepos, _ := parser.ParseOCIRepositories(ctx)
+	configMaps, _ := parser.ParseConfigMaps(ctx)
+	secrets, _ := parser.ParseSecrets(ctx)
 
 	inflater, err := helm.NewInflater()
 	if err != nil {
@@ -346,7 +358,7 @@ func inflateHelmReleases(ctx context.Context, clusterPath string) (int, error) {
 	}
 
 	var totalSecrets int
-	for _, output := range inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos) {
+	for _, output := range inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets) {
 		totalSecrets += printRedacted(output)
 	}
 

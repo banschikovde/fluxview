@@ -209,3 +209,19 @@ type ConfigMap struct {
 	Metadata   ObjectMeta        `yaml:"metadata"`
 	Data       map[string]string `yaml:"data,omitempty"`
 }
+
+// Secret represents a Kubernetes Secret resource.
+type Secret struct {
+	APIVersion string            `yaml:"apiVersion"`
+	Kind       string            `yaml:"kind"`
+	Metadata   ObjectMeta        `yaml:"metadata"`
+	Data       map[string]string `yaml:"data,omitempty"`
+}
+
+// ValuesFromEntry represents a single entry in the valuesFrom list.
+type ValuesFromEntry struct {
+	Kind       string `yaml:"kind"`
+	Name       string `yaml:"name"`
+	Namespace  string `yaml:"namespace,omitempty"`
+	Optional   bool   `yaml:"optional,omitempty"`
+}

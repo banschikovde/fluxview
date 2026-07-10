@@ -42,7 +42,7 @@ func NewInflater() (*Inflater, error) {
 // InflateHelmRelease inflates a Flux HelmRelease resource using the Helm Go SDK.
 // It locates/downloads the chart from the given repo URL and renders templates
 // equivalent to: helm template <name> <chart> --repo <url> --version <ver> --namespace <ns> --include-crds
-func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRelease, repoURL string) ([]byte, error) {
+func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRelease, repoURL string, configMaps []fluxtypes.ConfigMap, secrets []fluxtypes.Secret) ([]byte, error) {
 	chartName := hr.Spec.Chart.Spec.Chart
 
 	// Set up the action configuration for template rendering (no k8s cluster needed).
@@ -109,6 +109,14 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 	values := hr.Spec.Values
 	if values == nil {
 		values = make(map[string]interface{})
+	}
+
+	// Merge valuesFrom (ConfigMaps and Secrets) into values.
+	valuesFrom := fluxtypes.ResolveValuesFrom(hr, configMaps, secrets)
+	if valuesFrom != nil {
+		for k, v := range valuesFrom {
+			values[k] = v
+		}
 	}
 
 	// Run template rendering.

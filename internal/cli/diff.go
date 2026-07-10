@@ -283,13 +283,15 @@ func buildHROutput(ctx context.Context, clusterPath, name string) ([]byte, error
 
 	helmRepos, _ := parser.ParseHelmRepositories(ctx)
 	ociRepos, _ := parser.ParseOCIRepositories(ctx)
+	configMaps, _ := parser.ParseConfigMaps(ctx)
+	secrets, _ := parser.ParseSecrets(ctx)
 
 	inflater, err := helm.NewInflater()
 	if err != nil {
 		return nil, fmt.Errorf("initializing helm: %w", err)
 	}
 
-	return inflateAllHelmReleases(ctx, inflater, helmReleases, helmRepos, ociRepos)
+	return inflateAllHelmReleases(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets)
 }
 
 // buildHROutputAtRevision builds the HelmRelease output at a specific git revision.
@@ -324,13 +326,15 @@ func buildHROutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 	}
 	helmRepos, _ := parser.ParseHelmRepositories(ctx)
 	ociRepos, _ := parser.ParseOCIRepositories(ctx)
+	configMaps, _ := parser.ParseConfigMaps(ctx)
+	secrets, _ := parser.ParseSecrets(ctx)
 
 	inflater, err := helm.NewInflater()
 	if err != nil {
 		return nil, fmt.Errorf("initializing helm: %w", err)
 	}
 
-	return inflateAllHelmReleases(ctx, inflater, helmReleases, helmRepos, ociRepos)
+	return inflateAllHelmReleases(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets)
 }
 
 // buildKSContent is the shared build logic for Flux Kustomization resources,
@@ -576,8 +580,8 @@ func readYAMLFilesRecursive(dir string) ([]byte, error) {
 }
 
 // inflateAllHelmReleases inflates all HelmRelease resources and returns combined YAML.
-func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository) ([]byte, error) {
-	outputs := inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos)
+func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository, configMaps []flux.ConfigMap, secrets []flux.Secret) ([]byte, error) {
+	outputs := inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets)
 	if len(outputs) == 0 {
 		return nil, nil
 	}
