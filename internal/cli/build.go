@@ -243,9 +243,15 @@ func printRedacted(data []byte) int {
 	}
 	// Normalize: reorder fields (apiVersion, kind, metadata first) and strip SOPS.
 	normalized := reorderYAMLFields(data)
+	// Convert JSON-in-YAML to proper YAML (fixes namespace: null issues)
+	converted, err := convertJSONInYAMLToYAML(normalized)
+	if err != nil {
+		// If conversion fails, use normalized
+		converted = normalized
+	}
 	// Redact secret values.
-	redacted := flux.RedactSecrets(normalized)
-	count := flux.CountSecrets(normalized)
+	redacted := flux.RedactSecrets(converted)
+	count := flux.CountSecrets(converted)
 	fmt.Print(string(redacted))
 	return count
 }
@@ -752,4 +758,25 @@ func hasDirectKustomizations(path string) (bool, error) {
 func isYAMLFile(filename string) bool {
 	ext := strings.ToLower(filepath.Ext(filename))
 	return ext == ".yaml" || ext == ".yml"
+}
+
+// convertJSONInYAMLToYAML converts JSON-in-YAML format (e.g., metadata: {...})
+// to proper YAML format (e.g., metadata:
+//   annotations: ...).
+// Helm v4 sometimes renders large objects like CRDs as JSON in YAML.
+func convertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
+	var result interface{}
+
+	// Parse the manifest - yaml.Unmarshal handles both YAML and JSON
+	if err := yaml.Unmarshal(manifest, &result); err != nil {
+		return nil, err
+	}
+
+	// Marshal back to proper YAML format
+	converted, err := yaml.Marshal(result)
+	if err != nil {
+		return nil, err
+	}
+
+	return converted, nil
 }
