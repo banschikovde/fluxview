@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"gopkg.in/yaml.v3"
 	"helm.sh/helm/v4/pkg/action"
 	"helm.sh/helm/v4/pkg/chart/common"
 	"helm.sh/helm/v4/pkg/chart/loader"
@@ -153,7 +154,17 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 		return nil, fmt.Errorf("accessing release manifest: %w", err)
 	}
 
-	return []byte(accessor.Manifest()), nil
+	manifest := accessor.Manifest()
+
+	// Convert JSON-in-YAML to proper YAML format
+	// Helm v4 sometimes renders large objects (especially CRDs) as JSON in YAML
+	converted, err := convertJSONInYAMLToYAML([]byte(manifest))
+	if err != nil {
+		// If conversion fails, return original manifest
+		return []byte(manifest), nil
+	}
+
+	return converted, nil
 }
 
 // FindHelmRepoURL finds the URL for a HelmRepository referenced by a HelmRelease.
@@ -186,4 +197,24 @@ func FindHelmRepoURL(repos []fluxtypes.HelmRepository, name, namespace string, s
 		}
 	}
 	return "", "", "", fmt.Errorf("HelmRepository %s/%s not found", namespace, name)
+}
+
+// convertJSONInYAMLToYAML converts JSON-in-YAML format (e.g., metadata: {...})
+// to proper YAML format (e.g., metadata:\n  annotations: ...).
+// Helm v4 sometimes renders large objects like CRDs as JSON in YAML.
+func convertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
+	var result interface{}
+
+	// Parse the manifest - yaml.Unmarshal handles both YAML and JSON
+	if err := yaml.Unmarshal(manifest, &result); err != nil {
+		return nil, err
+	}
+
+	// Marshal back to proper YAML format
+	converted, err := yaml.Marshal(result)
+	if err != nil {
+		return nil, err
+	}
+
+	return converted, nil
 }
