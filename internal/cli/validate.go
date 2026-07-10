@@ -93,7 +93,7 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 		return NewExitError(fmt.Errorf("parsing Kustomization resources: %w", err), ExitCodeError)
 	}
 
-	builder := kustomize.NewBuilder()
+	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(map[string][]byte)
 	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
 

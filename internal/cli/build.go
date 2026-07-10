@@ -114,7 +114,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return NewExitError(fmt.Errorf("parsing Kustomization resources: %w", err), ExitCodeError)
 	}
 
-	builder := kustomize.NewBuilder()
+	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(map[string][]byte)
 	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
 
@@ -259,13 +259,13 @@ func collectKustomizationPaths(repoRoot string, kustomizations []flux.Kustomizat
 	return paths
 }
 
-func buildKustomizeOverlays(clusterPath string, excludePaths map[string]bool, buildCache map[string][]byte) [][]byte {
+func buildKustomizeOverlays(clusterPath, repoRoot string, excludePaths map[string]bool, buildCache map[string][]byte) [][]byte {
 	kustomizeDirs, err := flux.DiscoverKustomizeDirs(clusterPath)
 	if err != nil || len(kustomizeDirs) == 0 {
 		return nil
 	}
 
-	builder := kustomize.NewBuilder()
+	builder := kustomize.NewBuilder(repoRoot)
 	var outputs [][]byte
 
 	for _, dir := range kustomizeDirs {

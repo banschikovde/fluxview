@@ -215,7 +215,7 @@ func buildKSOutputWithCache(ctx context.Context, clusterPath, repoRoot, name str
 		}
 	}
 
-	builder := kustomize.NewBuilder()
+	builder := kustomize.NewBuilder(repoRoot)
 	// Resolve ConfigMaps for postBuild substitution.
 	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
 
@@ -266,7 +266,7 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 		}
 	}
 
-	builder := kustomize.NewBuilder()
+	builder := kustomize.NewBuilder(worktreePath)
 	buildCache := make(map[string][]byte)
 	// Resolve ConfigMaps for postBuild substitution from the worktree.
 	configMaps := resolveConfigMaps(ctx, worktreeClusterPath, builder, buildCache)
@@ -292,7 +292,7 @@ func buildKSContent(ctx context.Context, builder *kustomize.Builder, kustomizati
 	// Skip overlays when no KS are selected (name filter returned empty).
 	if len(kustomizations) > 0 {
 		ksPaths := collectKustomizationPaths(repoRoot, kustomizations)
-		overlayOutputs := buildKustomizeOverlays(clusterPath, ksPaths, buildCache)
+		overlayOutputs := buildKustomizeOverlays(clusterPath, repoRoot, ksPaths, buildCache)
 		for _, overlay := range overlayOutputs {
 			if len(output) > 0 {
 				output = append(output, []byte("\n---\n")...)

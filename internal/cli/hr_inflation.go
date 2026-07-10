@@ -23,7 +23,7 @@ func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespac
 		return nil, nil // no Flux KS — valid for diff
 	}
 
-	builder := kustomize.NewBuilder()
+	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(map[string][]byte)
 	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
 
