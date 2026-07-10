@@ -200,7 +200,7 @@ func buildHunk(ops []editOp, firstChange, lastChange, ctxLines int) hunk {
 		op := ops[i]
 		switch op.op {
 		case 'e':
-			h.lines = append(h.lines, " "+op.line)
+			h.lines = append(h.lines, op.line)
 		case 'd':
 			h.lines = append(h.lines, "-"+op.line)
 		case 'i':
