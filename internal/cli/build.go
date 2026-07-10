@@ -118,7 +118,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return NewExitError(fmt.Errorf("checking for Kustomization files: %w", err), ExitCodeError)
 	}
 	if !hasDirectKS {
-		return NewExitError(fmt.Errorf("path %s does not contain Flux Kustomization resources directly (use a path that contains Kustomization YAML files)", clusterPath), ExitCodeError)
+		return NewExitError(fmt.Errorf("no Kustomization files found in %s", clusterPath), ExitCodeError)
 	}
 
 	// Parse Flux Kustomization resources from the cluster path.

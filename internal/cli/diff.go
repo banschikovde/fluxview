@@ -179,7 +179,7 @@ func buildKSOutputWithCache(ctx context.Context, clusterPath, repoRoot, name str
 		return nil, fmt.Errorf("checking for Kustomization files: %w", err)
 	}
 	if !hasDirectKS {
-		return nil, fmt.Errorf("path %s does not contain Flux Kustomization resources directly (use a path that contains Kustomization YAML files)", clusterPath)
+		return nil, fmt.Errorf("no Kustomization files found in %s", clusterPath)
 	}
 
 	parser := flux.NewParser(clusterPath)
@@ -230,7 +230,7 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 		return nil, fmt.Errorf("checking for Kustomization files at %s: %w", revision, err)
 	}
 	if !hasDirectKS {
-		return nil, fmt.Errorf("path %s does not contain Flux Kustomization resources directly at revision %s", worktreeClusterPath, revision)
+		return nil, fmt.Errorf("no Kustomization files found in %s at revision %s", worktreeClusterPath, revision)
 	}
 
 	parser := flux.NewParser(worktreeClusterPath)

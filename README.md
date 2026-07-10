@@ -34,7 +34,7 @@ Run against a local repo mounted as a volume:
 
 ```bash
 docker run --rm -v $(pwd):/repo -w /repo ghcr.io/banschikovde/fluxview:latest \
-  diff ks --path clusters/prod/ --branch-orig master --strip-attrs helm.sh/chart,status --skip-crds
+  diff ks --path clusters/prod/flux/ --branch-orig master --strip-attrs helm.sh/chart,status --skip-crds
 ```
 
 Build locally:
@@ -48,7 +48,7 @@ CRD schemas for `validate` are not bundled — mount them via `-v /path/to/crds:
 ```bash
 docker run --rm -v $(pwd):/repo -v /path/to/crds:/crds \
   -w /repo ghcr.io/banschikovde/fluxview:latest \
-  validate ks --path clusters/prod/
+  validate --path clusters/prod/flux/
 ```
 
 ## Commands
@@ -57,42 +57,42 @@ docker run --rm -v $(pwd):/repo -v /path/to/crds:/crds \
 
 ```bash
 # Build everything (Kustomizations + HelmReleases)
-fluxview build all --path clusters/prod/
+fluxview build all --path clusters/prod/flux/
 
 # Build all Kustomizations (with HelmRelease inflation)
-fluxview build ks --path clusters/prod/
+fluxview build ks --path clusters/prod/flux/
 
 # Build only resources in flux-system namespace
-fluxview build ks --path clusters/prod/ --namespace flux-system
+fluxview build ks --path clusters/prod/flux/ --namespace flux-system
 
 # Build without CRDs and noisy metadata attributes
-fluxview build ks --path clusters/prod/ --skip-crds --strip-attrs status,creationTimestamp
+fluxview build ks --path clusters/prod/flux/ --skip-crds --strip-attrs status,creationTimestamp
 
 # Inflate all HelmReleases
-fluxview build hr --path clusters/prod/
+fluxview build hr --path clusters/prod/flux/
 
 # Inflate a specific HelmRelease
-fluxview build hr podinfo --path clusters/prod/
+fluxview build hr podinfo --path clusters/prod/flux/
 ```
 
 ### diff — compare changes
 
 ```bash
 # Diff everything (Kustomizations + HelmReleases)
-fluxview diff all --path clusters/prod/ --branch-orig master
+fluxview diff all --path clusters/prod/flux/ --branch-orig master
 
 # Diff all Kustomizations against master
-fluxview diff ks --path clusters/prod/ --branch-orig master
+fluxview diff ks --path clusters/prod/flux/ --branch-orig master
 
 # Diff only resources in flux-system namespace
-fluxview diff ks --path clusters/prod/ --branch-orig master --namespace flux-system
+fluxview diff ks --path clusters/prod/flux/ --branch-orig master --namespace flux-system
 
 # With flux-local flags
-fluxview diff ks --path clusters/prod/ --branch-orig master \
+fluxview diff ks --path clusters/prod/flux/ --branch-orig master \
   --strip-attrs helm.sh/chart,checksum/cm,status --skip-crds --unified 6
 
 # Diff a HelmRelease
-fluxview diff hr podinfo --path clusters/prod/
+fluxview diff hr podinfo --path clusters/prod/flux/
 ```
 
 Diff output is per-resource — each changed resource gets its own header followed by a line-level diff. In a TTY, changes are color-coded: green for added, red for removed. In pipes/CI, `+`/`-` prefixes are used.
@@ -113,10 +113,10 @@ Diff output is per-resource — each changed resource gets its own header follow
 
 ```bash
 # Validate against CRD schemas (defaults to /crds/ or ./crds/)
-fluxview validate ks --path clusters/prod/
+fluxview validate --path clusters/prod/flux/
 
 # Specify schema directory
-fluxview validate ks --path clusters/prod/ --schema-dir /crds
+fluxview validate --path clusters/prod/flux/ --schema-dir /crds
 ```
 
 Two schema formats are supported:
@@ -129,7 +129,7 @@ Missing schemas never break the pipeline — resources without a matching schema
 
 | Flag | Commands | Description |
 |------|----------|-------------|
-| `-p, --path` | build, diff, validate | Path to cluster directory |
+| `-p, --path` | build, diff, validate | Path to cluster directory with Kustomization files |
 | `-n, --namespace` | build, diff, validate | Filter resources by namespace (default: all) |
 | `--branch-orig` | diff | Branch/revision to compare against (default: auto-detect) |
 | `--color` | diff | Color mode: `auto`, `always`, `never` |
@@ -165,7 +165,7 @@ Example GitLab CI:
 fluxview:diff:
   image: ghcr.io/banschikovde/fluxview:latest
   script:
-    - fluxview diff ks --path clusters/prod/ --branch-orig master
+    - fluxview diff ks --path clusters/prod/flux/ --branch-orig master
         --strip-attrs helm.sh/chart,checksum/cm,status --skip-crds --color never
   rules:
     - if: $CI_MERGE_REQUEST_ID
