@@ -229,27 +229,6 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	return nil
 }
 
-// printRedacted normalizes, reorders fields, strips SOPS metadata, and redacts
-// secrets from the output, then prints to stdout.
-// Returns the number of secrets redacted.
-func printRedacted(data []byte) int {
-	if data == nil || len(bytes.TrimSpace(data)) == 0 {
-		return 0
-	}
-	// Normalize: reorder fields (apiVersion, kind, metadata first) and strip SOPS.
-	normalized := reorderYAMLFields(data)
-	// Convert JSON-in-YAML to proper YAML (fixes namespace: null issues)
-	converted, err := convertJSONInYAMLToYAML(normalized)
-	if err != nil || converted == nil {
-		return 0
-	}
-	// Redact secret values.
-	redacted := flux.RedactSecrets(converted)
-	count := flux.CountSecrets(converted)
-	fmt.Print(string(redacted))
-	return count
-}
-
 // resourceEntry holds a single YAML document with its resource key for sorting.
 type resourceEntry struct {
 	key     resourceKey
@@ -436,7 +415,7 @@ func resolveHelmRepoURL(hr flux.HelmRelease, helmRepos []flux.HelmRepository, se
 
 // inflateAndPrintHelmReleases resolves inflation sources (HelmRepository,
 // OCIRepository, ConfigMap, Secret), inflates the given HelmReleases, and
-// prints each output via printRedacted. Shared by runBuildKS (which passes
+// prints each output via printResourcesBoxed. Shared by runBuildHR.
 // HelmReleases extracted from the kustomize build output) and runBuildHR.
 //
 // buildOutput is the kustomize build output from which the HelmReleases were

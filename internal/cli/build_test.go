@@ -543,6 +543,85 @@ func TestConvertJSONInYAMLToYAML_Empty(t *testing.T) {
 	}
 }
 
+// Test: convertJSONInYAMLToYAML strips nil values (annotations: null, labels: null, etc.)
+// produced by Helm templates with empty optional fields.
+func TestConvertJSONInYAMLToYAML_StripsNilValues(t *testing.T) {
+	input := []byte(`apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations: null
+  labels:
+    app: test
+  name: sa1
+  namespace: default
+spec: null
+`)
+	result, err := convertJSONInYAMLToYAML(input)
+	if err != nil {
+		t.Fatalf("convertJSONInYAMLToYAML: %v", err)
+	}
+	resultStr := string(result)
+
+	// Nil values must be removed.
+	if strings.Contains(resultStr, "annotations: null") {
+		t.Errorf("expected 'annotations: null' to be stripped:\n%s", resultStr)
+	}
+	if strings.Contains(resultStr, "spec: null") {
+		t.Errorf("expected 'spec: null' to be stripped:\n%s", resultStr)
+	}
+
+	// Non-nil values must be preserved.
+	if !strings.Contains(resultStr, "labels:") {
+		t.Errorf("expected 'labels' to be preserved:\n%s", resultStr)
+	}
+	if !strings.Contains(resultStr, "app: test") {
+		t.Errorf("expected 'app: test' to be preserved:\n%s", resultStr)
+	}
+}
+
+// Test: removeNilValues recursively removes nil map entries at any nesting depth.
+func TestRemoveNilValues(t *testing.T) {
+	input := map[string]interface{}{
+		"keep": "value",
+		"drop": nil,
+		"nested": map[string]interface{}{
+			"keep2": 42,
+			"drop2": nil,
+			"deep": map[string]interface{}{
+				"keep3": "deep",
+				"drop3": nil,
+			},
+		},
+		"list": []interface{}{"a", nil, "b"},
+	}
+
+	result := removeNilValues(input)
+	m := result.(map[string]interface{})
+
+	if _, exists := m["drop"]; exists {
+		t.Error("expected top-level nil key to be removed")
+	}
+	if m["keep"] != "value" {
+		t.Error("expected non-nil value to be preserved")
+	}
+
+	nested := m["nested"].(map[string]interface{})
+	if _, exists := nested["drop2"]; exists {
+		t.Error("expected nested nil key to be removed")
+	}
+	if nested["keep2"] != 42 {
+		t.Error("expected nested non-nil value to be preserved")
+	}
+
+	deep := nested["deep"].(map[string]interface{})
+	if _, exists := deep["drop3"]; exists {
+		t.Error("expected deep nil key to be removed")
+	}
+	if deep["keep3"] != "deep" {
+		t.Error("expected deep non-nil value to be preserved")
+	}
+}
+
 // Test: hasDirectKustomizations — build hr requires Flux Kustomization files
 // directly in the path (same contract as build ks).
 func TestHasDirectKustomizations(t *testing.T) {
