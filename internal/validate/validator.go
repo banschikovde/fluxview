@@ -7,7 +7,6 @@ package validate
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,39 +88,39 @@ func New(schemaDir string) *Validator {
 }
 
 // loadDefinitions loads _definitions.json from the schema directory root.
-func loadDefinitions(dir string) map[string]interface{} {
+func loadDefinitions(dir string) map[string]any {
 	data, err := os.ReadFile(filepath.Join(dir, "_definitions.json"))
 	if err != nil {
 		return nil
 	}
-	var raw map[string]interface{}
+	var raw map[string]any
 	if json.Unmarshal(data, &raw) != nil {
-		log.Printf("Warning: failed to parse _definitions.json: %v", err)
+		fmt.Fprintf(os.Stderr, "Warning: failed to parse _definitions.json: %v\n", err)
 		return nil
 	}
 	return raw
 }
 
 // loadJSONSchema loads a kubeconform-compatible JSON Schema file.
-func (v *Validator) loadJSONSchema(path string, defs map[string]interface{}) {
+func (v *Validator) loadJSONSchema(path string, defs map[string]any) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		log.Printf("Warning: could not read %s: %v", path, err)
+		fmt.Fprintf(os.Stderr, "Warning: could not read %s: %v\n", path, err)
 		return
 	}
 
-	var raw map[string]interface{}
+	var raw map[string]any
 	if json.Unmarshal(data, &raw) != nil {
-		log.Printf("Warning: could not parse JSON schema %s", path)
+		fmt.Fprintf(os.Stderr, "Warning: could not parse JSON schema %s\n", path)
 		return
 	}
 
 	// Merge shared definitions into this schema.
 	if defs != nil {
-		if defMap, ok := defs["definitions"].(map[string]interface{}); ok {
-			existing, _ := raw["definitions"].(map[string]interface{})
+		if defMap, ok := defs["definitions"].(map[string]any); ok {
+			existing, _ := raw["definitions"].(map[string]any)
 			if existing == nil {
-				existing = map[string]interface{}{}
+				existing = map[string]any{}
 			}
 			for k, val := range defMap {
 				existing[k] = val
@@ -140,14 +139,14 @@ func (v *Validator) loadJSONSchema(path string, defs map[string]interface{}) {
 
 	var s spec.Schema
 	if json.Unmarshal(fixed, &s) != nil {
-		log.Printf("Warning: could not parse OpenAPI schema %s", path)
+		fmt.Fprintf(os.Stderr, "Warning: could not parse OpenAPI schema %s\n", path)
 		return
 	}
 
 	// Look up group/kind from the explicit Flux schema filename map.
 	gk, ok := fluxSchemaKinds[strings.TrimSuffix(filepath.Base(path), ".json")]
 	if !ok {
-		log.Printf("Warning: skipping %s — unknown schema filename (use YAML CRD format for non-Flux CRDs)", path)
+		fmt.Fprintf(os.Stderr, "Warning: skipping %s — unknown schema filename (use YAML CRD format for non-Flux CRDs)\n", path)
 		return
 	}
 
@@ -159,7 +158,7 @@ func (v *Validator) loadJSONSchema(path string, defs map[string]interface{}) {
 func (v *Validator) loadCRDFile(path string) {
 	f, err := os.Open(path)
 	if err != nil {
-		log.Printf("Warning: could not read %s: %v", path, err)
+		fmt.Fprintf(os.Stderr, "Warning: could not read %s: %v\n", path, err)
 		return
 	}
 	defer f.Close()
@@ -181,12 +180,12 @@ func (v *Validator) loadCRDFile(path string) {
 			gvk := schema.GroupVersionKind{Group: crd.Spec.Group, Version: ver.Name, Kind: crd.Spec.Names.Kind}
 			internal := &apiextensions.JSONSchemaProps{}
 			if err := apiextv1.Convert_v1_JSONSchemaProps_To_apiextensions_JSONSchemaProps(ver.Schema.OpenAPIV3Schema, internal, nil); err != nil {
-				log.Printf("Warning: could not convert CRD schema for %s: %v", gvk, err)
+				fmt.Fprintf(os.Stderr, "Warning: could not convert CRD schema for %s: %v\n", gvk, err)
 				continue
 			}
 			validator, _, err := validation.NewSchemaValidator(internal)
 			if err != nil {
-				log.Printf("Warning: could not create validator for %s: %v", gvk, err)
+				fmt.Fprintf(os.Stderr, "Warning: could not create validator for %s: %v\n", gvk, err)
 				continue
 			}
 			v.schemas[gvk] = validator
@@ -196,18 +195,18 @@ func (v *Validator) loadCRDFile(path string) {
 
 // fixRefs recursively replaces "_definitions.json#/definitions/" with "#/definitions/"
 // in all $ref values within the raw schema map.
-func fixRefs(m map[string]interface{}) {
+func fixRefs(m map[string]any) {
 	for k, val := range m {
 		switch v := val.(type) {
 		case string:
 			if k == "$ref" {
 				m[k] = strings.Replace(v, "_definitions.json#/definitions/", "#/definitions/", 1)
 			}
-		case map[string]interface{}:
+		case map[string]any:
 			fixRefs(v)
-		case []interface{}:
+		case []any:
 			for _, item := range v {
-				if nested, ok := item.(map[string]interface{}); ok {
+				if nested, ok := item.(map[string]any); ok {
 					fixRefs(nested)
 				}
 			}
@@ -246,7 +245,7 @@ func (v *Validator) Validate(data []byte) []Result {
 		}
 
 		// Single unmarshal — extract metadata from the same object.
-		var obj map[string]interface{}
+		var obj map[string]any
 		if yaml.Unmarshal([]byte(trimmed), &obj) != nil {
 			continue
 		}
@@ -287,7 +286,7 @@ func (v *Validator) Validate(data []byte) []Result {
 }
 
 // extractMeta pulls group/kind/name/namespace from a parsed resource map.
-func extractMeta(obj map[string]interface{}) (resourceMeta, bool) {
+func extractMeta(obj map[string]any) (resourceMeta, bool) {
 	meta := resourceMeta{}
 
 	apiVersion, ok := obj["apiVersion"].(string)
@@ -301,7 +300,7 @@ func extractMeta(obj map[string]interface{}) (resourceMeta, bool) {
 	meta.APIVersion = apiVersion
 	meta.Kind = kind
 
-	if md, ok := obj["metadata"].(map[string]interface{}); ok {
+	if md, ok := obj["metadata"].(map[string]any); ok {
 		meta.Name, _ = md["name"].(string)
 		meta.Namespace, _ = md["namespace"].(string)
 	}

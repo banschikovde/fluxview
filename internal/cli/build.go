@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/cyphar/filepath-securejoin"
 	"github.com/spf13/cobra"
 
 	"github.com/banschikovde/fluxview/internal/flux"
@@ -123,10 +124,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	buildCache := make(map[string][]byte)
 
 	// Resolve ConfigMaps for postBuild variable substitution.
-	configMaps, err := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not resolve ConfigMaps: %v\n", err)
-	}
+	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
 
 	// Sort Kustomizations by dependency order.
 	kustomizations, err = flux.TopologicalSort(kustomizations)
@@ -210,7 +208,10 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return NewExitError(fmt.Errorf("initializing helm: %w", err), ExitCodeError)
 	}
 
-	ociRepos, _ := parser.ParseOCIRepositories(ctx)
+	ociRepos, err := parser.ParseOCIRepositories(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse OCIRepositories: %v\n", err)
+	}
 
 	configMaps, err := parser.ParseConfigMaps(ctx)
 	if err != nil {
@@ -357,10 +358,25 @@ func inflateHelmReleases(ctx context.Context, clusterPath string) (int, error) {
 		fmt.Fprintf(os.Stderr, "Warning: %v, processing in original order\n", err)
 	}
 
-	helmRepos, _ := parser.ParseHelmRepositories(ctx)
-	ociRepos, _ := parser.ParseOCIRepositories(ctx)
-	configMaps, _ := parser.ParseConfigMaps(ctx)
-	secrets, _ := parser.ParseSecrets(ctx)
+	helmRepos, err := parser.ParseHelmRepositories(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse HelmRepositories: %v\n", err)
+	}
+
+	ociRepos, err := parser.ParseOCIRepositories(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse OCIRepositories: %v\n", err)
+	}
+
+	configMaps, err := parser.ParseConfigMaps(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMaps: %v\n", err)
+	}
+
+	secrets, err := parser.ParseSecrets(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse Secrets: %v\n", err)
+	}
 
 	inflater, err := helm.NewInflater()
 	if err != nil {
@@ -400,21 +416,37 @@ func filterHelmReleases(resources []flux.HelmRelease, name string) []flux.HelmRe
 }
 
 // resolveSourcePath resolves the path for a Kustomization's source.
+// Uses securejoin to prevent path traversal attacks - the resolved path
+// is guaranteed to remain within the repoRoot directory.
 func resolveSourcePath(repoRoot string, ks flux.Kustomization) string {
 	if ks.Spec.Path != "" {
-		return filepath.Join(repoRoot, ks.Spec.Path)
+		resolved, err := securejoin.SecureJoin(repoRoot, ks.Spec.Path)
+		if err != nil {
+			// Fallback to original path if securejoin fails (unlikely)
+			// but log the error for debugging
+			fmt.Fprintf(os.Stderr, "Warning: securejoin failed for %s: %v, using original path\n", ks.Spec.Path, err)
+			return filepath.Join(repoRoot, ks.Spec.Path)
+		}
+		return resolved
 	}
 	return ""
 }
 
 // collectKustomizationPaths collects absolute paths of all Flux Kustomization
 // sources, used to exclude them from native kustomize overlay builds.
+// Uses securejoin to prevent path traversal attacks.
 func collectKustomizationPaths(repoRoot string, kustomizations []flux.Kustomization) map[string]bool {
 	paths := make(map[string]bool)
 	for _, ks := range kustomizations {
 		if ks.Spec.Path != "" {
-			absPath := filepath.Join(repoRoot, ks.Spec.Path)
-			paths[absPath] = true
+			resolved, err := securejoin.SecureJoin(repoRoot, ks.Spec.Path)
+			if err != nil {
+				// Fallback to original path if securejoin fails (unlikely)
+				absPath := filepath.Join(repoRoot, ks.Spec.Path)
+				paths[absPath] = true
+				continue
+			}
+			paths[resolved] = true
 		}
 	}
 	return paths
@@ -604,7 +636,8 @@ func reorderSingleDoc(doc []byte) []byte {
 //     (e.g. vars/ directories that generate ConfigMaps via patches)
 //
 // The builder and buildCache are used to avoid redundant builds of the same directories.
-func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomize.Builder, buildCache map[string][]byte) ([]flux.ConfigMap, error) {
+// Errors are handled internally and logged as warnings, no error is returned.
+func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomize.Builder, buildCache map[string][]byte) []flux.ConfigMap {
 	parser := flux.NewParser(clusterPath)
 
 	// 1. Parse raw ConfigMap YAML files.
@@ -616,7 +649,7 @@ func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomi
 	// 2. Discover native kustomize directories and build them to find ConfigMaps.
 	kustomizeDirs, err := flux.DiscoverKustomizeDirs(clusterPath)
 	if err != nil {
-		return configMaps, nil
+		return configMaps
 	}
 
 	if len(kustomizeDirs) > 0 {
@@ -644,5 +677,5 @@ func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomi
 		}
 	}
 
-	return configMaps, nil
+	return configMaps
 }

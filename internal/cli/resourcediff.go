@@ -3,7 +3,7 @@ package cli
 import (
 	"bytes"
 	"fmt"
-	"log"
+	"os"
 	"sort"
 	"strings"
 
@@ -57,7 +57,7 @@ func buildResourceMap(data []byte, flags *DiffFlags) map[resourceKey]string {
 			} `yaml:"metadata"`
 		}
 		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
-			log.Printf("Warning: skipping unparseable YAML document: %v", err)
+			fmt.Fprintf(os.Stderr, "Warning: skipping unparseable YAML document: %v\n", err)
 			continue
 		}
 		if meta.Kind == "" || meta.Metadata.Name == "" {
@@ -91,7 +91,7 @@ func buildResourceMap(data []byte, flags *DiffFlags) map[resourceKey]string {
 			// Kustomization duplicates are expected from recursive discovery
 			// (KS YAML prepended + same KS in kustomize output).
 			if existing != processed && meta.Kind != "Kustomization" {
-				log.Printf("Warning: duplicate resource %s — overwriting with different content", key)
+				fmt.Fprintf(os.Stderr, "Warning: duplicate resource %s — overwriting with different content\n", key)
 			}
 		}
 		result[key] = processed
@@ -199,7 +199,7 @@ func filterByNamespace(data []byte, namespace string) []byte {
 			} `yaml:"metadata"`
 		}
 		if err := yaml.Unmarshal([]byte(doc), &meta); err != nil {
-			log.Printf("Warning: skipping unparseable document in filterByNamespace: %v", err)
+			fmt.Fprintf(os.Stderr, "Warning: skipping unparseable document in filterByNamespace: %v\n", err)
 			continue
 		}
 		if meta.Metadata.Namespace == namespace {

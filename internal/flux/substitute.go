@@ -101,7 +101,7 @@ func ApplySubstitution(data []byte, vars map[string]string) []byte {
 }
 
 // parseSubstituteFrom parses the substituteFrom field which can be a list of objects.
-func parseSubstituteFrom(raw interface{}) []substituteFromEntry {
+func parseSubstituteFrom(raw any) []substituteFromEntry {
 	if raw == nil {
 		return nil
 	}
@@ -109,9 +109,9 @@ func parseSubstituteFrom(raw interface{}) []substituteFromEntry {
 	var entries []substituteFromEntry
 
 	switch v := raw.(type) {
-	case []interface{}:
+	case []any:
 		for _, item := range v {
-			if m, ok := item.(map[string]interface{}); ok {
+			if m, ok := item.(map[string]any); ok {
 				entry := substituteFromEntry{}
 				if kind, ok := m["kind"].(string); ok {
 					entry.Kind = kind
@@ -261,7 +261,7 @@ func TopologicalSortHelmReleases(helmReleases []HelmRelease) ([]HelmRelease, err
 }
 
 // parseValuesFrom parses the valuesFrom field which can be a list of objects.
-func parseValuesFrom(raw interface{}) []ValuesFromEntry {
+func parseValuesFrom(raw any) []ValuesFromEntry {
 	if raw == nil {
 		return nil
 	}
@@ -269,9 +269,9 @@ func parseValuesFrom(raw interface{}) []ValuesFromEntry {
 	var entries []ValuesFromEntry
 
 	switch v := raw.(type) {
-	case []interface{}:
+	case []any:
 		for _, item := range v {
-			if m, ok := item.(map[string]interface{}); ok {
+			if m, ok := item.(map[string]any); ok {
 				entry := ValuesFromEntry{}
 				if kind, ok := m["kind"].(string); ok {
 					entry.Kind = kind
@@ -297,13 +297,13 @@ func parseValuesFrom(raw interface{}) []ValuesFromEntry {
 // Returns a merged map of values where later entries in the valuesFrom list override earlier ones
 // (matching Flux behavior where the order matters). ConfigMap and Secret values are merged
 // by key, not by type precedence.
-func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret) map[string]interface{} {
+func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret) map[string]any {
 	entries := parseValuesFrom(hr.Spec.ValuesFrom)
 	if len(entries) == 0 {
 		return nil
 	}
 
-	result := make(map[string]interface{})
+	result := make(map[string]any)
 
 	for _, entry := range entries {
 		entryNS := entry.Namespace

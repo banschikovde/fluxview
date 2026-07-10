@@ -101,7 +101,7 @@ func runValidateKS(ctx context.Context, clusterPath, repoRoot, name, namespace s
 
 	builder := kustomize.NewBuilder()
 	buildCache := make(map[string][]byte)
-	configMaps, _ := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
+	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
 
 	if name != "" {
 		kustomizations = filterKustomizations(kustomizations, name)

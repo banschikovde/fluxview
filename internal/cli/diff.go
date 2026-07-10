@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -189,7 +188,7 @@ func buildKSOutputWithCache(ctx context.Context, clusterPath, repoRoot, name str
 
 	builder := kustomize.NewBuilder()
 	// Resolve ConfigMaps for postBuild substitution.
-	configMaps, _ := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
+	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
 
 	return buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, false, buildCache)
 }
@@ -232,7 +231,7 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 	builder := kustomize.NewBuilder()
 	buildCache := make(map[string][]byte)
 	// Resolve ConfigMaps for postBuild substitution from the worktree.
-	configMaps, _ := resolveConfigMaps(ctx, worktreeClusterPath, builder, buildCache)
+	configMaps := resolveConfigMaps(ctx, worktreeClusterPath, builder, buildCache)
 
 	// Use worktreePath as repoRoot so that recursive discovery and postBuild
 	// substitution work identically to the current state. External GitRepository
@@ -262,10 +261,25 @@ func buildHROutput(ctx context.Context, clusterPath, name string) ([]byte, error
 		return nil, nil // no HRs found, return empty
 	}
 
-	helmRepos, _ := parser.ParseHelmRepositories(ctx)
-	ociRepos, _ := parser.ParseOCIRepositories(ctx)
-	configMaps, _ := parser.ParseConfigMaps(ctx)
-	secrets, _ := parser.ParseSecrets(ctx)
+	helmRepos, err := parser.ParseHelmRepositories(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse HelmRepositories: %v\n", err)
+	}
+
+	ociRepos, err := parser.ParseOCIRepositories(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse OCIRepositories: %v\n", err)
+	}
+
+	configMaps, err := parser.ParseConfigMaps(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMaps: %v\n", err)
+	}
+
+	secrets, err := parser.ParseSecrets(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse Secrets: %v\n", err)
+	}
 
 	inflater, err := helm.NewInflater()
 	if err != nil {
@@ -451,7 +465,7 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 	}
 
 	if len(queue) > 0 {
-		log.Printf("Warning: max recursion depth (%d) reached, %d Kustomization(s) not processed", maxDepth, len(queue))
+		fmt.Fprintf(os.Stderr, "Warning: max recursion depth (%d) reached, %d Kustomization(s) not processed\n", maxDepth, len(queue))
 	}
 
 	if len(results) == 0 {

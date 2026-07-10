@@ -41,11 +41,11 @@ type KustomizationSpec struct {
 	// Prune enables pruning.
 	Prune bool `yaml:"prune,omitempty"`
 	// Interval is the reconciliation interval (e.g. "5m").
-	Interval interface{} `yaml:"interval,omitempty"`
+	Interval any `yaml:"interval,omitempty"`
 	// RetryInterval is the retry interval (e.g. "1m").
-	RetryInterval interface{} `yaml:"retryInterval,omitempty"`
+	RetryInterval any `yaml:"retryInterval,omitempty"`
 	// Timeout is the timeout for reconciliation.
-	Timeout interface{} `yaml:"timeout,omitempty"`
+	Timeout any `yaml:"timeout,omitempty"`
 	// Wait enables waiting for health checks.
 	Wait bool `yaml:"wait,omitempty"`
 	// DependsOn lists dependencies.
@@ -53,15 +53,15 @@ type KustomizationSpec struct {
 	// PostBuild contains post-build substitutions.
 	PostBuild *PostBuild `yaml:"postBuild,omitempty"`
 	// Patches lists patches to apply.
-	Patches interface{} `yaml:"patches,omitempty"`
+	Patches any `yaml:"patches,omitempty"`
 	// Images lists image overrides.
-	Images interface{} `yaml:"images,omitempty"`
+	Images any `yaml:"images,omitempty"`
 	// Suspend indicates if the resource is suspended.
 	Suspend bool `yaml:"suspend,omitempty"`
 	// HealthChecks lists health check references.
-	HealthChecks interface{} `yaml:"healthChecks,omitempty"`
+	HealthChecks any `yaml:"healthChecks,omitempty"`
 	// Decryption configures SOPS decryption.
-	Decryption interface{} `yaml:"decryption,omitempty"`
+	Decryption any `yaml:"decryption,omitempty"`
 	// Force enables force reconciliation.
 	Force bool `yaml:"force,omitempty"`
 }
@@ -75,7 +75,7 @@ type DependsOnEntry struct {
 // PostBuild contains post-build substitution configuration.
 type PostBuild struct {
 	Substitute        map[string]string `yaml:"substitute,omitempty"`
-	SubstituteFrom    interface{}       `yaml:"substituteFrom,omitempty"`
+	SubstituteFrom    any       `yaml:"substituteFrom,omitempty"`
 	AllowInsecure     bool              `yaml:"allowInsecure,omitempty"`
 	DisableSubstitute bool              `yaml:"disableSubstitute,omitempty"`
 }
@@ -101,19 +101,19 @@ type HelmReleaseSpec struct {
 	Chart HelmReleaseChart `yaml:"chart"`
 	// ChartRef references an OCIRepository directly (Flux v2 chartRef API).
 	ChartRef *ChartRef   `yaml:"chartRef,omitempty"`
-	Interval interface{} `yaml:"interval,omitempty"`
+	Interval any `yaml:"interval,omitempty"`
 	// Values holds the values to pass to helm template.
-	Values map[string]interface{} `yaml:"values,omitempty"`
+	Values map[string]any `yaml:"values,omitempty"`
 	// ValuesFrom references ConfigMaps/Secrets with values.
-	ValuesFrom interface{} `yaml:"valuesFrom,omitempty"`
+	ValuesFrom any `yaml:"valuesFrom,omitempty"`
 	// Suspend indicates if the resource is suspended.
 	Suspend bool `yaml:"suspend,omitempty"`
 	// TargetNamespace overrides the release namespace.
 	TargetNamespace string `yaml:"targetNamespace,omitempty"`
 	// Install holds install-specific configuration.
-	Install interface{} `yaml:"install,omitempty"`
+	Install any `yaml:"install,omitempty"`
 	// Upgrade holds upgrade-specific configuration.
-	Upgrade interface{} `yaml:"upgrade,omitempty"`
+	Upgrade any `yaml:"upgrade,omitempty"`
 	// DependsOn lists dependencies.
 	DependsOn []DependsOnEntry `yaml:"dependsOn,omitempty"`
 }
@@ -142,7 +142,7 @@ type OCIRepository struct {
 type OCIRepositorySpec struct {
 	URL      string            `yaml:"url"`
 	Ref      *OCIRepositoryRef `yaml:"ref,omitempty"`
-	Interval interface{}       `yaml:"interval,omitempty"`
+	Interval any       `yaml:"interval,omitempty"`
 }
 
 // OCIRepositoryRef specifies which artifact version to pull.
@@ -184,7 +184,7 @@ type HelmReleaseChartSpec struct {
 		Name      string `yaml:"name"`
 		Namespace string `yaml:"namespace,omitempty"`
 	} `yaml:"sourceRef"`
-	Interval          interface{} `yaml:"interval,omitempty"`
+	Interval          any `yaml:"interval,omitempty"`
 	ReconcileStrategy string      `yaml:"reconcileStrategy,omitempty"`
 }
 
@@ -199,7 +199,7 @@ type HelmRepository struct {
 // HelmRepositorySpec holds the spec for a Flux HelmRepository.
 type HelmRepositorySpec struct {
 	URL       string      `yaml:"url"`
-	Interval  interface{} `yaml:"interval,omitempty"`
+	Interval  any `yaml:"interval,omitempty"`
 	SecretRef *struct {
 		Name string `yaml:"name"`
 	} `yaml:"secretRef,omitempty"`
