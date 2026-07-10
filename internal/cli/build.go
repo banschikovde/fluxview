@@ -193,6 +193,14 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		}
 	}
 
+	// Apply namespace filter if specified (filter HRs by their target namespace)
+	if flags.Namespace != "" {
+		helmReleases = filterHelmReleasesByTargetNamespace(helmReleases, flags.Namespace)
+		if len(helmReleases) == 0 {
+			return NewExitError(fmt.Errorf("no HelmReleases found in namespace %q", flags.Namespace), ExitCodeError)
+		}
+	}
+
 	if len(helmReleases) == 0 {
 		if name != "" {
 			return NewExitError(fmt.Errorf("HelmRelease %q not found", name), ExitCodeError)
@@ -434,6 +442,22 @@ func filterHelmReleases(resources []flux.HelmRelease, name string) []flux.HelmRe
 			continue
 		}
 		result = append(result, hr)
+	}
+	return result
+}
+
+// filterHelmReleasesByTargetNamespace filters HelmRelease resources by their target namespace.
+// The target namespace is hr.Spec.TargetNamespace if set, otherwise hr.Metadata.Namespace.
+func filterHelmReleasesByTargetNamespace(resources []flux.HelmRelease, namespace string) []flux.HelmRelease {
+	var result []flux.HelmRelease
+	for _, hr := range resources {
+		targetNamespace := hr.Spec.TargetNamespace
+		if targetNamespace == "" {
+			targetNamespace = hr.Metadata.Namespace
+		}
+		if targetNamespace == namespace {
+			result = append(result, hr)
+		}
 	}
 	return result
 }
