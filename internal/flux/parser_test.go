@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -429,5 +430,81 @@ func TestIsKustomizeAPI(t *testing.T) {
 				t.Errorf("isKustomizeAPI(%q) = %v, want %v", tt.apiVersion, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestSplitYAMLText_BlockScalarWithSeparator verifies that a literal "---"
+// inside a block scalar (| or >) is NOT treated as a document separator.
+// This is a regression test for the text-based splitter that would incorrectly
+// split secrets, CRDs, or any YAML containing frontmatter-like content inside
+// block scalars — potentially leaving secret values unredacted.
+func TestSplitYAMLText_BlockScalarWithSeparator(t *testing.T) {
+	input := []byte(`apiVersion: v1
+kind: Secret
+metadata:
+  name: cert
+data:
+  tls.crt: |
+    -----BEGIN CERTIFICATE-----
+    --- not a separator
+    MIIB...
+    -----END CERTIFICATE-----
+  tls.key: |
+    --- also not a separator
+    key-data
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config
+data:
+  key: value
+`)
+
+	docs := SplitYAMLText(input)
+
+	if len(docs) != 2 {
+		t.Fatalf("expected 2 documents, got %d — block scalar --- was treated as separator", len(docs))
+	}
+
+	// First document should be the Secret with its full content.
+	if !strings.Contains(docs[0], "BEGIN CERTIFICATE") {
+		t.Error("Secret document missing certificate content")
+	}
+	if !strings.Contains(docs[0], "not a separator") {
+		t.Error("Secret document missing block scalar content with ---")
+	}
+	if !strings.Contains(docs[0], "also not a separator") {
+		t.Error("Secret document missing tls.key block scalar content")
+	}
+
+	// Second document should be the ConfigMap.
+	if !strings.Contains(docs[1], "ConfigMap") {
+		t.Error("second document should be ConfigMap")
+	}
+}
+
+// TestSplitYAMLText_BlockScalarWithSeparatorRedaction verifies that
+// RedactSecrets correctly redacts secret values when the secret data
+// contains "---" inside a block scalar.
+func TestSplitYAMLText_BlockScalarWithSeparatorRedaction(t *testing.T) {
+	input := []byte(`apiVersion: v1
+kind: Secret
+metadata:
+  name: cert
+data:
+  tls.crt: |
+    -----BEGIN CERTIFICATE-----
+    --- not a separator
+    MIIB...
+`)
+
+	redacted := RedactSecrets(input)
+
+	if strings.Contains(string(redacted), "MIIB") {
+		t.Error("secret value leaked — RedactSecrets did not redact block scalar content")
+	}
+	if !strings.Contains(string(redacted), SecretRedactedValue) {
+		t.Error("expected redacted placeholder in output")
 	}
 }
