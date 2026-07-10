@@ -347,8 +347,8 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 			}
 		}
 
-		fmt.Fprintf(os.Stderr, "Inflating HelmRelease %s/%s (chart: %s)...\n",
-			hr.Metadata.Namespace, hr.Metadata.Name, hr.Spec.Chart.Spec.Chart)
+		fmt.Fprintf(os.Stderr, "Inflating HelmRelease %s/%s\n",
+			hr.Metadata.Namespace, hr.Metadata.Name)
 
 		output, err := inflater.InflateHelmRelease(ctx, hr, repoURL, username, password, configMaps, secrets)
 		if err != nil {
