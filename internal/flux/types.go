@@ -75,7 +75,7 @@ type DependsOnEntry struct {
 // PostBuild contains post-build substitution configuration.
 type PostBuild struct {
 	Substitute        map[string]string `yaml:"substitute,omitempty"`
-	SubstituteFrom    any       `yaml:"substituteFrom,omitempty"`
+	SubstituteFrom    any               `yaml:"substituteFrom,omitempty"`
 	AllowInsecure     bool              `yaml:"allowInsecure,omitempty"`
 	DisableSubstitute bool              `yaml:"disableSubstitute,omitempty"`
 }
@@ -100,8 +100,8 @@ type HelmRelease struct {
 type HelmReleaseSpec struct {
 	Chart HelmReleaseChart `yaml:"chart"`
 	// ChartRef references an OCIRepository directly (Flux v2 chartRef API).
-	ChartRef *ChartRef   `yaml:"chartRef,omitempty"`
-	Interval any `yaml:"interval,omitempty"`
+	ChartRef *ChartRef `yaml:"chartRef,omitempty"`
+	Interval any       `yaml:"interval,omitempty"`
 	// Values holds the values to pass to helm template.
 	Values map[string]any `yaml:"values,omitempty"`
 	// ValuesFrom references ConfigMaps/Secrets with values.
@@ -142,7 +142,7 @@ type OCIRepository struct {
 type OCIRepositorySpec struct {
 	URL      string            `yaml:"url"`
 	Ref      *OCIRepositoryRef `yaml:"ref,omitempty"`
-	Interval any       `yaml:"interval,omitempty"`
+	Interval any               `yaml:"interval,omitempty"`
 }
 
 // OCIRepositoryRef specifies which artifact version to pull.
@@ -184,8 +184,8 @@ type HelmReleaseChartSpec struct {
 		Name      string `yaml:"name"`
 		Namespace string `yaml:"namespace,omitempty"`
 	} `yaml:"sourceRef"`
-	Interval          any `yaml:"interval,omitempty"`
-	ReconcileStrategy string      `yaml:"reconcileStrategy,omitempty"`
+	Interval          any    `yaml:"interval,omitempty"`
+	ReconcileStrategy string `yaml:"reconcileStrategy,omitempty"`
 }
 
 // HelmRepository represents a Flux HelmRepository resource.
@@ -198,8 +198,8 @@ type HelmRepository struct {
 
 // HelmRepositorySpec holds the spec for a Flux HelmRepository.
 type HelmRepositorySpec struct {
-	URL       string      `yaml:"url"`
-	Interval  any `yaml:"interval,omitempty"`
+	URL       string `yaml:"url"`
+	Interval  any    `yaml:"interval,omitempty"`
 	SecretRef *struct {
 		Name string `yaml:"name"`
 	} `yaml:"secretRef,omitempty"`

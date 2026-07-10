@@ -418,14 +418,17 @@ func filterHelmReleases(resources []flux.HelmRelease, name string) []flux.HelmRe
 // resolveSourcePath resolves the path for a Kustomization's source.
 // Uses securejoin to prevent path traversal attacks - the resolved path
 // is guaranteed to remain within the repoRoot directory.
+// If securejoin fails, returns empty string to fail-closed and skip this Kustomization.
 func resolveSourcePath(repoRoot string, ks flux.Kustomization) string {
 	if ks.Spec.Path != "" {
 		resolved, err := securejoin.SecureJoin(repoRoot, ks.Spec.Path)
 		if err != nil {
-			// Fallback to original path if securejoin fails (unlikely)
-			// but log the error for debugging
-			fmt.Fprintf(os.Stderr, "Warning: securejoin failed for %s: %v, using original path\n", ks.Spec.Path, err)
-			return filepath.Join(repoRoot, ks.Spec.Path)
+			// Fail-closed: skip this Kustomization if we can't safely resolve its path
+			// This prevents TOCTOU attacks via symlink loops that could trigger
+			// the fallback to unsafe filepath.Join
+			fmt.Fprintf(os.Stderr, "Warning: cannot safely resolve path %s for %s/%s: %v, skipping\n",
+				ks.Spec.Path, ks.Metadata.Namespace, ks.Metadata.Name, err)
+			return ""
 		}
 		return resolved
 	}
@@ -435,15 +438,17 @@ func resolveSourcePath(repoRoot string, ks flux.Kustomization) string {
 // collectKustomizationPaths collects absolute paths of all Flux Kustomization
 // sources, used to exclude them from native kustomize overlay builds.
 // Uses securejoin to prevent path traversal attacks.
+// Paths that cannot be safely resolved are excluded from the map (fail-closed).
 func collectKustomizationPaths(repoRoot string, kustomizations []flux.Kustomization) map[string]bool {
 	paths := make(map[string]bool)
 	for _, ks := range kustomizations {
 		if ks.Spec.Path != "" {
 			resolved, err := securejoin.SecureJoin(repoRoot, ks.Spec.Path)
 			if err != nil {
-				// Fallback to original path if securejoin fails (unlikely)
-				absPath := filepath.Join(repoRoot, ks.Spec.Path)
-				paths[absPath] = true
+				// Fail-closed: exclude paths that cannot be safely resolved
+				// This prevents TOCTOU attacks via symlink loops
+				fmt.Fprintf(os.Stderr, "Warning: cannot safely resolve path %s for %s/%s: %v, excluding from overlay builds\n",
+					ks.Spec.Path, ks.Metadata.Namespace, ks.Metadata.Name, err)
 				continue
 			}
 			paths[resolved] = true
