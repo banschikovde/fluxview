@@ -146,6 +146,13 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}
+
+	// Extract HelmReleases from the already-computed build output before any
+	// filtering is applied, so that HelmReleases in shared bases outside
+	// clusterPath — pulled in via Kustomization.spec.path — are discovered
+	// (they are invisible to a naive scan of clusterPath alone).
+	helmReleasesFromBuild, _ := flux.ParseHelmReleasesFromBytes(output)
+
 	if output != nil {
 		if flags.Namespace != "" {
 			output = filterByNamespace(output, flags.Namespace)
@@ -163,11 +170,8 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		printRedacted(output)
 	}
 
-	// Inflate HelmReleases found in the cluster path.
-	_, err = inflateHelmReleases(ctx, clusterPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: helm inflation failed: %v\n", err)
-	}
+	// Inflate HelmReleases discovered in the build output.
+	inflateAndPrintHelmReleases(ctx, helmReleasesFromBuild, clusterPath, repoRoot, flags.SkipCRDs)
 
 	return nil
 }
@@ -380,58 +384,35 @@ func resolveHelmRepoURL(hr flux.HelmRelease, helmRepos []flux.HelmRepository, se
 	return url, username, password
 }
 
-// inflateHelmReleases scans for HelmRelease resources in the cluster path and inflates them.
-func inflateHelmReleases(ctx context.Context, clusterPath string) (int, error) {
-	parser := flux.NewParser(clusterPath)
-	helmReleases, err := parser.ParseHelmReleases(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("parsing HelmReleases: %w", err)
-	}
-
+// inflateAndPrintHelmReleases resolves inflation sources (HelmRepository,
+// OCIRepository, ConfigMap, Secret), inflates the given HelmReleases, and
+// prints each output via printRedacted. Shared by runBuildKS (which passes
+// HelmReleases extracted from the kustomize build output) and runBuildHR.
+func inflateAndPrintHelmReleases(ctx context.Context, helmReleases []flux.HelmRelease, clusterPath, repoRoot string, skipCRDs bool) {
 	if len(helmReleases) == 0 {
-		return 0, nil
+		return
 	}
 
 	// Sort HelmReleases by dependency order.
-	helmReleases, err = flux.TopologicalSortHelmReleases(helmReleases)
+	sorted, err := flux.TopologicalSortHelmReleases(helmReleases)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: %v, processing in original order\n", err)
-	}
-
-	helmRepos, err := parser.ParseHelmRepositories(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse HelmRepositories: %v\n", err)
-	}
-
-	ociRepos, err := parser.ParseOCIRepositories(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse OCIRepositories: %v\n", err)
-	}
-
-	configMaps, err := parser.ParseConfigMaps(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMaps: %v\n", err)
-	}
-
-	secrets, err := parser.ParseSecrets(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse Secrets: %v\n", err)
+		sorted = helmReleases
 	}
 
 	inflater, err := helm.NewInflater()
 	if err != nil {
-		return 0, fmt.Errorf("initializing helm: %w", err)
+		fmt.Fprintf(os.Stderr, "Warning: could not initialize helm inflater: %v\n", err)
+		return
 	}
 
-	var totalSecrets int
-	for _, output := range inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets, false) {
+	helmRepos, ociRepos, configMaps, secrets := resolveHelmInflationSources(ctx, clusterPath, repoRoot)
+	for _, output := range inflateHelmReleasesShared(ctx, inflater, sorted, helmRepos, ociRepos, configMaps, secrets, skipCRDs) {
 		if err := CheckInterrupted(ctx); err != nil {
-			return 0, nil
+			return
 		}
-		totalSecrets += printRedacted(output)
+		printRedacted(output)
 	}
-
-	return totalSecrets, nil
 }
 
 // filterKustomizations filters Kustomization resources by name.
