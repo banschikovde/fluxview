@@ -10,8 +10,33 @@ permissions:
   packages: write
 
 jobs:
+  # ── Test before release ─────────────────────────────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: gofmt
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "::error::gofmt found issues:"
+            gofmt -l .
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
   # ── Build binaries ──────────────────────────────────────────────────────────
   release-binaries:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,6 +73,7 @@ jobs:
 
   # ── Build and push Docker image ─────────────────────────────────────────────
   release-docker:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

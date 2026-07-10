@@ -34,7 +34,7 @@ Tags: `:latest`, plus a tag per release (version-pinned).
 Run against a local repo mounted as a volume:
 
 ```bash
-docker run --rm -v $(pwd):/repo -w /repo ghcr.io/banschikovde/fluxview:latest \
+docker run --rm --user $(id -u):$(id -g) -v $(pwd):/repo -w /repo ghcr.io/banschikovde/fluxview:latest \
   diff ks --path clusters/prod/flux/ --branch-orig master --strip-attrs helm.sh/chart,status --skip-crds
 ```
 
@@ -47,7 +47,7 @@ docker build -t fluxview .
 CRD schemas for `validate` are not bundled — mount them via `-v /path/to/crds:/crds`:
 
 ```bash
-docker run --rm -v $(pwd):/repo -v /path/to/crds:/crds \
+docker run --rm --user $(id -u):$(id -g) -v $(pwd):/repo -v /path/to/crds:/crds \
   -w /repo ghcr.io/banschikovde/fluxview:latest \
   validate --path clusters/prod/flux/
 ```
@@ -193,3 +193,7 @@ fluxview:diff:
 ## License
 
 Apache-2.0
+
+## TODO
+
+- **Security: Docker image runs as root** — add non-root user to the runtime stage. Requires fixed UID/GID and `--user` documentation for bind-mount compatibility (see #4 in code review).
