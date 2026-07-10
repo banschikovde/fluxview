@@ -63,6 +63,48 @@ kind: ConfigMap
 	}
 }
 
+// TestReorderYAMLFields_BlockScalarWithSeparator verifies that a literal "---"
+// inside a block scalar (|) does NOT split the document during reordering.
+func TestReorderYAMLFields_BlockScalarWithSeparator(t *testing.T) {
+	input := []byte(`kind: Secret
+metadata:
+  name: cert
+apiVersion: v1
+data:
+  tls.crt: |
+    -----BEGIN CERTIFICATE-----
+    --- not a separator
+    MIIB...
+    -----END CERTIFICATE-----
+---
+kind: ConfigMap
+metadata:
+  name: config
+apiVersion: v1
+`)
+	result := reorderYAMLFields(input)
+	resultStr := string(result)
+
+	// First document must be intact — certificate content must NOT be split off.
+	if !strings.Contains(resultStr, "BEGIN CERTIFICATE") {
+		t.Error("certificate content lost — block scalar --- was treated as separator")
+	}
+	if !strings.Contains(resultStr, "not a separator") {
+		t.Error("block scalar line with --- lost during reorder")
+	}
+
+	// Second document must still be present after the real separator.
+	if !strings.Contains(resultStr, "ConfigMap") {
+		t.Error("second document (ConfigMap) missing after real separator")
+	}
+
+	// Must have exactly 2 documents (1 real separator).
+	sepCount := strings.Count(resultStr, "\n---\n")
+	if sepCount != 1 {
+		t.Errorf("expected 1 document separator in output, got %d", sepCount)
+	}
+}
+
 func TestStripSOPSFields(t *testing.T) {
 	input := []byte(`apiVersion: v1
 kind: Secret
