@@ -223,11 +223,15 @@ func ConvertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
 			continue
 		}
 		doc = RemoveNilValues(doc)
-		marshaled, err := yaml.Marshal(doc)
-		if err != nil {
+		var buf bytes.Buffer
+		enc := yaml.NewEncoder(&buf)
+		enc.SetIndent(2)
+		if err := enc.Encode(doc); err != nil {
+			enc.Close()
 			continue
 		}
-		docs = append(docs, strings.TrimRight(string(marshaled), "\n"))
+		enc.Close()
+		docs = append(docs, strings.TrimRight(buf.String(), "\n"))
 	}
 
 	if len(docs) == 0 {
