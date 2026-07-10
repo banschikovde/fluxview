@@ -415,7 +415,7 @@ spec:
 
 // Test: Two Flux Kustomizations referencing the same shared base — the
 // HelmRelease appears in the build output (possibly twice), dedup is handled
-// internally by inflateAndPrintHelmReleases.
+// internally by buildHRInflation.
 func TestBuildKSContent_SharedBaseReferencedTwice(t *testing.T) {
 	repoRoot := t.TempDir()
 
@@ -480,7 +480,7 @@ spec:
 		t.Fatal("expected at least 1 HelmRelease from shared base, got 0")
 	}
 
-	// Dedup by namespace/name (same logic as inflateAndPrintHelmReleases).
+	// Dedup by namespace/name (same logic as buildHRInflation).
 	seen := make(map[string]bool)
 	for _, hr := range helmReleases {
 		key := hr.Metadata.Namespace + "/" + hr.Metadata.Name
