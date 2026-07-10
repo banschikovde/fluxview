@@ -185,9 +185,41 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return NewExitError(fmt.Errorf("no Kustomization files found in %s", clusterPath), ExitCodeError)
 	}
 
+	output, err := buildHRInflation(ctx, clusterPath, repoRoot, name)
+	if err != nil {
+		return NewExitError(err, ExitCodeError)
+	}
+	if len(bytes.TrimSpace(output)) == 0 {
+		fmt.Fprintln(os.Stderr, "No HelmReleases found.")
+		return nil
+	}
+
+	if flags.Namespace != "" {
+		output = filterByNamespace(output, flags.Namespace)
+		if len(output) == 0 {
+			fmt.Fprintf(os.Stderr, "No resources found in namespace %q\n", flags.Namespace)
+			return nil
+		}
+	}
+	if flags.SkipCRDs {
+		output = filterCRDDocs(output)
+	}
+	if flags.StripAttrs != "" {
+		output = stripAllAttrs(output, flags.StripAttrs)
+	}
+	printResourcesBoxed(output)
+
+	return nil
+}
+
+// buildHRInflation discovers HelmReleases through the Flux Kustomization pipeline
+// (same discovery logic as runBuildHR), resolves sources, inflates the charts,
+// and returns combined YAML. Returns nil if no Flux Kustomizations or no
+// HelmReleases are found (valid for diff comparison state).
+func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name string) ([]byte, error) {
 	kustomizations, err := flux.NewParser(clusterPath).ParseKustomizations(ctx)
 	if err != nil {
-		return NewExitError(fmt.Errorf("parsing Kustomization resources: %w", err), ExitCodeError)
+		return nil, nil // no Flux KS — valid for diff
 	}
 
 	builder := kustomize.NewBuilder()
@@ -196,37 +228,57 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 
 	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, true, buildCache)
 	if err != nil {
-		return NewExitError(err, ExitCodeError)
+		return nil, err
 	}
 
-	// Extract HelmReleases from the build output — they have kustomize-transformed
-	// namespaces and include HRs in shared bases pulled via spec.path.
-	helmReleases, _ := flux.ParseHelmReleasesFromBytes(output)
-
-	// Apply name filter if specified.
-	if name != "" {
-		helmReleases = filterHelmReleases(helmReleases, name)
-		if len(helmReleases) == 0 {
-			return NewExitError(fmt.Errorf("HelmRelease %q not found", name), ExitCodeError)
+	// Extract + dedup HelmReleases from the build output.
+	allHRs, _ := flux.ParseHelmReleasesFromBytes(output)
+	seen := make(map[string]bool)
+	helmReleases := allHRs[:0]
+	for _, hr := range allHRs {
+		key := hr.Metadata.Namespace + "/" + hr.Metadata.Name
+		if !seen[key] {
+			seen[key] = true
+			helmReleases = append(helmReleases, hr)
 		}
 	}
 
-	// Apply namespace filter if specified.
-	if flags.Namespace != "" {
-		helmReleases = filterHelmReleasesByNamespace(helmReleases, flags.Namespace)
+	// Name filter.
+	if name != "" {
+		helmReleases = filterHelmReleases(helmReleases, name)
 		if len(helmReleases) == 0 {
-			return NewExitError(fmt.Errorf("no HelmReleases found in namespace %q", flags.Namespace), ExitCodeError)
+			return nil, fmt.Errorf("HelmRelease %q not found", name)
 		}
 	}
 
 	if len(helmReleases) == 0 {
-		fmt.Fprintln(os.Stderr, "No HelmReleases found.")
-		return nil
+		return nil, nil
 	}
 
-	inflateAndPrintHelmReleases(ctx, helmReleases, clusterPath, repoRoot, output, flags.SkipCRDs)
+	// Sort by dependency order.
+	sorted, sortErr := flux.TopologicalSortHelmReleases(helmReleases)
+	if sortErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v, processing in original order\n", sortErr)
+		sorted = helmReleases
+	}
 
-	return nil
+	// Sources from build output (correct kustomize-transformed namespaces)
+	// prepended to raw-parsed sources (with repoRoot fallback).
+	buildRepos, _ := flux.ParseHelmRepositoriesFromBytes(output)
+	buildOCI, _ := flux.ParseOCIRepositoriesFromBytes(output)
+	buildCMs, _ := flux.ParseConfigMapsFromBytes(output)
+	rawRepos, rawOCI, rawCMs, secrets := resolveHelmInflationSources(ctx, clusterPath, repoRoot)
+
+	helmRepos := append(buildRepos, rawRepos...)
+	ociRepos := append(buildOCI, rawOCI...)
+	inflationCMs := append(buildCMs, rawCMs...)
+
+	inflater, err := helm.NewInflater()
+	if err != nil {
+		return nil, fmt.Errorf("initializing helm: %w", err)
+	}
+
+	return inflateAllHelmReleases(ctx, inflater, sorted, helmRepos, ociRepos, inflationCMs, secrets)
 }
 
 // resourceEntry holds a single YAML document with its resource key for sorting.
@@ -411,68 +463,6 @@ func resolveHelmRepoURL(hr flux.HelmRelease, helmRepos []flux.HelmRepository, se
 		return "", "", ""
 	}
 	return url, username, password
-}
-
-// inflateAndPrintHelmReleases resolves inflation sources (HelmRepository,
-// OCIRepository, ConfigMap, Secret), inflates the given HelmReleases, and
-// prints each output via printResourcesBoxed. Shared by runBuildHR.
-// HelmReleases extracted from the kustomize build output) and runBuildHR.
-//
-// buildOutput is the kustomize build output from which the HelmReleases were
-// extracted. Sources (HelmRepository, OCIRepository, ConfigMap) are also
-// extracted from it and prepended to the raw-parsed sources — build-output
-// sources have kustomize-transformed namespaces that match the HelmReleases.
-func inflateAndPrintHelmReleases(ctx context.Context, helmReleases []flux.HelmRelease, clusterPath, repoRoot string, buildOutput []byte, skipCRDs bool) {
-	// Deduplicate by namespace/name — two Flux Kustomizations may reference
-	// the same shared base, causing the same HelmRelease to appear twice in
-	// the build output.
-	seen := make(map[string]bool)
-	deduped := helmReleases[:0]
-	for _, hr := range helmReleases {
-		key := hr.Metadata.Namespace + "/" + hr.Metadata.Name
-		if !seen[key] {
-			seen[key] = true
-			deduped = append(deduped, hr)
-		}
-	}
-	helmReleases = deduped
-
-	if len(helmReleases) == 0 {
-		return
-	}
-
-	// Sort HelmReleases by dependency order.
-	sorted, err := flux.TopologicalSortHelmReleases(helmReleases)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: %v, processing in original order\n", err)
-		sorted = helmReleases
-	}
-
-	inflater, err := helm.NewInflater()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not initialize helm inflater: %v\n", err)
-		return
-	}
-
-	// Extract sources from the build output first — these have kustomize-transformed
-	// namespaces that match the HelmReleases (which also came from build output).
-	// Prepend them so they are found before the raw-parsed versions.
-	buildRepos, _ := flux.ParseHelmRepositoriesFromBytes(buildOutput)
-	buildOCI, _ := flux.ParseOCIRepositoriesFromBytes(buildOutput)
-	buildCMs, _ := flux.ParseConfigMapsFromBytes(buildOutput)
-
-	rawRepos, rawOCI, rawCMs, secrets := resolveHelmInflationSources(ctx, clusterPath, repoRoot)
-
-	helmRepos := append(buildRepos, rawRepos...)
-	ociRepos := append(buildOCI, rawOCI...)
-	configMaps := append(buildCMs, rawCMs...)
-
-	for _, output := range inflateHelmReleasesShared(ctx, inflater, sorted, helmRepos, ociRepos, configMaps, secrets, skipCRDs) {
-		if err := CheckInterrupted(ctx); err != nil {
-			return
-		}
-		printResourcesBoxed(output)
-	}
 }
 
 // filterKustomizations filters Kustomization resources by name.
