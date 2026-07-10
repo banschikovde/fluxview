@@ -324,18 +324,18 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 		case "secret":
 			for _, secret := range secrets {
 				if secret.Metadata.Name == entry.Name && secret.Metadata.Namespace == entryNS {
-					for k, v := range secret.Data {
+					for k := range secret.Data {
 						decodedValue := secret.GetSecretValue(k)
 						if decodedValue != "" {
 							result[k] = decodedValue
-						} else if v != "" {
-							result[k] = v
 						}
 					}
-					// Also handle stringData
+					// Also handle stringData (keys not in data)
 					if secret.StringData != nil {
 						for k, v := range secret.StringData {
-							result[k] = v
+							if _, exists := secret.Data[k]; !exists {
+								result[k] = v
+							}
 						}
 					}
 					break
