@@ -105,7 +105,7 @@ func runBuild(ctx context.Context, args []string, flags *BuildFlags) error {
 }
 
 func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *BuildFlags) error {
-	fmt.Fprintf(os.Stderr, "Building Kustomization resources from %s...\n", clusterPath)
+	fmt.Fprintf(os.Stderr, "Building Kustomization resources from %s\n", clusterPath)
 
 	// Check that the path contains Kustomization files directly (not just in subdirectories)
 	hasDirectKS, err := hasDirectKustomizations(clusterPath)
@@ -171,9 +171,9 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 
 func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *BuildFlags) error {
 	if name != "" {
-		fmt.Fprintf(os.Stderr, "Building HelmRelease %s in %s...\n", name, clusterPath)
+		fmt.Fprintf(os.Stderr, "Building HelmRelease %s in %s\n", name, clusterPath)
 	} else {
-		fmt.Fprintf(os.Stderr, "Building all HelmReleases in %s...\n", clusterPath)
+		fmt.Fprintf(os.Stderr, "Building all HelmReleases in %s\n", clusterPath)
 	}
 
 	// Require Flux Kustomization resources in the path — same contract as build ks.
