@@ -92,107 +92,143 @@ func reorderYAMLFields(data []byte) []byte {
 		return data
 	}
 
-	var docs [][]byte
-	var currentLines []string
+	docs := flux.SplitYAMLText(data)
+	var result []string
 
-	for _, line := range strings.Split(string(data), "\n") {
-		// Same separator logic as SplitYAMLText: only "---" at column 0,
-		// not indented "---" inside block scalars.
-		if strings.TrimRight(line, " \t") == "---" {
-			if len(currentLines) > 0 {
-				docs = append(docs, []byte(strings.Join(currentLines, "\n")))
-				currentLines = nil
-			}
-		} else {
-			currentLines = append(currentLines, line)
-		}
-	}
-	if len(currentLines) > 0 {
-		docs = append(docs, []byte(strings.Join(currentLines, "\n")))
-	}
-
-	var result [][]byte
 	for _, doc := range docs {
-		trimmed := bytes.TrimSpace(doc)
-		if len(trimmed) == 0 {
+		if strings.TrimSpace(doc) == "" {
 			continue
 		}
-		trimmed = stripSOPSFields(trimmed)
-		result = append(result, reorderSingleDoc(trimmed))
+		processed := processYAMLDoc([]byte(doc))
+		if len(bytes.TrimSpace(processed)) > 0 {
+			result = append(result, strings.TrimSpace(string(processed)))
+		}
 	}
 
-	return bytes.Join(result, []byte("\n---\n"))
+	return []byte(strings.Join(result, "\n---\n"))
+}
+
+// processYAMLDoc parses a single YAML document, strips SOPS metadata,
+// reorders top-level keys (apiVersion, kind, metadata first), and encodes
+// the result. Uses yaml.Node for correct parsing (unlike the previous
+// text-based approach which was fragile with block scalars, comments,
+// and quoting styles).
+func processYAMLDoc(doc []byte) []byte {
+	var node yaml.Node
+	if err := yaml.Unmarshal(doc, &node); err != nil {
+		return doc // can't parse, return as-is
+	}
+
+	mapping := mappingNode(&node)
+	if mapping == nil {
+		return doc
+	}
+
+	removeMapKey(mapping, "sops")
+	reorderMapKeys(mapping, []string{"apiVersion", "kind", "metadata"})
+
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	_ = enc.Encode(&node)
+	enc.Close()
+	return buf.Bytes()
 }
 
 // stripSOPSFields removes the top-level "sops:" section from a YAML document.
 func stripSOPSFields(data []byte) []byte {
-	lines := strings.Split(string(data), "\n")
-	var result []string
-	skip := false
-
-	for _, line := range lines {
-		if len(line) > 0 && line[0] != ' ' && line[0] != '\t' && strings.HasPrefix(line, "sops:") {
-			skip = true
-			continue
-		}
-		if skip {
-			if len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
-				continue
-			}
-			skip = false
-		}
-		result = append(result, line)
+	var node yaml.Node
+	if err := yaml.Unmarshal(data, &node); err != nil {
+		return data
 	}
+	mapping := mappingNode(&node)
+	if mapping == nil {
+		return data
+	}
+	removeMapKey(mapping, "sops")
 
-	return []byte(strings.Join(result, "\n"))
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	_ = enc.Encode(&node)
+	enc.Close()
+	return buf.Bytes()
 }
 
-// reorderSingleDoc reorders top-level keys in a single YAML document.
+// reorderSingleDoc reorders top-level keys in a single YAML document:
+// apiVersion, kind, metadata first, then remaining keys in original order.
 func reorderSingleDoc(doc []byte) []byte {
-	lines := strings.Split(string(doc), "\n")
-
-	type section struct {
-		key   string
-		lines []string
+	var node yaml.Node
+	if err := yaml.Unmarshal(doc, &node); err != nil {
+		return doc
 	}
-	var sections []section
+	mapping := mappingNode(&node)
+	if mapping == nil {
+		return doc
+	}
+	reorderMapKeys(mapping, []string{"apiVersion", "kind", "metadata"})
 
-	for _, line := range lines {
-		if len(line) > 0 && line[0] != ' ' && line[0] != '\t' && line[0] != '-' && line[0] != '#' && strings.Contains(line, ":") {
-			key := strings.SplitN(line, ":", 2)[0]
-			sections = append(sections, section{key: key, lines: []string{line}})
-		} else if len(sections) > 0 {
-			sections[len(sections)-1].lines = append(sections[len(sections)-1].lines, line)
-		} else {
-			sections = append(sections, section{key: "", lines: []string{line}})
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	_ = enc.Encode(&node)
+	enc.Close()
+	return buf.Bytes()
+}
+
+// mappingNode returns the MappingNode inside a DocumentNode, or nil.
+func mappingNode(doc *yaml.Node) *yaml.Node {
+	if doc == nil || doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return nil
+	}
+	if doc.Content[0].Kind != yaml.MappingNode {
+		return nil
+	}
+	return doc.Content[0]
+}
+
+// removeMapKey removes a key (and its value) from a MappingNode.
+func removeMapKey(mapping *yaml.Node, key string) {
+	for i := 0; i < len(mapping.Content)-1; i += 2 {
+		if mapping.Content[i].Value == key {
+			mapping.Content = append(mapping.Content[:i], mapping.Content[i+2:]...)
+			return
 		}
 	}
+}
 
-	priority := []string{"apiVersion", "kind", "metadata"}
+// reorderMapKeys reorders key-value pairs in a MappingNode so that keys in
+// the priority list come first (in list order), followed by remaining keys
+// in their original order.
+func reorderMapKeys(mapping *yaml.Node, priority []string) {
+	type pair struct{ key, val *yaml.Node }
+
+	var pairs []pair
+	for i := 0; i < len(mapping.Content)-1; i += 2 {
+		pairs = append(pairs, pair{key: mapping.Content[i], val: mapping.Content[i+1]})
+	}
+
 	seen := make(map[string]bool)
-	var ordered []section
+	var ordered []pair
 
-	for _, p := range priority {
-		for _, sec := range sections {
-			if sec.key == p && !seen[p] {
-				ordered = append(ordered, sec)
-				seen[p] = true
+	for _, pk := range priority {
+		for _, p := range pairs {
+			if p.key.Value == pk && !seen[pk] {
+				ordered = append(ordered, p)
+				seen[pk] = true
 				break
 			}
 		}
 	}
-
-	for _, sec := range sections {
-		if !seen[sec.key] {
-			ordered = append(ordered, sec)
-			seen[sec.key] = true
+	for _, p := range pairs {
+		if !seen[p.key.Value] {
+			ordered = append(ordered, p)
+			seen[p.key.Value] = true
 		}
 	}
 
-	var resultLines []string
-	for _, sec := range ordered {
-		resultLines = append(resultLines, sec.lines...)
+	mapping.Content = nil
+	for _, p := range ordered {
+		mapping.Content = append(mapping.Content, p.key, p.val)
 	}
-
-	return []byte(strings.Join(resultLines, "\n"))
 }
