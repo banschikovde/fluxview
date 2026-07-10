@@ -110,7 +110,26 @@ func (g *Operations) CloneToDir(_ context.Context, revision string) (string, err
 			if err != nil {
 				return fmt.Errorf("reading symlink %s: %w", f.Name, err)
 			}
-			return os.Symlink(strings.TrimSpace(string(target)), filePath)
+			linkTarget := strings.TrimSpace(string(target))
+
+			// Validate that the symlink stays within tmpDir to prevent
+			// reading arbitrary files (e.g. /etc/passwd) via malicious commits.
+			var resolved string
+			if filepath.IsAbs(linkTarget) {
+				resolved = linkTarget
+			} else {
+				resolved = filepath.Join(filepath.Dir(filePath), linkTarget)
+			}
+			absResolved, err := filepath.Abs(resolved)
+			if err != nil {
+				return fmt.Errorf("resolving symlink %s: %w", f.Name, err)
+			}
+			if !isWithinDir(absResolved, tmpDir) {
+				fmt.Fprintf(os.Stderr, "Warning: skipping symlink %s -> %s (target outside checkout)\n", f.Name, linkTarget)
+				return nil
+			}
+
+			return os.Symlink(linkTarget, filePath)
 		}
 
 		reader, err := f.Reader()
@@ -162,4 +181,11 @@ func FindRepoRoot(startPath string) (string, error) {
 		}
 		path = parent
 	}
+}
+
+// isWithinDir checks if path stays within dir after resolution.
+// Both path and dir should be absolute.
+func isWithinDir(path, dir string) bool {
+	return path == dir ||
+		strings.HasPrefix(path+string(filepath.Separator), dir+string(filepath.Separator))
 }
