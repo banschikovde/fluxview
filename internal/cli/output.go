@@ -135,47 +135,6 @@ func processYAMLDoc(doc []byte) []byte {
 	return buf.Bytes()
 }
 
-// stripSOPSFields removes the top-level "sops:" section from a YAML document.
-func stripSOPSFields(data []byte) []byte {
-	var node yaml.Node
-	if err := yaml.Unmarshal(data, &node); err != nil {
-		return data
-	}
-	mapping := mappingNode(&node)
-	if mapping == nil {
-		return data
-	}
-	removeMapKey(mapping, "sops")
-
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
-	enc.SetIndent(2)
-	_ = enc.Encode(&node)
-	enc.Close()
-	return buf.Bytes()
-}
-
-// reorderSingleDoc reorders top-level keys in a single YAML document:
-// apiVersion, kind, metadata first, then remaining keys in original order.
-func reorderSingleDoc(doc []byte) []byte {
-	var node yaml.Node
-	if err := yaml.Unmarshal(doc, &node); err != nil {
-		return doc
-	}
-	mapping := mappingNode(&node)
-	if mapping == nil {
-		return doc
-	}
-	reorderMapKeys(mapping, []string{"apiVersion", "kind", "metadata"})
-
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
-	enc.SetIndent(2)
-	_ = enc.Encode(&node)
-	enc.Close()
-	return buf.Bytes()
-}
-
 // mappingNode returns the MappingNode inside a DocumentNode, or nil.
 func mappingNode(doc *yaml.Node) *yaml.Node {
 	if doc == nil || doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {

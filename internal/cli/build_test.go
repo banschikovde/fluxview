@@ -106,7 +106,7 @@ apiVersion: v1
 	}
 }
 
-func TestStripSOPSFields(t *testing.T) {
+func TestProcessYAMLDoc_StripsSOPS(t *testing.T) {
 	input := []byte(`apiVersion: v1
 kind: Secret
 metadata:
@@ -117,7 +117,7 @@ sops:
   mac: ENC[AES256]
   version: 3.8.1
 `)
-	result := stripSOPSFields(input)
+	result := processYAMLDoc(input)
 	resultStr := string(result)
 
 	if indexOf(resultStr, "sops:") >= 0 {
@@ -131,7 +131,7 @@ sops:
 	}
 }
 
-func TestStripSOPSFields_NoSOPS(t *testing.T) {
+func TestProcessYAMLDoc_NoSOPS(t *testing.T) {
 	input := []byte(`apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -139,16 +139,26 @@ metadata:
 data:
   key: value
 `)
-	result := stripSOPSFields(input)
-	if string(result) != string(input) {
-		t.Errorf("expected unchanged output when no sops section")
+	result := processYAMLDoc(input)
+	resultStr := string(result)
+
+	// Substring checks (not exact equality) — yaml.Node round-trip
+	// may change formatting details like quoting or spacing.
+	if indexOf(resultStr, "ConfigMap") < 0 {
+		t.Error("expected kind to be preserved")
+	}
+	if indexOf(resultStr, "key: value") < 0 {
+		t.Error("expected data.key to be preserved")
+	}
+	if indexOf(resultStr, "sops:") >= 0 {
+		t.Error("did not expect sops section in output")
 	}
 }
 
-func TestReorderSingleDoc_ListItem(t *testing.T) {
-	// A YAML list item at zero indentation should NOT be treated as a top-level key.
+func TestProcessYAMLDoc_ListItem(t *testing.T) {
+	// A YAML list at top level should be preserved (no reorder applied).
 	input := []byte("- name: item1\n- name: item2\n")
-	result := reorderSingleDoc(input)
+	result := processYAMLDoc(input)
 	resultStr := string(result)
 
 	if indexOf(resultStr, "item1") < 0 || indexOf(resultStr, "item2") < 0 {
