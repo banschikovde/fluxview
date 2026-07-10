@@ -220,8 +220,8 @@ type Secret struct {
 
 // ValuesFromEntry represents a single entry in the valuesFrom list.
 type ValuesFromEntry struct {
-	Kind       string `yaml:"kind"`
-	Name       string `yaml:"name"`
-	Namespace  string `yaml:"namespace,omitempty"`
-	Optional   bool   `yaml:"optional,omitempty"`
+	Kind      string `yaml:"kind"`
+	Name      string `yaml:"name"`
+	Namespace string `yaml:"namespace,omitempty"`
+	Optional  bool   `yaml:"optional,omitempty"`
 }
