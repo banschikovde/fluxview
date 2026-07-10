@@ -63,6 +63,15 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 		return NewExitError(fmt.Errorf("path %s does not exist", clusterPath), ExitCodeError)
 	}
 
+	// Check that the path contains Kustomization files directly (not just in subdirectories)
+	hasDirectKS, err := hasDirectKustomizations(absClusterPath)
+	if err != nil {
+		return NewExitError(fmt.Errorf("checking for Kustomization files: %w", err), ExitCodeError)
+	}
+	if !hasDirectKS {
+		return NewExitError(fmt.Errorf("path %s does not contain Flux Kustomization resources directly (use a path that contains Kustomization YAML files)", clusterPath), ExitCodeError)
+	}
+
 	repoRoot, err := git.FindRepoRoot(absClusterPath)
 	if err != nil {
 		return NewExitError(fmt.Errorf("finding git repo root: %w", err), ExitCodeError)

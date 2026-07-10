@@ -173,6 +173,15 @@ func buildKSOutput(ctx context.Context, clusterPath, repoRoot, name string) ([]b
 
 // buildKSOutputWithCache builds the Kustomization output for the current working tree with build cache.
 func buildKSOutputWithCache(ctx context.Context, clusterPath, repoRoot, name string, buildCache map[string][]byte) ([]byte, error) {
+	// Check that the path contains Kustomization files directly (not just in subdirectories)
+	hasDirectKS, err := hasDirectKustomizations(clusterPath)
+	if err != nil {
+		return nil, fmt.Errorf("checking for Kustomization files: %w", err)
+	}
+	if !hasDirectKS {
+		return nil, fmt.Errorf("path %s does not contain Flux Kustomization resources directly (use a path that contains Kustomization YAML files)", clusterPath)
+	}
+
 	parser := flux.NewParser(clusterPath)
 	kustomizations, err := parser.ParseKustomizations(ctx)
 	if err != nil {
@@ -213,6 +222,15 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 	if _, err := os.Stat(worktreeClusterPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Warning: path %s does not exist at revision %s\n", relPath, revision)
 		return nil, nil
+	}
+
+	// Check that the path contains Kustomization files directly (not just in subdirectories)
+	hasDirectKS, err := hasDirectKustomizations(worktreeClusterPath)
+	if err != nil {
+		return nil, fmt.Errorf("checking for Kustomization files at %s: %w", revision, err)
+	}
+	if !hasDirectKS {
+		return nil, fmt.Errorf("path %s does not contain Flux Kustomization resources directly at revision %s", worktreeClusterPath, revision)
 	}
 
 	parser := flux.NewParser(worktreeClusterPath)

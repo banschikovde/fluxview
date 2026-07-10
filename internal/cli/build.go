@@ -10,6 +10,7 @@ import (
 
 	"github.com/cyphar/filepath-securejoin"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 
 	"github.com/banschikovde/fluxview/internal/flux"
 	"github.com/banschikovde/fluxview/internal/git"
@@ -111,12 +112,20 @@ func runBuild(ctx context.Context, args []string, flags *BuildFlags) error {
 func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *BuildFlags) error {
 	fmt.Fprintf(os.Stderr, "Building Kustomization resources from %s...\n", clusterPath)
 
+	// Check that the path contains Kustomization files directly (not just in subdirectories)
+	hasDirectKS, err := hasDirectKustomizations(clusterPath)
+	if err != nil {
+		return NewExitError(fmt.Errorf("checking for Kustomization files: %w", err), ExitCodeError)
+	}
+	if !hasDirectKS {
+		return NewExitError(fmt.Errorf("path %s does not contain Flux Kustomization resources directly (use a path that contains Kustomization YAML files)", clusterPath), ExitCodeError)
+	}
+
 	// Parse Flux Kustomization resources from the cluster path.
 	parser := flux.NewParser(clusterPath)
 	kustomizations, err := parser.ParseKustomizations(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
-		return nil
+		return NewExitError(fmt.Errorf("parsing Kustomization resources: %w", err), ExitCodeError)
 	}
 
 	// Build the kustomize resources via SDK (shared logic with diff command).
@@ -683,4 +692,56 @@ func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomi
 	}
 
 	return configMaps
+}
+
+// hasDirectKustomizations checks if the given path contains Flux Kustomization
+// resources directly (not in subdirectories).
+func hasDirectKustomizations(path string) (bool, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return false, err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		if !isYAMLFile(entry.Name()) {
+			continue
+		}
+
+		filePath := filepath.Join(path, entry.Name())
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			continue
+		}
+
+		docs := flux.SplitYAMLDocuments(data)
+		for _, doc := range docs {
+			trimmed := strings.TrimSpace(doc)
+			if trimmed == "" {
+				continue
+			}
+
+			var meta struct {
+				APIVersion string `yaml:"apiVersion"`
+				Kind       string `yaml:"kind"`
+			}
+			if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
+				continue
+			}
+
+			if meta.Kind == "Kustomization" && strings.HasPrefix(meta.APIVersion, "kustomize.toolkit.fluxcd.io") {
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+func isYAMLFile(filename string) bool {
+	ext := strings.ToLower(filepath.Ext(filename))
+	return ext == ".yaml" || ext == ".yml"
 }
