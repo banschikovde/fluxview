@@ -148,7 +148,6 @@ func runDiffKS(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 
 func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, compareCommit string, flags *DiffFlags) error {
 	// Current state.
-	fmt.Fprintf(os.Stderr, "Building current state from %s\n", clusterPath)
 	hasDirectKS, err := hasDirectKustomizations(clusterPath)
 	if err != nil {
 		return NewExitError(fmt.Errorf("checking for Kustomization files: %w", err), ExitCodeError)
@@ -162,7 +161,6 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	}
 
 	// Comparison state at revision.
-	fmt.Fprintf(os.Stderr, "Building comparison state at %s\n", compareCommit)
 	worktreePath, err := gitOps.CloneToDir(ctx, compareCommit)
 	if err != nil {
 		return NewExitError(fmt.Errorf("creating worktree at %s: %w", compareCommit, err), ExitCodeError)
