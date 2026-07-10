@@ -107,8 +107,12 @@ func TestCloneToDir_LegitimateSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Worktree: %v", err)
 	}
-	w.Add("real.yaml")
-	w.Add("link.yaml")
+	if _, err := w.Add("real.yaml"); err != nil {
+		t.Fatalf("Add real.yaml: %v", err)
+	}
+	if _, err := w.Add("link.yaml"); err != nil {
+		t.Fatalf("Add link.yaml: %v", err)
+	}
 	commitHash, err := w.Commit("legitimate symlink", &git.CommitOptions{
 		Author: &object.Signature{Name: "test", Email: "test@test.com"},
 	})
