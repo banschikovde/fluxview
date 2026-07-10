@@ -2,8 +2,10 @@
 package helm
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -202,19 +204,31 @@ func FindHelmRepoURL(repos []fluxtypes.HelmRepository, name, namespace string, s
 // convertJSONInYAMLToYAML converts JSON-in-YAML format (e.g., metadata: {...})
 // to proper YAML format (e.g., metadata:\n  annotations: ...).
 // Helm v4 sometimes renders large objects like CRDs as JSON in YAML.
+// Handles multi-document YAML by decoding each document separately.
 func convertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
-	var result interface{}
+	var docs []string
 
-	// Parse the manifest - yaml.Unmarshal handles both YAML and JSON
-	if err := yaml.Unmarshal(manifest, &result); err != nil {
-		return nil, err
+	decoder := yaml.NewDecoder(bytes.NewReader(manifest))
+	for {
+		var doc interface{}
+		if err := decoder.Decode(&doc); err != nil {
+			if err == io.EOF {
+				break
+			}
+			continue
+		}
+		if doc == nil {
+			continue
+		}
+		marshaled, err := yaml.Marshal(doc)
+		if err != nil {
+			continue
+		}
+		docs = append(docs, strings.TrimRight(string(marshaled), "\n"))
 	}
 
-	// Marshal back to proper YAML format
-	converted, err := yaml.Marshal(result)
-	if err != nil {
-		return nil, err
+	if len(docs) == 0 {
+		return nil, nil
 	}
-
-	return converted, nil
+	return []byte(strings.Join(docs, "\n---\n")), nil
 }

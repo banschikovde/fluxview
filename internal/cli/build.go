@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -249,16 +250,15 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 // secrets from the output, then prints to stdout.
 // Returns the number of secrets redacted.
 func printRedacted(data []byte) int {
-	if data == nil {
+	if data == nil || len(bytes.TrimSpace(data)) == 0 {
 		return 0
 	}
 	// Normalize: reorder fields (apiVersion, kind, metadata first) and strip SOPS.
 	normalized := reorderYAMLFields(data)
 	// Convert JSON-in-YAML to proper YAML (fixes namespace: null issues)
 	converted, err := convertJSONInYAMLToYAML(normalized)
-	if err != nil {
-		// If conversion fails, use normalized
-		converted = normalized
+	if err != nil || converted == nil {
+		return 0
 	}
 	// Redact secret values.
 	redacted := flux.RedactSecrets(converted)
@@ -975,19 +975,34 @@ func isYAMLFile(filename string) bool {
 //	annotations: ...).
 //
 // Helm v4 sometimes renders large objects like CRDs as JSON in YAML.
+// convertJSONInYAMLToYAML converts JSON-in-YAML format (e.g., metadata: {...})
+// to proper YAML format (e.g., metadata:\n  annotations: ...).
+// Helm v4 sometimes renders large objects like CRDs as JSON in YAML.
+// Handles multi-document YAML by decoding each document separately.
 func convertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
-	var result interface{}
+	var docs []string
 
-	// Parse the manifest - yaml.Unmarshal handles both YAML and JSON
-	if err := yaml.Unmarshal(manifest, &result); err != nil {
-		return nil, err
+	decoder := yaml.NewDecoder(bytes.NewReader(manifest))
+	for {
+		var doc interface{}
+		if err := decoder.Decode(&doc); err != nil {
+			if err == io.EOF {
+				break
+			}
+			continue
+		}
+		if doc == nil {
+			continue
+		}
+		marshaled, err := yaml.Marshal(doc)
+		if err != nil {
+			continue
+		}
+		docs = append(docs, strings.TrimRight(string(marshaled), "\n"))
 	}
 
-	// Marshal back to proper YAML format
-	converted, err := yaml.Marshal(result)
-	if err != nil {
-		return nil, err
+	if len(docs) == 0 {
+		return nil, nil
 	}
-
-	return converted, nil
+	return []byte(strings.Join(docs, "\n---\n")), nil
 }
