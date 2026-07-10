@@ -33,11 +33,14 @@ func RedactSecrets(data []byte) []byte {
 
 		redactSecretNode(&node)
 
-		enc := yaml.NewEncoder(&buf)
+		var encBuf bytes.Buffer
+		enc := yaml.NewEncoder(&encBuf)
 		enc.SetIndent(2)
 		if err := enc.Encode(&node); err != nil {
 			// Encoding failed — keep original text to avoid data loss.
 			buf.WriteString(doc)
+		} else {
+			buf.Write(encBuf.Bytes())
 		}
 		enc.Close()
 	}
