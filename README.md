@@ -4,13 +4,14 @@ CLI tool for building, diffing, and validating Flux GitOps resources locally. Wo
 
 ## Features
 
-- **build** — assemble Kustomization and HelmRelease resources with Helm chart inflation
+- **build** — assemble Kustomization and HelmRelease resources
 - **diff** — per-resource comparison against a git revision (flux-local style)
 - **validate** — validate resources against CRD schemas (Flux CRDs + any custom)
-- Parallel builds for diff, single-pass YAML processing
-- Automatic secret redaction
+- Recursive Kustomization discovery following `spec.path` into shared bases (Flux controller behavior)
+- Source resolution with repoRoot fallback for HelmRepository/OCIRepository outside `--path`
 - postBuild variable substitution from ConfigMaps
-- Recursive Kustomization discovery (Flux controller behavior)
+- Automatic secret redaction
+- Box-header output format (per-resource, sorted by kind/namespace/name)
 
 ## Installation
 
@@ -55,24 +56,34 @@ docker run --rm -v $(pwd):/repo -v /path/to/crds:/crds \
 
 ### build — assemble resources
 
-```bash
-# Build everything (default: all = ks + hr)
-fluxview build --path clusters/prod/flux/
+Both `build ks` and `build hr` require Flux Kustomization files in `--path` (same contract).
 
-# Build all Kustomizations (with HelmRelease inflation)
+```bash
+# Build all Kustomizations (kustomize output: Flux CRs, HelmRelease, OCIRepository, etc.)
 fluxview build ks --path clusters/prod/flux/
 
-# Build only resources in flux-system namespace
-fluxview build ks --path clusters/prod/flux/ --namespace flux-system
+# Filter by namespace
+fluxview build ks --path clusters/prod/flux/ --namespace cert-manager
 
-# Build without CRDs and noisy metadata attributes
+# Without CRDs and noisy metadata
 fluxview build ks --path clusters/prod/flux/ --skip-crds --strip-attrs status,creationTimestamp
 
-# Inflate all HelmReleases
+# Inflate all HelmReleases (renders Helm chart templates)
 fluxview build hr --path clusters/prod/flux/
 
 # Inflate a specific HelmRelease
 fluxview build hr podinfo --path clusters/prod/flux/
+```
+
+Output uses per-resource box headers (same format as `diff`):
+
+```
+----------------------------------------
+ HelmRelease: cert-manager/cert-manager
+----------------------------------------
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+...
 ```
 
 ### diff — compare changes

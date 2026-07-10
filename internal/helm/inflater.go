@@ -2,8 +2,10 @@
 package helm
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -202,19 +204,56 @@ func FindHelmRepoURL(repos []fluxtypes.HelmRepository, name, namespace string, s
 // convertJSONInYAMLToYAML converts JSON-in-YAML format (e.g., metadata: {...})
 // to proper YAML format (e.g., metadata:\n  annotations: ...).
 // Helm v4 sometimes renders large objects like CRDs as JSON in YAML.
+// Handles multi-document YAML by decoding each document separately.
+// Removes nil map values (e.g. annotations: null) produced by Helm templates
+// with empty optional fields.
 func convertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
-	var result interface{}
+	var docs []string
 
-	// Parse the manifest - yaml.Unmarshal handles both YAML and JSON
-	if err := yaml.Unmarshal(manifest, &result); err != nil {
-		return nil, err
+	decoder := yaml.NewDecoder(bytes.NewReader(manifest))
+	for {
+		var doc interface{}
+		if err := decoder.Decode(&doc); err != nil {
+			if err == io.EOF {
+				break
+			}
+			continue
+		}
+		if doc == nil {
+			continue
+		}
+		doc = removeNilValues(doc)
+		marshaled, err := yaml.Marshal(doc)
+		if err != nil {
+			continue
+		}
+		docs = append(docs, strings.TrimRight(string(marshaled), "\n"))
 	}
 
-	// Marshal back to proper YAML format
-	converted, err := yaml.Marshal(result)
-	if err != nil {
-		return nil, err
+	if len(docs) == 0 {
+		return nil, nil
 	}
+	return []byte(strings.Join(docs, "\n---\n")), nil
+}
 
-	return converted, nil
+// removeNilValues recursively removes map entries with nil values.
+func removeNilValues(in interface{}) interface{} {
+	switch v := in.(type) {
+	case map[string]interface{}:
+		result := make(map[string]interface{})
+		for k, val := range v {
+			if val == nil {
+				continue
+			}
+			result[k] = removeNilValues(val)
+		}
+		return result
+	case []interface{}:
+		for i, val := range v {
+			v[i] = removeNilValues(val)
+		}
+		return v
+	default:
+		return in
+	}
 }

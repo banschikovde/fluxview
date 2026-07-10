@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/cyphar/filepath-securejoin"
@@ -35,7 +37,7 @@ func newBuildCmd() *cobra.Command {
 		Long: `Build Flux resources from a local git repository.
 
 Resource types:
-  ks, kustomization   — build all Kustomizations (kustomize + helm inflation)
+  ks, kustomization   — build all Kustomizations (kustomize output only)
   hr, helmrelease     — inflate HelmRelease chart(s)
 
 If [name] is omitted, all resources of the type are processed.
@@ -103,7 +105,7 @@ func runBuild(ctx context.Context, args []string, flags *BuildFlags) error {
 }
 
 func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *BuildFlags) error {
-	fmt.Fprintf(os.Stderr, "Building Kustomization resources from %s...\n", clusterPath)
+	fmt.Fprintf(os.Stderr, "Building Kustomization resources from %s\n", clusterPath)
 
 	// Check that the path contains Kustomization files directly (not just in subdirectories)
 	hasDirectKS, err := hasDirectKustomizations(clusterPath)
@@ -146,6 +148,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}
+
 	if output != nil {
 		if flags.Namespace != "" {
 			output = filterByNamespace(output, flags.Namespace)
@@ -160,13 +163,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		if flags.StripAttrs != "" {
 			output = stripAllAttrs(output, flags.StripAttrs)
 		}
-		printRedacted(output)
-	}
-
-	// Inflate HelmReleases found in the cluster path.
-	_, err = inflateHelmReleases(ctx, clusterPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: helm inflation failed: %v\n", err)
+		printResourcesBoxed(output)
 	}
 
 	return nil
@@ -174,100 +171,192 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 
 func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *BuildFlags) error {
 	if name != "" {
-		fmt.Fprintf(os.Stderr, "Building HelmRelease %s in %s...\n", name, clusterPath)
+		fmt.Fprintf(os.Stderr, "Building HelmRelease %s in %s\n", name, clusterPath)
 	} else {
-		fmt.Fprintf(os.Stderr, "Building all HelmReleases in %s...\n", clusterPath)
+		fmt.Fprintf(os.Stderr, "Building all HelmReleases in %s\n", clusterPath)
 	}
 
-	parser := flux.NewParser(clusterPath)
-
-	// Resolve HelmReleases with namespace/name transformers applied by any
-	// native kustomize overlay taken into account (see
-	// resolveHelmReleasesWithKustomizeNamespaces for why this matters).
-	builder := kustomize.NewBuilder()
-	buildCache := make(map[string][]byte)
-	helmReleases, err := resolveHelmReleasesWithKustomizeNamespaces(ctx, clusterPath, builder, buildCache)
+	// Require Flux Kustomization resources in the path — same contract as build ks.
+	hasDirectKS, err := hasDirectKustomizations(clusterPath)
 	if err != nil {
-		return NewExitError(fmt.Errorf("parsing HelmRelease resources: %w", err), ExitCodeError)
+		return NewExitError(fmt.Errorf("checking for Kustomization files: %w", err), ExitCodeError)
+	}
+	if !hasDirectKS {
+		return NewExitError(fmt.Errorf("no Kustomization files found in %s", clusterPath), ExitCodeError)
 	}
 
-	// Apply name filter if specified
-	if name != "" {
-		helmReleases = filterHelmReleases(helmReleases, name)
-		if len(helmReleases) == 0 {
-			return NewExitError(fmt.Errorf("HelmRelease %q not found", name), ExitCodeError)
-		}
+	output, err := buildHRInflation(ctx, clusterPath, repoRoot, name, flags.Namespace)
+	if err != nil {
+		return NewExitError(err, ExitCodeError)
 	}
-
-	// Apply namespace filter if specified (filter HRs by namespace or target namespace)
-	if flags.Namespace != "" {
-		helmReleases = filterHelmReleasesByNamespace(helmReleases, flags.Namespace)
-		if len(helmReleases) == 0 {
-			return NewExitError(fmt.Errorf("no HelmReleases found in namespace %q", flags.Namespace), ExitCodeError)
-		}
-	}
-
-	if len(helmReleases) == 0 {
-		if name != "" {
-			return NewExitError(fmt.Errorf("HelmRelease %q not found", name), ExitCodeError)
-		}
+	if len(bytes.TrimSpace(output)) == 0 {
 		fmt.Fprintln(os.Stderr, "No HelmReleases found.")
 		return nil
 	}
 
-	inflater, err := helm.NewInflater()
-	if err != nil {
-		return NewExitError(fmt.Errorf("initializing helm: %w", err), ExitCodeError)
+	if flags.SkipCRDs {
+		output = filterCRDDocs(output)
 	}
-
-	// Parse resources needed for helm inflation
-	helmRepos, err := parser.ParseHelmRepositories(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse HelmRepositories: %v\n", err)
+	if flags.StripAttrs != "" {
+		output = stripAllAttrs(output, flags.StripAttrs)
 	}
-
-	ociRepos, err := parser.ParseOCIRepositories(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse OCIRepositories: %v\n", err)
-	}
-
-	configMaps, err := parser.ParseConfigMaps(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMaps: %v\n", err)
-	}
-
-	secrets, err := parser.ParseSecrets(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse Secrets: %v\n", err)
-	}
-
-	for _, result := range inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets, flags.SkipCRDs) {
-		printRedacted(result)
-	}
+	printResourcesBoxed(output)
 
 	return nil
 }
 
-// printRedacted normalizes, reorders fields, strips SOPS metadata, and redacts
-// secrets from the output, then prints to stdout.
-// Returns the number of secrets redacted.
-func printRedacted(data []byte) int {
-	if data == nil {
-		return 0
-	}
-	// Normalize: reorder fields (apiVersion, kind, metadata first) and strip SOPS.
-	normalized := reorderYAMLFields(data)
-	// Convert JSON-in-YAML to proper YAML (fixes namespace: null issues)
-	converted, err := convertJSONInYAMLToYAML(normalized)
+// buildHRInflation discovers HelmReleases through the Flux Kustomization pipeline
+// (same discovery logic as runBuildHR), resolves sources, inflates the charts,
+// and returns combined YAML. Returns nil if no Flux Kustomizations or no
+// HelmReleases are found (valid for diff comparison state).
+//
+// namespace filters the HelmRelease list BEFORE inflation — when set, only
+// matching HRs are inflated, avoiding unnecessary chart downloads.
+func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespace string) ([]byte, error) {
+	kustomizations, err := flux.NewParser(clusterPath).ParseKustomizations(ctx)
 	if err != nil {
-		// If conversion fails, use normalized
-		converted = normalized
+		return nil, nil // no Flux KS — valid for diff
 	}
-	// Redact secret values.
-	redacted := flux.RedactSecrets(converted)
-	count := flux.CountSecrets(converted)
-	fmt.Print(string(redacted))
-	return count
+
+	builder := kustomize.NewBuilder()
+	buildCache := make(map[string][]byte)
+	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
+
+	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, true, buildCache)
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract + dedup HelmReleases from the build output.
+	allHRs, _ := flux.ParseHelmReleasesFromBytes(output)
+	seen := make(map[string]bool)
+	helmReleases := allHRs[:0]
+	for _, hr := range allHRs {
+		key := hr.Metadata.Namespace + "/" + hr.Metadata.Name
+		if !seen[key] {
+			seen[key] = true
+			helmReleases = append(helmReleases, hr)
+		}
+	}
+
+	// Name filter.
+	if name != "" {
+		helmReleases = filterHelmReleases(helmReleases, name)
+		if len(helmReleases) == 0 {
+			return nil, fmt.Errorf("HelmRelease %q not found", name)
+		}
+	}
+
+	// Namespace filter — applied before inflation to avoid downloading unneeded charts.
+	if namespace != "" {
+		helmReleases = filterHelmReleasesByNamespace(helmReleases, namespace)
+		if len(helmReleases) == 0 {
+			return nil, nil
+		}
+	}
+
+	if len(helmReleases) == 0 {
+		return nil, nil
+	}
+
+	// Sort by dependency order.
+	sorted, sortErr := flux.TopologicalSortHelmReleases(helmReleases)
+	if sortErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v, processing in original order\n", sortErr)
+		sorted = helmReleases
+	}
+
+	// Sources from build output (correct kustomize-transformed namespaces)
+	// prepended to raw-parsed sources (with repoRoot fallback).
+	buildRepos, _ := flux.ParseHelmRepositoriesFromBytes(output)
+	buildOCI, _ := flux.ParseOCIRepositoriesFromBytes(output)
+	buildCMs, _ := flux.ParseConfigMapsFromBytes(output)
+	rawRepos, rawOCI, rawCMs, secrets := resolveHelmInflationSources(ctx, clusterPath, repoRoot)
+
+	helmRepos := append(buildRepos, rawRepos...)
+	ociRepos := append(buildOCI, rawOCI...)
+	inflationCMs := append(buildCMs, rawCMs...)
+
+	inflater, err := helm.NewInflater()
+	if err != nil {
+		return nil, fmt.Errorf("initializing helm: %w", err)
+	}
+
+	return inflateAllHelmReleases(ctx, inflater, sorted, helmRepos, ociRepos, inflationCMs, secrets)
+}
+
+// resourceEntry holds a single YAML document with its resource key for sorting.
+type resourceEntry struct {
+	key     resourceKey
+	content string
+}
+
+// printResourcesBoxed splits multi-doc YAML into individual resources, sorts
+// them by kind/namespace/name, and prints each with a box header (same format
+// as diff output). This replaces the flat YAML output of printRedacted.
+func printResourcesBoxed(data []byte) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return
+	}
+
+	docs := flux.SplitYAMLText(data)
+	var entries []resourceEntry
+
+	for _, doc := range docs {
+		trimmed := strings.TrimSpace(doc)
+		if trimmed == "" {
+			continue
+		}
+
+		var meta struct {
+			Kind     string `yaml:"kind"`
+			Metadata struct {
+				Name      string `yaml:"name"`
+				Namespace string `yaml:"namespace"`
+			} `yaml:"metadata"`
+		}
+		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
+			continue
+		}
+		if meta.Kind == "" || meta.Metadata.Name == "" {
+			continue
+		}
+
+		// Process: reorder fields, convert JSON-in-YAML, redact secrets.
+		normalized := reorderYAMLFields([]byte(trimmed))
+		converted, err := convertJSONInYAMLToYAML(normalized)
+		if err != nil || converted == nil {
+			continue
+		}
+		redacted := string(flux.RedactSecrets(converted))
+
+		entries = append(entries, resourceEntry{
+			key: resourceKey{
+				Kind:      meta.Kind,
+				Namespace: meta.Metadata.Namespace,
+				Name:      meta.Metadata.Name,
+			},
+			content: strings.TrimSpace(redacted),
+		})
+	}
+
+	// Sort by kind, namespace, name — same order as diff output.
+	sort.Slice(entries, func(i, j int) bool {
+		a, b := entries[i].key, entries[j].key
+		if a.Kind != b.Kind {
+			return a.Kind < b.Kind
+		}
+		if a.Namespace != b.Namespace {
+			return a.Namespace < b.Namespace
+		}
+		return a.Name < b.Name
+	})
+
+	for _, e := range entries {
+		header := e.key.String()
+		border := strings.Repeat("-", len(header)+2)
+		fmt.Printf("%s\n %s\n%s\n%s\n\n", border, header, border, e.content)
+	}
 }
 
 // inflateHelmReleasesShared inflates all non-suspended HelmReleases and returns
@@ -292,6 +381,8 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 		if hr.Spec.ChartRef != nil && hr.Spec.ChartRef.Kind == flux.KindOCIRepository {
 			ociRef, ociVersion := resolveOCIRepoURL(hr, ociRepos)
 			if ociRef == "" {
+				fmt.Fprintf(os.Stderr, "Warning: could not resolve OCIRepository source for HelmRelease %s/%s (chartRef %s/%s) — not found, skipping\n",
+					hr.Metadata.Namespace, hr.Metadata.Name, hr.Spec.ChartRef.Namespace, hr.Spec.ChartRef.Name)
 				continue
 			}
 			// For OCIRepository, the full reference IS the chart name.
@@ -300,16 +391,20 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 		} else {
 			// Traditional chart.spec pattern.
 			if hr.Spec.Chart.Spec.Chart == "" {
+				fmt.Fprintf(os.Stderr, "Warning: HelmRelease %s/%s has no chart name, skipping\n",
+					hr.Metadata.Namespace, hr.Metadata.Name)
 				continue
 			}
 			repoURL, username, password = resolveHelmRepoURL(hr, helmRepos, secrets)
 			if repoURL == "" {
+				fmt.Fprintf(os.Stderr, "Warning: could not resolve source for HelmRelease %s/%s (chart %q) — HelmRepository not found, skipping\n",
+					hr.Metadata.Namespace, hr.Metadata.Name, hr.Spec.Chart.Spec.Chart)
 				continue
 			}
 		}
 
-		fmt.Fprintf(os.Stderr, "Inflating HelmRelease %s/%s (chart: %s)...\n",
-			hr.Metadata.Namespace, hr.Metadata.Name, hr.Spec.Chart.Spec.Chart)
+		fmt.Fprintf(os.Stderr, "Inflating HelmRelease %s/%s\n",
+			hr.Metadata.Namespace, hr.Metadata.Name)
 
 		output, err := inflater.InflateHelmRelease(ctx, hr, repoURL, username, password, configMaps, secrets)
 		if err != nil {
@@ -372,60 +467,6 @@ func resolveHelmRepoURL(hr flux.HelmRelease, helmRepos []flux.HelmRepository, se
 		return "", "", ""
 	}
 	return url, username, password
-}
-
-// inflateHelmReleases scans for HelmRelease resources in the cluster path and inflates them.
-func inflateHelmReleases(ctx context.Context, clusterPath string) (int, error) {
-	parser := flux.NewParser(clusterPath)
-	helmReleases, err := parser.ParseHelmReleases(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("parsing HelmReleases: %w", err)
-	}
-
-	if len(helmReleases) == 0 {
-		return 0, nil
-	}
-
-	// Sort HelmReleases by dependency order.
-	helmReleases, err = flux.TopologicalSortHelmReleases(helmReleases)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: %v, processing in original order\n", err)
-	}
-
-	helmRepos, err := parser.ParseHelmRepositories(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse HelmRepositories: %v\n", err)
-	}
-
-	ociRepos, err := parser.ParseOCIRepositories(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse OCIRepositories: %v\n", err)
-	}
-
-	configMaps, err := parser.ParseConfigMaps(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMaps: %v\n", err)
-	}
-
-	secrets, err := parser.ParseSecrets(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse Secrets: %v\n", err)
-	}
-
-	inflater, err := helm.NewInflater()
-	if err != nil {
-		return 0, fmt.Errorf("initializing helm: %w", err)
-	}
-
-	var totalSecrets int
-	for _, output := range inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets, false) {
-		if err := CheckInterrupted(ctx); err != nil {
-			return 0, nil
-		}
-		totalSecrets += printRedacted(output)
-	}
-
-	return totalSecrets, nil
 }
 
 // filterKustomizations filters Kustomization resources by name.
@@ -738,92 +779,71 @@ func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomi
 	return configMaps
 }
 
-// resolveHelmReleasesWithKustomizeNamespaces returns HelmRelease resources
-// found under clusterPath, with namespace/name transformers applied by
-// kustomize (e.g. a top-level `namespace:` field in kustomization.yaml)
-// correctly reflected.
+// resolveHelmInflationSources parses the source resources needed for HelmRelease
+// inflation (HelmRepository, OCIRepository, ConfigMap, Secret). Each resource
+// type is first parsed from clusterPath; if none are found there, the search
+// falls back to repoRoot so that sources defined outside the cluster path
+// (e.g. a shared sources/ or flux-system/ directory) are still resolved.
 //
-// Reading a HelmRelease YAML file directly (as flux.Parser.ParseHelmReleases
-// does) only sees whatever `metadata.namespace` is literally written in that
-// file. If the HelmRelease is actually managed by a native kustomize overlay
-// that sets `namespace:` (or namePrefix/nameSuffix) for everything it builds,
-// the file on disk may have no namespace at all, or a different one than what
-// Flux will actually apply on the cluster — the transformer only takes effect
-// when kustomize itself builds the resource.
-//
-// To account for this, HelmReleases are additionally extracted from the
-// output of `kustomize build` for every native kustomize directory discovered
-// under clusterPath (mirrors resolveConfigMaps' approach for ConfigMaps).
-// A kustomize-resolved HelmRelease (identified by name) takes precedence over
-// the raw-parsed one; HelmReleases not covered by any kustomize directory
-// (loose files with no owning kustomization.yaml) fall back to the raw parse,
-// since there is no transformer to apply for them anyway.
-//
-// Note: dedup is by name only. If a kustomize overlay also applies a
-// namePrefix/nameSuffix transformer, the transformed name won't match the
-// raw-parsed name, and both the raw and the kustomize-resolved HelmRelease
-// may appear in the result. Fully correct name matching would require
-// tracking resource identity through the kustomize build graph, which this
-// function does not attempt.
-func resolveHelmReleasesWithKustomizeNamespaces(ctx context.Context, clusterPath string, builder *kustomize.Builder, buildCache map[string][]byte) ([]flux.HelmRelease, error) {
+// Errors are logged as warnings and the corresponding slice may be nil — the
+// caller (inflateHelmReleasesShared) handles missing sources gracefully by
+// emitting a per-HelmRelease warning and skipping.
+func resolveHelmInflationSources(ctx context.Context, clusterPath, repoRoot string) (helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository, configMaps []flux.ConfigMap, secrets []flux.Secret) {
 	parser := flux.NewParser(clusterPath)
 
-	// 1. Parse raw HelmRelease YAML files (namespace as literally written).
-	rawHelmReleases, err := parser.ParseHelmReleases(ctx)
+	helmRepos, err := parser.ParseHelmRepositories(ctx)
 	if err != nil {
-		return nil, err
+		fmt.Fprintf(os.Stderr, "Warning: could not parse HelmRepositories: %v\n", err)
+		helmRepos = nil
 	}
-
-	// 2. Discover native kustomize directories and build them to resolve
-	// namespace/name transformers.
-	kustomizeDirs, dErr := flux.DiscoverKustomizeDirs(clusterPath)
-	if dErr != nil {
-		// Discovery failure isn't fatal — fall back to the raw parse.
-		return rawHelmReleases, nil
-	}
-
-	var resolvedHelmReleases []flux.HelmRelease
-	resolvedNames := make(map[string]bool)
-
-	for _, dir := range kustomizeDirs {
-		if err := CheckInterrupted(ctx); err != nil {
-			return nil, err
-		}
-
-		var output []byte
-		var buildErr error
-
-		if cached, ok := buildCache[dir]; ok {
-			output = cached
+	if len(helmRepos) == 0 && repoRoot != "" && repoRoot != clusterPath {
+		if rootRepos, rErr := flux.NewParser(repoRoot).ParseHelmRepositories(ctx); rErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not parse HelmRepositories from %s: %v\n", repoRoot, rErr)
 		} else {
-			output, buildErr = builder.Build(dir)
-			if buildErr != nil {
-				fmt.Fprintf(os.Stderr, "Warning: kustomize build %s failed: %v\n", dir, buildErr)
-				continue
-			}
-			buildCache[dir] = output
-		}
-
-		builtHRs, parseErr := flux.ParseHelmReleasesFromBytes(output)
-		if parseErr != nil {
-			continue
-		}
-		for _, hr := range builtHRs {
-			resolvedHelmReleases = append(resolvedHelmReleases, hr)
-			resolvedNames[hr.Metadata.Name] = true
+			helmRepos = rootRepos
 		}
 	}
 
-	// 3. Combine: kustomize-resolved HelmReleases (correct namespace) plus
-	// any raw-parsed HelmRelease not already covered by a kustomize build.
-	result := resolvedHelmReleases
-	for _, hr := range rawHelmReleases {
-		if !resolvedNames[hr.Metadata.Name] {
-			result = append(result, hr)
+	ociRepos, err = parser.ParseOCIRepositories(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse OCIRepositories: %v\n", err)
+		ociRepos = nil
+	}
+	if len(ociRepos) == 0 && repoRoot != "" && repoRoot != clusterPath {
+		if rootOCI, rErr := flux.NewParser(repoRoot).ParseOCIRepositories(ctx); rErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not parse OCIRepositories from %s: %v\n", repoRoot, rErr)
+		} else {
+			ociRepos = rootOCI
 		}
 	}
 
-	return result, nil
+	configMaps, err = parser.ParseConfigMaps(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMaps: %v\n", err)
+		configMaps = nil
+	}
+	if len(configMaps) == 0 && repoRoot != "" && repoRoot != clusterPath {
+		if rootCMs, rErr := flux.NewParser(repoRoot).ParseConfigMaps(ctx); rErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMaps from %s: %v\n", repoRoot, rErr)
+		} else {
+			configMaps = rootCMs
+		}
+	}
+
+	secrets, err = parser.ParseSecrets(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse Secrets: %v\n", err)
+		secrets = nil
+	}
+	if len(secrets) == 0 && repoRoot != "" && repoRoot != clusterPath {
+		if rootSecrets, rErr := flux.NewParser(repoRoot).ParseSecrets(ctx); rErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not parse Secrets from %s: %v\n", repoRoot, rErr)
+		} else {
+			secrets = rootSecrets
+		}
+	}
+
+	return helmRepos, ociRepos, configMaps, secrets
 }
 
 // hasDirectKustomizations checks if the given path contains Flux Kustomization
@@ -884,19 +904,61 @@ func isYAMLFile(filename string) bool {
 //	annotations: ...).
 //
 // Helm v4 sometimes renders large objects like CRDs as JSON in YAML.
+// convertJSONInYAMLToYAML converts JSON-in-YAML format (e.g., metadata: {...})
+// to proper YAML format (e.g., metadata:\n  annotations: ...).
+// Helm v4 sometimes renders large objects like CRDs as JSON in YAML.
+// Handles multi-document YAML by decoding each document separately.
+// Removes nil map values (e.g. annotations: null) produced by Helm templates
+// with empty optional fields.
 func convertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
-	var result interface{}
+	var docs []string
 
-	// Parse the manifest - yaml.Unmarshal handles both YAML and JSON
-	if err := yaml.Unmarshal(manifest, &result); err != nil {
-		return nil, err
+	decoder := yaml.NewDecoder(bytes.NewReader(manifest))
+	for {
+		var doc interface{}
+		if err := decoder.Decode(&doc); err != nil {
+			if err == io.EOF {
+				break
+			}
+			continue
+		}
+		if doc == nil {
+			continue
+		}
+		doc = removeNilValues(doc)
+		marshaled, err := yaml.Marshal(doc)
+		if err != nil {
+			continue
+		}
+		docs = append(docs, strings.TrimRight(string(marshaled), "\n"))
 	}
 
-	// Marshal back to proper YAML format
-	converted, err := yaml.Marshal(result)
-	if err != nil {
-		return nil, err
+	if len(docs) == 0 {
+		return nil, nil
 	}
+	return []byte(strings.Join(docs, "\n---\n")), nil
+}
 
-	return converted, nil
+// removeNilValues recursively removes map entries with nil values from the
+// unmarshaled YAML data. This prevents annotations: null, labels: null, etc.
+// in the output when Helm templates leave optional fields empty.
+func removeNilValues(in interface{}) interface{} {
+	switch v := in.(type) {
+	case map[string]interface{}:
+		result := make(map[string]interface{})
+		for k, val := range v {
+			if val == nil {
+				continue
+			}
+			result[k] = removeNilValues(val)
+		}
+		return result
+	case []interface{}:
+		for i, val := range v {
+			v[i] = removeNilValues(val)
+		}
+		return v
+	default:
+		return in
+	}
 }

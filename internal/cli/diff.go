@@ -147,12 +147,14 @@ func runDiffKS(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 }
 
 func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, compareCommit string, flags *DiffFlags) error {
-	currentOutput, err := buildHROutput(ctx, clusterPath, name)
+	fmt.Fprintf(os.Stderr, "Building current state from %s\n", clusterPath)
+	currentOutput, err := buildHROutput(ctx, clusterPath, repoRoot, name, flags.Namespace)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building current state: %w", err), ExitCodeError)
 	}
 
-	compareOutput, err := buildHROutputAtRevision(ctx, gitOps, clusterPath, repoRoot, name, compareCommit)
+	fmt.Fprintf(os.Stderr, "Building comparison state at %s\n", compareCommit)
+	compareOutput, err := buildHROutputAtRevision(ctx, gitOps, clusterPath, repoRoot, name, compareCommit, flags.Namespace)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, err), ExitCodeError)
 	}
@@ -252,57 +254,20 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 }
 
 // buildHROutput builds the HelmRelease output for the current working tree.
-func buildHROutput(ctx context.Context, clusterPath, name string) ([]byte, error) {
-	parser := flux.NewParser(clusterPath)
-	helmReleases, err := parser.ParseHelmReleases(ctx)
+func buildHROutput(ctx context.Context, clusterPath, repoRoot, name, namespace string) ([]byte, error) {
+	hasDirectKS, err := hasDirectKustomizations(clusterPath)
 	if err != nil {
-		return nil, fmt.Errorf("parsing HelmRelease resources: %w", err)
+		return nil, fmt.Errorf("checking for Kustomization files: %w", err)
+	}
+	if !hasDirectKS {
+		return nil, fmt.Errorf("no Kustomization files found in %s", clusterPath)
 	}
 
-	// Sort HelmReleases by dependency order.
-	helmReleases, err = flux.TopologicalSortHelmReleases(helmReleases)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: %v, processing in original order\n", err)
-	}
-
-	helmReleases = filterHelmReleases(helmReleases, name)
-	if len(helmReleases) == 0 {
-		if name != "" {
-			return nil, fmt.Errorf("HelmRelease %q not found", name)
-		}
-		return nil, nil // no HRs found, return empty
-	}
-
-	helmRepos, err := parser.ParseHelmRepositories(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse HelmRepositories: %v\n", err)
-	}
-
-	ociRepos, err := parser.ParseOCIRepositories(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse OCIRepositories: %v\n", err)
-	}
-
-	configMaps, err := parser.ParseConfigMaps(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMaps: %v\n", err)
-	}
-
-	secrets, err := parser.ParseSecrets(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse Secrets: %v\n", err)
-	}
-
-	inflater, err := helm.NewInflater()
-	if err != nil {
-		return nil, fmt.Errorf("initializing helm: %w", err)
-	}
-
-	return inflateAllHelmReleases(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets)
+	return buildHRInflation(ctx, clusterPath, repoRoot, name, namespace)
 }
 
 // buildHROutputAtRevision builds the HelmRelease output at a specific git revision.
-func buildHROutputAtRevision(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, revision string) ([]byte, error) {
+func buildHROutputAtRevision(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, revision, namespace string) ([]byte, error) {
 	// Create a git worktree at the target revision.
 	worktreePath, err := gitOps.CloneToDir(ctx, revision)
 	if err != nil {
@@ -310,60 +275,20 @@ func buildHROutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 	}
 	defer gitOps.RemoveWorktree(ctx, worktreePath)
 
+	// Determine the cluster path within the worktree.
 	relPath, err := filepath.Rel(repoRoot, clusterPath)
 	if err != nil {
 		relPath = clusterPath
 	}
 	worktreeClusterPath := filepath.Join(worktreePath, relPath)
 
+	// Check if the path exists in the worktree.
 	if _, err := os.Stat(worktreeClusterPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Warning: path %s does not exist at revision %s\n", relPath, revision)
 		return nil, nil
 	}
 
-	parser := flux.NewParser(worktreeClusterPath)
-	helmReleases, err := parser.ParseHelmReleases(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("parsing HelmRelease resources at %s: %w", revision, err)
-	}
-
-	// Sort HelmReleases by dependency order.
-	helmReleases, err = flux.TopologicalSortHelmReleases(helmReleases)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: %v, processing in original order\n", err)
-	}
-
-	helmReleases = filterHelmReleases(helmReleases, name)
-	if len(helmReleases) == 0 {
-		return nil, nil // no HRs found
-	}
-
-	helmRepos, err := parser.ParseHelmRepositories(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse HelmRepositories: %v\n", err)
-	}
-
-	ociRepos, err := parser.ParseOCIRepositories(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse OCIRepositories: %v\n", err)
-	}
-
-	configMaps, err := parser.ParseConfigMaps(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMaps: %v\n", err)
-	}
-
-	secrets, err := parser.ParseSecrets(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse Secrets: %v\n", err)
-	}
-
-	inflater, err := helm.NewInflater()
-	if err != nil {
-		return nil, fmt.Errorf("initializing helm: %w", err)
-	}
-
-	return inflateAllHelmReleases(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets)
+	return buildHRInflation(ctx, worktreeClusterPath, worktreePath, name, namespace)
 }
 
 // buildKSContent is the shared build logic for Flux Kustomization resources,
