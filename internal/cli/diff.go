@@ -325,10 +325,26 @@ func buildHROutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 	if len(helmReleases) == 0 {
 		return nil, nil // no HRs found
 	}
-	helmRepos, _ := parser.ParseHelmRepositories(ctx)
-	ociRepos, _ := parser.ParseOCIRepositories(ctx)
-	configMaps, _ := parser.ParseConfigMaps(ctx)
-	secrets, _ := parser.ParseSecrets(ctx)
+
+	helmRepos, err := parser.ParseHelmRepositories(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse HelmRepositories: %v\n", err)
+	}
+
+	ociRepos, err := parser.ParseOCIRepositories(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse OCIRepositories: %v\n", err)
+	}
+
+	configMaps, err := parser.ParseConfigMaps(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMaps: %v\n", err)
+	}
+
+	secrets, err := parser.ParseSecrets(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not parse Secrets: %v\n", err)
+	}
 
 	inflater, err := helm.NewInflater()
 	if err != nil {
