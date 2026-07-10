@@ -292,6 +292,8 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 		if hr.Spec.ChartRef != nil && hr.Spec.ChartRef.Kind == flux.KindOCIRepository {
 			ociRef, ociVersion := resolveOCIRepoURL(hr, ociRepos)
 			if ociRef == "" {
+				fmt.Fprintf(os.Stderr, "Warning: could not resolve OCIRepository source for HelmRelease %s/%s (chartRef %s/%s) — not found, skipping\n",
+					hr.Metadata.Namespace, hr.Metadata.Name, hr.Spec.ChartRef.Namespace, hr.Spec.ChartRef.Name)
 				continue
 			}
 			// For OCIRepository, the full reference IS the chart name.
@@ -300,10 +302,14 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 		} else {
 			// Traditional chart.spec pattern.
 			if hr.Spec.Chart.Spec.Chart == "" {
+				fmt.Fprintf(os.Stderr, "Warning: HelmRelease %s/%s has no chart name, skipping\n",
+					hr.Metadata.Namespace, hr.Metadata.Name)
 				continue
 			}
 			repoURL, username, password = resolveHelmRepoURL(hr, helmRepos, secrets)
 			if repoURL == "" {
+				fmt.Fprintf(os.Stderr, "Warning: could not resolve source for HelmRelease %s/%s (chart %q) — HelmRepository not found, skipping\n",
+					hr.Metadata.Namespace, hr.Metadata.Name, hr.Spec.Chart.Spec.Chart)
 				continue
 			}
 		}
