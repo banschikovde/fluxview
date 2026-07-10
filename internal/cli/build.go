@@ -171,7 +171,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	}
 
 	// Inflate HelmReleases discovered in the build output.
-	inflateAndPrintHelmReleases(ctx, helmReleasesFromBuild, clusterPath, repoRoot, flags.SkipCRDs)
+	inflateAndPrintHelmReleases(ctx, helmReleasesFromBuild, clusterPath, repoRoot, output, flags.SkipCRDs)
 
 	return nil
 }
@@ -193,6 +193,7 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	// kustomize-controller. A HelmRelease in a shared base is already present,
 	// fully transformed, in this output.
 	var primaryHRs []flux.HelmRelease
+	var buildOutput []byte
 	kustomizations, ksErr := flux.NewParser(clusterPath).ParseKustomizations(ctx)
 	if ksErr == nil && len(kustomizations) > 0 {
 		configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
@@ -200,6 +201,7 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: kustomize build failed: %v\n", err)
 		} else {
+			buildOutput = output
 			primaryHRs, _ = flux.ParseHelmReleasesFromBytes(output)
 		}
 	}
@@ -238,7 +240,7 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return nil
 	}
 
-	inflateAndPrintHelmReleases(ctx, helmReleases, clusterPath, repoRoot, flags.SkipCRDs)
+	inflateAndPrintHelmReleases(ctx, helmReleases, clusterPath, repoRoot, buildOutput, flags.SkipCRDs)
 
 	return nil
 }
@@ -379,7 +381,12 @@ func resolveHelmRepoURL(hr flux.HelmRelease, helmRepos []flux.HelmRepository, se
 // OCIRepository, ConfigMap, Secret), inflates the given HelmReleases, and
 // prints each output via printRedacted. Shared by runBuildKS (which passes
 // HelmReleases extracted from the kustomize build output) and runBuildHR.
-func inflateAndPrintHelmReleases(ctx context.Context, helmReleases []flux.HelmRelease, clusterPath, repoRoot string, skipCRDs bool) {
+//
+// buildOutput is the kustomize build output from which the HelmReleases were
+// extracted. Sources (HelmRepository, OCIRepository, ConfigMap) are also
+// extracted from it and prepended to the raw-parsed sources — build-output
+// sources have kustomize-transformed namespaces that match the HelmReleases.
+func inflateAndPrintHelmReleases(ctx context.Context, helmReleases []flux.HelmRelease, clusterPath, repoRoot string, buildOutput []byte, skipCRDs bool) {
 	if len(helmReleases) == 0 {
 		return
 	}
@@ -397,7 +404,19 @@ func inflateAndPrintHelmReleases(ctx context.Context, helmReleases []flux.HelmRe
 		return
 	}
 
-	helmRepos, ociRepos, configMaps, secrets := resolveHelmInflationSources(ctx, clusterPath, repoRoot)
+	// Extract sources from the build output first — these have kustomize-transformed
+	// namespaces that match the HelmReleases (which also came from build output).
+	// Prepend them so they are found before the raw-parsed versions.
+	buildRepos, _ := flux.ParseHelmRepositoriesFromBytes(buildOutput)
+	buildOCI, _ := flux.ParseOCIRepositoriesFromBytes(buildOutput)
+	buildCMs, _ := flux.ParseConfigMapsFromBytes(buildOutput)
+
+	rawRepos, rawOCI, rawCMs, secrets := resolveHelmInflationSources(ctx, clusterPath, repoRoot)
+
+	helmRepos := append(buildRepos, rawRepos...)
+	ociRepos := append(buildOCI, rawOCI...)
+	configMaps := append(buildCMs, rawCMs...)
+
 	for _, output := range inflateHelmReleasesShared(ctx, inflater, sorted, helmRepos, ociRepos, configMaps, secrets, skipCRDs) {
 		if err := CheckInterrupted(ctx); err != nil {
 			return

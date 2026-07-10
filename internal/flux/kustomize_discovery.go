@@ -113,6 +113,75 @@ func ParseHelmReleasesFromBytes(data []byte) ([]HelmRelease, error) {
 	return results, nil
 }
 
+// ParseHelmRepositoriesFromBytes parses HelmRepository resources from YAML
+// output bytes. Used to extract HelmRepositories from kustomize build output
+// so that namespace transformers are reflected (matching the HelmRelease's
+// transformed namespace).
+func ParseHelmRepositoriesFromBytes(data []byte) ([]HelmRepository, error) {
+	var results []HelmRepository
+
+	docs := SplitYAMLDocuments(data)
+	for _, doc := range docs {
+		trimmed := strings.TrimSpace(doc)
+		if trimmed == "" {
+			continue
+		}
+
+		var meta struct {
+			APIVersion string `yaml:"apiVersion"`
+			Kind       string `yaml:"kind"`
+		}
+		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
+			continue
+		}
+		if meta.Kind != KindHelmRepository || !isSourceAPI(meta.APIVersion) {
+			continue
+		}
+
+		var repo HelmRepository
+		if err := yaml.Unmarshal([]byte(trimmed), &repo); err != nil {
+			continue
+		}
+		results = append(results, repo)
+	}
+
+	return results, nil
+}
+
+// ParseOCIRepositoriesFromBytes parses OCIRepository resources from YAML
+// output bytes. Used to extract OCIRepositories from kustomize build output
+// so that namespace transformers are reflected.
+func ParseOCIRepositoriesFromBytes(data []byte) ([]OCIRepository, error) {
+	var results []OCIRepository
+
+	docs := SplitYAMLDocuments(data)
+	for _, doc := range docs {
+		trimmed := strings.TrimSpace(doc)
+		if trimmed == "" {
+			continue
+		}
+
+		var meta struct {
+			APIVersion string `yaml:"apiVersion"`
+			Kind       string `yaml:"kind"`
+		}
+		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
+			continue
+		}
+		if meta.Kind != KindOCIRepository || !isSourceAPI(meta.APIVersion) {
+			continue
+		}
+
+		var repo OCIRepository
+		if err := yaml.Unmarshal([]byte(trimmed), &repo); err != nil {
+			continue
+		}
+		results = append(results, repo)
+	}
+
+	return results, nil
+}
+
 // ParseConfigMapsFromBytes parses ConfigMap resources from YAML output bytes.
 // Used to extract ConfigMaps from kustomize build output.
 func ParseConfigMapsFromBytes(data []byte) ([]ConfigMap, error) {
