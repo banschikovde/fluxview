@@ -332,6 +332,19 @@ func captureStderr(f func()) string {
 	return buf.String()
 }
 
+// captureStdout temporarily redirects os.Stdout, runs f, and returns what was written.
+func captureStdout(f func()) string {
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	f()
+	w.Close()
+	os.Stdout = old
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	return buf.String()
+}
+
 // Test 1+2: A HelmRelease in a shared base outside clusterPath, pulled in
 // via Flux Kustomization.spec.path, is discovered through buildAllKustomizations.
 // Covers both build ks (extracts HR from output) and build hr (primary path).
@@ -400,9 +413,7 @@ spec:
 	}
 }
 
-// Test 3 (regression): A HelmRelease directly in clusterPath with no Flux
-// Kustomization at all must still be found via the fallback scanner.
-// Test 4: Two Flux Kustomizations referencing the same shared base — the
+// Test: Two Flux Kustomizations referencing the same shared base — the
 // HelmRelease appears in the build output (possibly twice), dedup is handled
 // internally by inflateAndPrintHelmReleases.
 func TestBuildKSContent_SharedBaseReferencedTwice(t *testing.T) {
@@ -658,6 +669,80 @@ func TestInflateHelmReleasesShared_WarnOnMissingSource(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "podinfo") {
 		t.Errorf("expected HR name 'podinfo' in warning, got:\n%s", stderr)
+	}
+}
+
+// Test: printResourcesBoxed outputs each resource with a box header and
+// sorts by kind/namespace/name.
+func TestPrintResourcesBoxed(t *testing.T) {
+	input := []byte(`apiVersion: v1
+kind: Service
+metadata:
+  name: svc2
+  namespace: z-ns
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm1
+  namespace: a-ns
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc1
+  namespace: a-ns
+`)
+
+	output := captureStdout(func() {
+		printResourcesBoxed(input)
+	})
+
+	// All three resources must have box headers.
+	if !strings.Contains(output, "ConfigMap: a-ns/cm1") {
+		t.Error("missing ConfigMap box header")
+	}
+	if !strings.Contains(output, "Service: a-ns/svc1") {
+		t.Error("missing Service svc1 box header")
+	}
+	if !strings.Contains(output, "Service: z-ns/svc2") {
+		t.Error("missing Service svc2 box header")
+	}
+
+	// ConfigMap must come before Service (sorted by kind).
+	cmIdx := strings.Index(output, "ConfigMap:")
+	svcIdx := strings.Index(output, "Service:")
+	if cmIdx < 0 || svcIdx < 0 || cmIdx > svcIdx {
+		t.Errorf("expected ConfigMap before Service (sorted by kind):\n%s", output)
+	}
+
+	// svc1 (a-ns) must come before svc2 (z-ns) (sorted by namespace within kind).
+	svc1Idx := strings.Index(output, "svc1")
+	svc2Idx := strings.Index(output, "svc2")
+	if svc1Idx < 0 || svc2Idx < 0 || svc1Idx > svc2Idx {
+		t.Errorf("expected svc1 (a-ns) before svc2 (z-ns):\n%s", output)
+	}
+
+	// Each resource must have border lines.
+	if strings.Count(output, "---") < 6 {
+		t.Errorf("expected at least 6 border lines (2 per resource), got fewer:\n%s", output)
+	}
+}
+
+// Test: printResourcesBoxed produces no output for nil/empty input.
+func TestPrintResourcesBoxed_Empty(t *testing.T) {
+	output := captureStdout(func() {
+		printResourcesBoxed(nil)
+	})
+	if output != "" {
+		t.Errorf("expected empty output for nil input, got %q", output)
+	}
+
+	output = captureStdout(func() {
+		printResourcesBoxed([]byte(""))
+	})
+	if output != "" {
+		t.Errorf("expected empty output for empty input, got %q", output)
 	}
 }
 
