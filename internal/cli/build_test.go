@@ -394,7 +394,7 @@ spec:
 		t.Fatalf("ParseKustomizations: %v", err)
 	}
 
-	builder := kustomize.NewBuilder()
+	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(map[string][]byte)
 	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, nil, true, buildCache)
 	if err != nil {
@@ -467,7 +467,7 @@ spec:
 		t.Fatalf("ParseKustomizations: %v", err)
 	}
 
-	builder := kustomize.NewBuilder()
+	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(map[string][]byte)
 	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, nil, true, buildCache)
 	if err != nil {
