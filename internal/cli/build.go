@@ -30,24 +30,24 @@ func newBuildCmd() *cobra.Command {
 	flags := &BuildFlags{}
 
 	cmd := &cobra.Command{
-		Use:   "build <resource> [name] [flags]",
+		Use:   "build [resource] [name] [flags]",
 		Short: "Build (assemble) Flux Kustomization or HelmRelease resources",
 		Long: `Build Flux resources from a local git repository.
 
 Resource types:
   ks, kustomization   — build all Kustomizations (kustomize + helm inflation)
   hr, helmrelease     — inflate HelmRelease chart(s)
-  all                 — both ks and hr
+  all                 — both ks and hr (default if not specified)
 
 If [name] is omitted, all resources of the type are processed.
 
 Examples:
-  fluxview build all --path clusters/prod/
-  fluxview build ks --path clusters/prod/
-  fluxview build ks --path clusters/prod/ --skip-crds --strip-attrs status,creationTimestamp
-  fluxview build hr --path clusters/prod/
-  fluxview build hr podinfo --path clusters/prod/`,
-		Args: cobra.MinimumNArgs(1),
+  fluxview build --path clusters/prod/flux/
+  fluxview build all --path clusters/prod/flux/
+  fluxview build ks --path clusters/prod/flux/
+  fluxview build ks --path clusters/prod/flux/ --skip-crds --strip-attrs status,creationTimestamp
+  fluxview build hr --path clusters/prod/flux/
+  fluxview build hr podinfo --path clusters/prod/flux/`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runBuild(cmd.Context(), args, flags)
 		},
@@ -62,8 +62,11 @@ Examples:
 }
 
 func runBuild(ctx context.Context, args []string, flags *BuildFlags) error {
-	resourceType := args[0]
+	resourceType := "all"
 	var name string
+	if len(args) > 0 {
+		resourceType = args[0]
+	}
 	if len(args) > 1 {
 		name = args[1]
 	}

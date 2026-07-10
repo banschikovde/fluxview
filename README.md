@@ -56,8 +56,8 @@ docker run --rm -v $(pwd):/repo -v /path/to/crds:/crds \
 ### build — assemble resources
 
 ```bash
-# Build everything (Kustomizations + HelmReleases)
-fluxview build all --path clusters/prod/flux/
+# Build everything (default: all = ks + hr)
+fluxview build --path clusters/prod/flux/
 
 # Build all Kustomizations (with HelmRelease inflation)
 fluxview build ks --path clusters/prod/flux/
