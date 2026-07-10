@@ -183,19 +183,41 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		fmt.Fprintf(os.Stderr, "Building all HelmReleases in %s...\n", clusterPath)
 	}
 
-	parser := flux.NewParser(clusterPath)
-
-	// Resolve HelmReleases with namespace/name transformers applied by any
-	// native kustomize overlay taken into account (see
-	// resolveHelmReleasesWithKustomizeNamespaces for why this matters).
 	builder := kustomize.NewBuilder()
 	buildCache := make(map[string][]byte)
-	helmReleases, err := resolveHelmReleasesWithKustomizeNamespaces(ctx, clusterPath, builder, buildCache)
+
+	// Primary path: discover HelmReleases through Flux Kustomization build.
+	// buildAllKustomizations recursively follows Kustomization.spec.path
+	// (including shared bases outside clusterPath), applies all kustomize
+	// transforms, and discovers new Kustomizations — mirroring the real
+	// kustomize-controller. A HelmRelease in a shared base is already present,
+	// fully transformed, in this output.
+	var primaryHRs []flux.HelmRelease
+	kustomizations, ksErr := flux.NewParser(clusterPath).ParseKustomizations(ctx)
+	if ksErr == nil && len(kustomizations) > 0 {
+		configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
+		output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, true, buildCache)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: kustomize build failed: %v\n", err)
+		} else {
+			primaryHRs, _ = flux.ParseHelmReleasesFromBytes(output)
+		}
+	}
+
+	// Fallback: resolve HelmReleases via native kustomize overlays and raw
+	// YAML parse. Covers the case where clusterPath has no Flux Kustomization
+	// at all — raw HelmRelease files or native-kustomize dirs without a Flux
+	// wrapper (e.g. k8s/apps/base used directly).
+	fallbackHRs, err := resolveHelmReleasesWithKustomizeNamespaces(ctx, clusterPath, builder, buildCache)
 	if err != nil {
 		return NewExitError(fmt.Errorf("parsing HelmRelease resources: %w", err), ExitCodeError)
 	}
 
-	// Apply name filter if specified
+	// Merge with dedup by namespace/name; the primary (buildAllKustomizations)
+	// version takes precedence on collision.
+	helmReleases := dedupHelmReleases(primaryHRs, fallbackHRs)
+
+	// Apply name filter if specified.
 	if name != "" {
 		helmReleases = filterHelmReleases(helmReleases, name)
 		if len(helmReleases) == 0 {
@@ -203,7 +225,7 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		}
 	}
 
-	// Apply namespace filter if specified (filter HRs by namespace or target namespace)
+	// Apply namespace filter if specified.
 	if flags.Namespace != "" {
 		helmReleases = filterHelmReleasesByNamespace(helmReleases, flags.Namespace)
 		if len(helmReleases) == 0 {
@@ -212,42 +234,11 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	}
 
 	if len(helmReleases) == 0 {
-		if name != "" {
-			return NewExitError(fmt.Errorf("HelmRelease %q not found", name), ExitCodeError)
-		}
 		fmt.Fprintln(os.Stderr, "No HelmReleases found.")
 		return nil
 	}
 
-	inflater, err := helm.NewInflater()
-	if err != nil {
-		return NewExitError(fmt.Errorf("initializing helm: %w", err), ExitCodeError)
-	}
-
-	// Parse resources needed for helm inflation
-	helmRepos, err := parser.ParseHelmRepositories(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse HelmRepositories: %v\n", err)
-	}
-
-	ociRepos, err := parser.ParseOCIRepositories(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse OCIRepositories: %v\n", err)
-	}
-
-	configMaps, err := parser.ParseConfigMaps(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMaps: %v\n", err)
-	}
-
-	secrets, err := parser.ParseSecrets(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not parse Secrets: %v\n", err)
-	}
-
-	for _, result := range inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets, flags.SkipCRDs) {
-		printRedacted(result)
-	}
+	inflateAndPrintHelmReleases(ctx, helmReleases, clusterPath, repoRoot, flags.SkipCRDs)
 
 	return nil
 }
@@ -452,6 +443,33 @@ func filterHelmReleasesByNamespace(resources []flux.HelmRelease, namespace strin
 			result = append(result, hr)
 		}
 	}
+	return result
+}
+
+// dedupHelmReleases merges two HelmRelease lists, deduplicating by
+// namespace/name. Entries from the primary list take precedence on collision
+// (they come from buildAllKustomizations and have the fullest set of
+// kustomize transforms applied). Entries from fallback fill in any gaps
+// (e.g. raw HR files not covered by any Flux Kustomization).
+func dedupHelmReleases(primary, fallback []flux.HelmRelease) []flux.HelmRelease {
+	seen := make(map[string]bool)
+	var result []flux.HelmRelease
+
+	for _, hr := range primary {
+		key := hr.Metadata.Namespace + "/" + hr.Metadata.Name
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, hr)
+		}
+	}
+	for _, hr := range fallback {
+		key := hr.Metadata.Namespace + "/" + hr.Metadata.Name
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, hr)
+		}
+	}
+
 	return result
 }
 
