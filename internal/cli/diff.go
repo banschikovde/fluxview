@@ -367,9 +367,7 @@ func buildKSContent(ctx context.Context, builder *kustomize.Builder, kustomizati
 // buildAllKustomizations runs kustomize build for all Kustomization resources,
 // applies postBuild variable substitution from configMaps, and recursively
 // discovers and builds new Kustomization resources found in the output
-// (following Flux Kustomize controller behavior). When resolveExternal is true,
-// Kustomizations referencing external GitRepositories are cloned and built;
-// otherwise they are gracefully skipped.
+// (following Flux Kustomize controller behavior).
 func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot string, configMaps []flux.ConfigMap, quiet bool) ([]byte, error) {
 	// Track already-processed KS by "namespace/name" to prevent duplicates.
 	seen := make(map[string]bool)
