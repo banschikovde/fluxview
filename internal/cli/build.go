@@ -115,7 +115,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	}
 
 	builder := kustomize.NewBuilder(repoRoot)
-	buildCache := make(map[string][]byte)
+	buildCache := make(buildCache)
 	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
 
 	kustomizations, err = flux.TopologicalSort(kustomizations)
@@ -228,6 +228,35 @@ func filterHelmReleasesByNamespace(resources []flux.HelmRelease, namespace strin
 	return result
 }
 
+// --- Build cache ---
+
+// buildResult caches the outcome of a single kustomize build attempt —
+// either the resulting bytes or the error. This prevents re-running and
+// re-warning for the same directory across multiple code paths.
+type buildResult struct {
+	output []byte
+	err    error
+}
+
+// buildCache maps directory path to its build result.
+type buildCache map[string]buildResult
+
+// buildDirCached runs builder.Build(dir) at most once per dir per cache
+// lifetime. On failure it prints the warning exactly once and caches the
+// error, so any later caller — across resolveConfigMaps, buildKustomizeOverlays,
+// buildSubdirectoriesAndLooseFiles — silently skips instead of retrying.
+func buildDirCached(builder *kustomize.Builder, dir string, cache buildCache) ([]byte, bool) {
+	if res, seen := cache[dir]; seen {
+		return res.output, res.err == nil
+	}
+	output, err := builder.Build(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: kustomize build %s failed: %v\n", dir, err)
+	}
+	cache[dir] = buildResult{output, err}
+	return output, err == nil
+}
+
 // --- Path resolution ---
 
 func resolveSourcePath(repoRoot string, ks flux.Kustomization) string {
@@ -259,7 +288,7 @@ func collectKustomizationPaths(repoRoot string, kustomizations []flux.Kustomizat
 	return paths
 }
 
-func buildKustomizeOverlays(clusterPath, repoRoot string, excludePaths map[string]bool, buildCache map[string][]byte) [][]byte {
+func buildKustomizeOverlays(clusterPath, repoRoot string, excludePaths map[string]bool, cache buildCache) [][]byte {
 	kustomizeDirs, err := flux.DiscoverKustomizeDirs(clusterPath)
 	if err != nil || len(kustomizeDirs) == 0 {
 		return nil
@@ -272,20 +301,9 @@ func buildKustomizeOverlays(clusterPath, repoRoot string, excludePaths map[strin
 		if isExcludedDir(dir, excludePaths) {
 			continue
 		}
-		var output []byte
-		var err error
-
-		if cached, ok := buildCache[dir]; ok {
-			output = cached
-		} else {
-			output, err = builder.Build(dir)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: kustomize build %s failed: %v\n", dir, err)
-				continue
-			}
-			buildCache[dir] = output
+		if output, ok := buildDirCached(builder, dir, cache); ok {
+			outputs = append(outputs, output)
 		}
-		outputs = append(outputs, output)
 	}
 
 	return outputs
@@ -305,7 +323,7 @@ func isExcludedDir(dir string, excludePaths map[string]bool) bool {
 
 // --- ConfigMaps ---
 
-func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomize.Builder, buildCache map[string][]byte) []flux.ConfigMap {
+func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomize.Builder, cache buildCache) []flux.ConfigMap {
 	parser := flux.NewParser(clusterPath)
 
 	rawCMs, err := parser.ParseConfigMaps(ctx)
@@ -318,32 +336,17 @@ func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomi
 		return rawCMs
 	}
 
-	// Build-output ConfigMaps have correct kustomize-transformed namespaces.
-	// Dedup with raw-parsed by name — build versions are authoritative.
-	// See mergeSources in hr_inflation.go for trade-off explanation.
 	var builtCMs []flux.ConfigMap
-	if len(kustomizeDirs) > 0 {
-		for _, dir := range kustomizeDirs {
-			var output []byte
-			var err error
-
-			if cached, ok := buildCache[dir]; ok {
-				output = cached
-			} else {
-				output, err = builder.Build(dir)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: kustomize build %s failed: %v\n", dir, err)
-					continue
-				}
-				buildCache[dir] = output
-			}
-
-			cms, err := flux.ParseConfigMapsFromBytes(output)
-			if err != nil {
-				continue
-			}
-			builtCMs = append(builtCMs, cms...)
+	for _, dir := range kustomizeDirs {
+		output, ok := buildDirCached(builder, dir, cache)
+		if !ok {
+			continue
 		}
+		cms, err := flux.ParseConfigMapsFromBytes(output)
+		if err != nil {
+			continue
+		}
+		builtCMs = append(builtCMs, cms...)
 	}
 
 	return mergeSources(builtCMs, rawCMs, func(c flux.ConfigMap) string { return c.Metadata.Name })

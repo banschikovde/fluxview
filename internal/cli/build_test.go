@@ -448,7 +448,7 @@ spec:
 	}
 
 	builder := kustomize.NewBuilder(repoRoot)
-	buildCache := make(map[string][]byte)
+	buildCache := make(buildCache)
 	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, nil, true, buildCache)
 	if err != nil {
 		t.Fatalf("buildKSContent: %v", err)
@@ -521,7 +521,7 @@ spec:
 	}
 
 	builder := kustomize.NewBuilder(repoRoot)
-	buildCache := make(map[string][]byte)
+	buildCache := make(buildCache)
 	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, nil, true, buildCache)
 	if err != nil {
 		t.Fatalf("buildKSContent: %v", err)
@@ -946,7 +946,7 @@ spec:
 `)
 
 	builder := kustomize.NewBuilder(repoRoot)
-	output, err := buildSourcePath(builder, sourcePath)
+	output, err := buildSourcePath(builder, sourcePath, make(buildCache))
 	if err != nil {
 		t.Fatalf("buildSourcePath: %v", err)
 	}
@@ -995,7 +995,7 @@ metadata:
 `)
 
 	builder := kustomize.NewBuilder(repoRoot)
-	output, err := buildSourcePath(builder, sourcePath)
+	output, err := buildSourcePath(builder, sourcePath, make(buildCache))
 	if err != nil {
 		t.Fatalf("buildSourcePath: %v", err)
 	}
