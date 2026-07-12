@@ -468,7 +468,9 @@ func discoverResourcesFromOutput(data []byte, seen map[string]bool) []flux.Kusto
 // Kustomize controller reconciliation logic:
 //  1. If path is a file → read it directly as YAML resources
 //  2. If path is a directory with kustomization.yaml → run kustomize build
-//  3. If path is a directory without kustomization.yaml → read all YAML files
+//  3. If path is a directory without kustomization.yaml → discover and build
+//     subdirectories that have their own kustomization.yaml (applies namespace
+//     and other transformers), then read any remaining loose YAML files
 func buildSourcePath(builder *kustomize.Builder, sourcePath string) ([]byte, error) {
 	info, err := os.Stat(sourcePath)
 	if err != nil {
@@ -487,8 +489,69 @@ func buildSourcePath(builder *kustomize.Builder, sourcePath string) ([]byte, err
 		}
 	}
 
-	// Case 3: Directory without kustomization.yaml — read all YAML files recursively.
-	return readYAMLFilesRecursive(sourcePath)
+	// Case 3: Directory without kustomization.yaml — discover subdirectories
+	// with their own kustomization.yaml and build them with kustomize (so
+	// namespace transformers and patches are applied). Read any remaining
+	// loose YAML files as-is.
+	return buildSubdirectoriesAndLooseFiles(builder, sourcePath)
+}
+
+// buildSubdirectoriesAndLooseFiles discovers native kustomize directories under
+// sourcePath, builds each one via kustomize (applying namespace/transformers),
+// then reads any loose YAML files not covered by a kustomization.
+func buildSubdirectoriesAndLooseFiles(builder *kustomize.Builder, sourcePath string) ([]byte, error) {
+	kustomizeDirs, err := flux.DiscoverKustomizeDirs(sourcePath)
+	if err != nil {
+		// Discovery failed — fall back to plain recursive read.
+		return readYAMLFilesRecursive(sourcePath)
+	}
+
+	// Build each kustomize directory.
+	builtDirs := make(map[string]bool)
+	var results []string
+
+	for _, dir := range kustomizeDirs {
+		output, err := builder.Build(dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: kustomize build %s failed: %v\n", dir, err)
+			continue
+		}
+		results = append(results, string(output))
+		builtDirs[dir] = true
+	}
+
+	// Read loose YAML files not inside any built kustomize directory.
+	err = filepath.Walk(sourcePath, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext != ".yaml" && ext != ".yml" {
+			return nil
+		}
+		// Skip files inside directories that were already built by kustomize.
+		dir := filepath.Dir(path)
+		for builtDir := range builtDirs {
+			if dir == builtDir || strings.HasPrefix(dir, builtDir+string(filepath.Separator)) {
+				return nil
+			}
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		results = append(results, string(data))
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	if len(results) == 0 {
+		return nil, nil
+	}
+	return []byte(strings.Join(results, "\n---\n")), nil
 }
 
 // readYAMLFilesRecursive reads all .yaml/.yml files in a directory recursively
