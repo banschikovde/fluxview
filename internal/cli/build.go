@@ -346,24 +346,7 @@ func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomi
 		}
 	}
 
-	return mergeConfigMaps(builtCMs, rawCMs)
-}
-
-// mergeConfigMaps deduplicates by name, build-output first (authoritative namespace).
-func mergeConfigMaps(build, raw []flux.ConfigMap) []flux.ConfigMap {
-	seen := make(map[string]bool)
-	result := make([]flux.ConfigMap, 0, len(build)+len(raw))
-
-	for _, cm := range build {
-		seen[cm.Metadata.Name] = true
-		result = append(result, cm)
-	}
-	for _, cm := range raw {
-		if !seen[cm.Metadata.Name] {
-			result = append(result, cm)
-		}
-	}
-	return result
+	return mergeSources(builtCMs, rawCMs, func(c flux.ConfigMap) string { return c.Metadata.Name })
 }
 
 // --- Utilities ---
