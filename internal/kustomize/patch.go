@@ -2,6 +2,7 @@ package kustomize
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -16,6 +17,7 @@ import (
 type PatchSpec struct {
 	Target *PatchTarget `yaml:"target,omitempty"`
 	Patch  string       `yaml:"patch,omitempty"`
+	Path   string       `yaml:"path,omitempty"` // patch from a separate file
 }
 
 // PatchTarget specifies which resources a patch applies to.
@@ -63,8 +65,17 @@ func ApplyPatches(resources []byte, patches []PatchSpec) ([]byte, error) {
 		Resources: resourceFiles,
 	}
 	for _, p := range patches {
+		// If Path is set, read patch content from file.
+		patchContent := p.Patch
+		if p.Path != "" {
+			data, err := os.ReadFile(p.Path)
+			if err != nil {
+				return nil, fmt.Errorf("reading patch file %s: %w", p.Path, err)
+			}
+			patchContent = string(data)
+		}
 		kp := types.Patch{
-			Patch: p.Patch,
+			Patch: patchContent,
 		}
 		if p.Target != nil {
 			kp.Target = &types.Selector{

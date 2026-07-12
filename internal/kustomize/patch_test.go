@@ -1,6 +1,7 @@
 package kustomize
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -124,5 +125,38 @@ spec:
 	}
 	if !strings.Contains(string(result), "replicas: 3") {
 		t.Error("patch should be applied despite duplicate resource IDs in input")
+	}
+}
+
+func TestApplyPatches_FromFile(t *testing.T) {
+	// Create a temp patch file.
+	patchDir := t.TempDir()
+	patchFile := patchDir + "/patch.yaml"
+	os.WriteFile(patchFile, []byte(`- op: replace
+  path: /spec/replicas
+  value: 7
+`), 0644)
+
+	resources := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: podinfo
+  namespace: default
+spec:
+  replicas: 1
+`)
+	patches := []PatchSpec{
+		{
+			Target: &PatchTarget{Kind: "Deployment", Name: "podinfo"},
+			Path:   patchFile,
+		},
+	}
+
+	result, err := ApplyPatches(resources, patches)
+	if err != nil {
+		t.Fatalf("ApplyPatches from file: %v", err)
+	}
+	if !strings.Contains(string(result), "replicas: 7") {
+		t.Errorf("expected replicas: 7 from file-based patch:\n%s", string(result))
 	}
 }
