@@ -244,11 +244,10 @@ func parseValuesFrom(raw any) []ValuesFromEntry {
 // ensures chart templates render correctly while real secret values never
 // appear in the output.
 //
-// Namespace matching (for both ConfigMap and Secret):
-//  1. Exact match: resource.Namespace == entryNS
-//  2. Fallback: resource.Namespace == "" (raw-parsed, pre-kustomize-transform)
-//  3. Resources with a different explicit namespace are never matched
-//  4. No match → warning to stderr, entry skipped
+// Namespace matching is strict (exact match only, no empty-namespace fallback).
+// This matches real Flux behavior: the resource must be in the same namespace
+// as the HelmRelease (or the namespace specified in valuesFrom). Resources
+// from build output always have the correct kustomize-transformed namespace.
 func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret) map[string]any {
 	entries := parseValuesFrom(hr.Spec.ValuesFrom)
 	if len(entries) == 0 {
@@ -259,6 +258,7 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 
 	for _, entry := range entries {
 		entryNS := entry.Namespace
+		isExplicitNS := entryNS != ""
 		if entryNS == "" {
 			entryNS = hr.Metadata.Namespace
 		}
@@ -266,10 +266,17 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 		if vk == "" {
 			vk = "values.yaml"
 		}
+		// allowFallback: empty-namespace resources can match as fallback ONLY
+		// when entryNS was not explicitly set in valuesFrom (i.e. it defaults
+		// to the HR's namespace). This covers legitimate loose-file resources
+		// without metadata.namespace (read as-is, no kustomize transform),
+		// while preventing stale cross-namespace matches when valuesFrom
+		// explicitly requests a specific namespace.
+		allowFallback := !isExplicitNS
 
 		switch strings.ToLower(entry.Kind) {
 		case "configmap":
-			cm, ok := findConfigMapCandidate(configMaps, entry.Name, entryNS)
+			cm, ok := findConfigMapCandidate(configMaps, entry.Name, entryNS, allowFallback)
 			if !ok {
 				fmt.Fprintf(os.Stderr, "Warning: valuesFrom ConfigMap %s/%s not found (referenced by HelmRelease %s/%s)\n",
 					entryNS, entry.Name, hr.Metadata.Namespace, hr.Metadata.Name)
@@ -278,7 +285,7 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 			mergeConfigMapValues(result, cm.Data, vk)
 
 		case "secret":
-			secret, ok := findSecretCandidate(secrets, entry.Name, entryNS)
+			secret, ok := findSecretCandidate(secrets, entry.Name, entryNS, allowFallback)
 			if !ok {
 				fmt.Fprintf(os.Stderr, "Warning: valuesFrom Secret %s/%s not found (referenced by HelmRelease %s/%s)\n",
 					entryNS, entry.Name, hr.Metadata.Namespace, hr.Metadata.Name)
@@ -291,10 +298,10 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 	return result
 }
 
-// findConfigMapCandidate finds a ConfigMap by name, preferring exact namespace
-// match, then falling back to empty namespace (raw-parsed). Resources with a
-// different explicit namespace are ignored.
-func findConfigMapCandidate(items []ConfigMap, name, ns string) (ConfigMap, bool) {
+// findConfigMapCandidate finds a ConfigMap by name with exact namespace match.
+// If allowFallback is true, also matches resources with empty namespace
+// (covers loose-file resources without metadata.namespace).
+func findConfigMapCandidate(items []ConfigMap, name, ns string, allowFallback bool) (ConfigMap, bool) {
 	var fallback ConfigMap
 	hasFallback := false
 
@@ -303,13 +310,12 @@ func findConfigMapCandidate(items []ConfigMap, name, ns string) (ConfigMap, bool
 			continue
 		}
 		if cm.Metadata.Namespace == ns {
-			return cm, true // exact match
+			return cm, true
 		}
-		if cm.Metadata.Namespace == "" && !hasFallback {
+		if allowFallback && cm.Metadata.Namespace == "" && !hasFallback {
 			fallback = cm
 			hasFallback = true
 		}
-		// Different explicit namespace → ignore
 	}
 
 	if hasFallback {
@@ -318,8 +324,9 @@ func findConfigMapCandidate(items []ConfigMap, name, ns string) (ConfigMap, bool
 	return ConfigMap{}, false
 }
 
-// findSecretCandidate finds a Secret by name, same matching logic as ConfigMap.
-func findSecretCandidate(items []Secret, name, ns string) (Secret, bool) {
+// findSecretCandidate finds a Secret by name with exact namespace match.
+// If allowFallback is true, also matches resources with empty namespace.
+func findSecretCandidate(items []Secret, name, ns string, allowFallback bool) (Secret, bool) {
 	var fallback Secret
 	hasFallback := false
 
@@ -330,7 +337,7 @@ func findSecretCandidate(items []Secret, name, ns string) (Secret, bool) {
 		if s.Metadata.Namespace == ns {
 			return s, true
 		}
-		if s.Metadata.Namespace == "" && !hasFallback {
+		if allowFallback && s.Metadata.Namespace == "" && !hasFallback {
 			fallback = s
 			hasFallback = true
 		}

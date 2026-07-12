@@ -454,20 +454,20 @@ func TestResolveValuesFrom_ValuesKey(t *testing.T) {
 	}
 }
 
-// TestResolveValuesFrom_MultiEntryConfigMapNamespaceFallback verifies that
-// ConfigMap namespace fallback works for the 2nd+ valuesFrom entry.
-func TestResolveValuesFrom_MultiEntryConfigMapNamespaceFallback(t *testing.T) {
+// TestResolveValuesFrom_MultiEntryConfigMap verifies that multiple valuesFrom
+// entries are resolved independently. Both entries must have exact namespace match.
+func TestResolveValuesFrom_MultiEntryConfigMap(t *testing.T) {
 	hr := HelmRelease{
 		Metadata: ObjectMeta{Name: "app", Namespace: "podinfo"},
 		Spec: HelmReleaseSpec{
 			ValuesFrom: []interface{}{
 				map[string]interface{}{
 					"kind": "ConfigMap",
-					"name": "cm-with-ns",
+					"name": "cm1",
 				},
 				map[string]interface{}{
 					"kind": "ConfigMap",
-					"name": "cm-without-ns",
+					"name": "cm2",
 				},
 			},
 		},
@@ -475,11 +475,11 @@ func TestResolveValuesFrom_MultiEntryConfigMapNamespaceFallback(t *testing.T) {
 
 	configMaps := []ConfigMap{
 		{
-			Metadata: ObjectMeta{Name: "cm-with-ns", Namespace: "podinfo"},
+			Metadata: ObjectMeta{Name: "cm1", Namespace: "podinfo"},
 			Data:     map[string]string{"values.yaml": "key1: val1\n"},
 		},
 		{
-			Metadata: ObjectMeta{Name: "cm-without-ns"},
+			Metadata: ObjectMeta{Name: "cm2", Namespace: "podinfo"},
 			Data:     map[string]string{"values.yaml": "key2: val2\n"},
 		},
 	}
@@ -489,16 +489,15 @@ func TestResolveValuesFrom_MultiEntryConfigMapNamespaceFallback(t *testing.T) {
 		t.Fatal("expected non-nil result")
 	}
 	if result["key1"] != "val1" {
-		t.Errorf("key1 = %v, want val1 (exact namespace match)", result["key1"])
+		t.Errorf("key1 = %v, want val1", result["key1"])
 	}
 	if result["key2"] != "val2" {
-		t.Errorf("key2 = %v, want val2 (namespace fallback on 2nd entry)", result["key2"])
+		t.Errorf("key2 = %v, want val2", result["key2"])
 	}
 }
 
 // TestResolveValuesFrom_DifferentNamespaceIgnored verifies that a resource
-// with an explicit different namespace is NOT used as fallback — only
-// empty-namespace resources qualify as fallback candidates.
+// with an explicit different namespace is NOT matched — only exact match works.
 func TestResolveValuesFrom_DifferentNamespaceIgnored(t *testing.T) {
 	hr := HelmRelease{
 		Metadata: ObjectMeta{Name: "app", Namespace: "test"},
@@ -512,28 +511,17 @@ func TestResolveValuesFrom_DifferentNamespaceIgnored(t *testing.T) {
 		},
 	}
 
-	// Two candidates: one in "staging" (different explicit ns), one with empty ns.
+	// Only a staging version exists — should NOT match.
 	configMaps := []ConfigMap{
 		{
 			Metadata: ObjectMeta{Name: "shared-cm", Namespace: "staging"},
 			Data:     map[string]string{"values.yaml": "from-staging: true\n"},
 		},
-		{
-			Metadata: ObjectMeta{Name: "shared-cm"}, // empty namespace
-			Data:     map[string]string{"values.yaml": "from-fallback: true\n"},
-		},
 	}
 
 	result := ResolveValuesFrom(hr, configMaps, nil)
-	if result == nil {
-		t.Fatal("expected non-nil result — fallback should find empty-ns ConfigMap")
-	}
-	// Should use the empty-namespace fallback, NOT the staging one.
-	if result["from-staging"] != nil {
-		t.Error("ConfigMap from different explicit namespace should be ignored")
-	}
-	if result["from-fallback"] != true {
-		t.Errorf("expected from-fallback=true, got %v", result["from-fallback"])
+	if len(result) != 0 {
+		t.Errorf("expected empty result — different namespace should not match, got %v", result)
 	}
 }
 
@@ -661,22 +649,24 @@ func TestResolveValuesFrom_SecretStringData(t *testing.T) {
 	}
 }
 
-// TestResolveValuesFrom_SecretNamespaceFallback verifies that secrets without
-// explicit namespace are found when HR has a namespace (raw-parsed secrets).
-func TestResolveValuesFrom_SecretNamespaceFallback(t *testing.T) {
+// TestResolveValuesFrom_SecretNoNamespaceNoMatch verifies that a Secret
+// without namespace does NOT match when valuesFrom explicitly specifies
+// a namespace (prevents stale cross-namespace match).
+func TestResolveValuesFrom_SecretNoNamespaceNoMatch(t *testing.T) {
 	hr := HelmRelease{
 		Metadata: ObjectMeta{Name: "app", Namespace: "podinfo"},
 		Spec: HelmReleaseSpec{
 			ValuesFrom: []interface{}{
 				map[string]interface{}{
-					"kind": "Secret",
-					"name": "app-secrets",
+					"kind":      "Secret",
+					"name":      "app-secrets",
+					"namespace": "test", // explicit namespace
 				},
 			},
 		},
 	}
 
-	// Secret with no namespace (raw-parsed from file, no kustomize transform).
+	// Secret with no namespace (raw-parsed from unrelated directory).
 	secrets := []Secret{
 		{
 			Metadata: ObjectMeta{Name: "app-secrets"}, // empty namespace
@@ -687,11 +677,44 @@ func TestResolveValuesFrom_SecretNamespaceFallback(t *testing.T) {
 	}
 
 	result := ResolveValuesFrom(hr, nil, secrets)
-	if result == nil {
-		t.Fatal("expected non-nil result — namespace fallback should find the secret")
+	if len(result) != 0 {
+		t.Errorf("expected empty result — explicit namespace should not fallback, got %v", result)
 	}
-	if result["key"] != SecretHelmPlaceholder {
-		t.Errorf("expected placeholder via namespace fallback, got %v", result["key"])
+}
+
+// TestResolveValuesFrom_LooseFileFallback verifies that a resource without
+// namespace IS found when valuesFrom doesn't specify a namespace (defaults
+// to HR namespace). This covers legitimate loose-file resources without
+// metadata.namespace that are part of the build output but not transformed
+// by kustomize (e.g. read via os.ReadFile in buildSourcePath Case 1/3).
+func TestResolveValuesFrom_LooseFileFallback(t *testing.T) {
+	hr := HelmRelease{
+		Metadata: ObjectMeta{Name: "app", Namespace: "podinfo"},
+		Spec: HelmReleaseSpec{
+			ValuesFrom: []interface{}{
+				map[string]interface{}{
+					"kind": "ConfigMap",
+					"name": "app-values",
+					// no namespace → defaults to HR namespace "podinfo"
+				},
+			},
+		},
+	}
+
+	// ConfigMap without namespace (loose file, not kustomize-transformed).
+	configMaps := []ConfigMap{
+		{
+			Metadata: ObjectMeta{Name: "app-values"}, // empty namespace
+			Data:     map[string]string{"values.yaml": "key: value\n"},
+		},
+	}
+
+	result := ResolveValuesFrom(hr, configMaps, nil)
+	if result == nil || result["key"] == nil {
+		t.Error("loose-file ConfigMap without namespace should match via fallback when entryNS defaults to HR namespace")
+	}
+	if result["key"] != "value" {
+		t.Errorf("expected key=value, got %v", result["key"])
 	}
 }
 

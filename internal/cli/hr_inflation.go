@@ -72,17 +72,22 @@ func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespac
 	}
 
 	// Sources from build output (correct kustomize-transformed namespaces)
-	// prepended to raw-parsed sources (with repoRoot fallback).
+	// have priority over raw-parsed sources. Raw-parsed resources may have
+	// stale literal namespaces from the source file that kustomize would
+	// overwrite during build — including them as-is causes false exact-match
+	// in ResolveValuesFrom when valuesFrom references the pre-transform namespace.
 	buildRepos, _ := flux.ParseHelmRepositoriesFromBytes(output)
 	buildOCI, _ := flux.ParseOCIRepositoriesFromBytes(output)
 	buildCMs, _ := flux.ParseConfigMapsFromBytes(output)
 	buildSecrets, _ := flux.ParseSecretsFromBytes(output)
 	rawRepos, rawOCI, rawCMs, rawSecrets := resolveHelmInflationSources(ctx, clusterPath, repoRoot)
 
-	helmRepos := append(buildRepos, rawRepos...)
-	ociRepos := append(buildOCI, rawOCI...)
-	inflationCMs := append(buildCMs, rawCMs...)
-	secrets := append(buildSecrets, rawSecrets...)
+	// Merge: build-output versions are authoritative. Raw-parsed versions
+	// only fill in resources NOT present in build output (by name).
+	helmRepos := mergeSources(buildRepos, rawRepos, func(r flux.HelmRepository) string { return r.Metadata.Name })
+	ociRepos := mergeSources(buildOCI, rawOCI, func(r flux.OCIRepository) string { return r.Metadata.Name })
+	inflationCMs := mergeSources(buildCMs, rawCMs, func(c flux.ConfigMap) string { return c.Metadata.Name })
+	secrets := mergeSources(buildSecrets, rawSecrets, func(s flux.Secret) string { return s.Metadata.Name })
 
 	inflater, err := helm.NewInflater()
 	if err != nil {
@@ -259,4 +264,32 @@ func resolveHelmInflationSources(ctx context.Context, clusterPath, repoRoot stri
 	}
 
 	return helmRepos, ociRepos, configMaps, secrets
+}
+
+// mergeSources combines authoritative build-output sources with raw-parsed
+// fallback sources. Resources from build are kept; raw resources are only
+// added if no build-output resource with the same name exists. This prevents
+// stale literal namespaces (pre-kustomize-transform) from causing false
+// matches in ResolveValuesFrom.
+//
+// Trade-off: dedup is by name only, not name+namespace. If two legitimate
+// resources with the same name exist in different namespaces (e.g. shared
+// ConfigMap in team-a and team-b), and the team-a version is in build output,
+// the team-b raw version is dropped. This is fail-safe (missing values + warning
+// instead of wrong values), but could affect cross-namespace valuesFrom references.
+func mergeSources[T any](build []T, raw []T, nameOf func(T) string) []T {
+	seen := make(map[string]bool)
+	result := make([]T, 0, len(build)+len(raw))
+
+	for _, item := range build {
+		seen[nameOf(item)] = true
+		result = append(result, item)
+	}
+	for _, item := range raw {
+		if !seen[nameOf(item)] {
+			result = append(result, item)
+		}
+	}
+
+	return result
 }
