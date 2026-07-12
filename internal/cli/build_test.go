@@ -907,6 +907,115 @@ func TestPrintResourcesBoxed_Empty(t *testing.T) {
 	}
 }
 
+// TestBuildSourcePath_SubdirectoryKustomization verifies that when
+// buildSourcePath encounters a directory without a top-level kustomization.yaml
+// but with subdirectories that have their own kustomization.yaml (with a
+// namespace transformer), the namespace is correctly applied to the output.
+func TestBuildSourcePath_SubdirectoryKustomization(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	// Source path: directory WITHOUT kustomization.yaml at top level.
+	sourcePath := filepath.Join(repoRoot, "apps")
+
+	// Subdirectory with kustomization.yaml that sets namespace.
+	appDir := filepath.Join(sourcePath, "podinfo")
+	writeHelper(t, appDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: podinfo
+resources:
+  - helmrelease.yaml
+  - ocirepository.yaml
+`)
+	writeHelper(t, appDir, "helmrelease.yaml", `apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: podinfo
+spec:
+  interval: 5m
+  chartRef:
+    kind: OCIRepository
+    name: podinfo
+`)
+	writeHelper(t, appDir, "ocirepository.yaml", `apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: podinfo
+spec:
+  interval: 6h
+  url: oci://ghcr.io/stefanprodan/charts/podinfo
+`)
+
+	builder := kustomize.NewBuilder(repoRoot)
+	output, err := buildSourcePath(builder, sourcePath)
+	if err != nil {
+		t.Fatalf("buildSourcePath: %v", err)
+	}
+
+	outputStr := string(output)
+
+	// Namespace from kustomization.yaml must be applied to HelmRelease.
+	if !strings.Contains(outputStr, "kind: HelmRelease") {
+		t.Error("HelmRelease missing from output")
+	}
+	if !strings.Contains(outputStr, "namespace: podinfo") {
+		t.Errorf("namespace: podinfo not applied by kustomize transformer:\n%s", outputStr)
+	}
+
+	// OCIRepository should also have the namespace.
+	if !strings.Contains(outputStr, "kind: OCIRepository") {
+		t.Error("OCIRepository missing from output")
+	}
+}
+
+// TestBuildSourcePath_LooseYAML verifies that loose YAML files (not inside
+// any kustomization.yaml) are still read when mixed with kustomized dirs.
+func TestBuildSourcePath_LooseYAML(t *testing.T) {
+	repoRoot := t.TempDir()
+	sourcePath := filepath.Join(repoRoot, "mixed")
+
+	// Subdirectory with kustomization.yaml.
+	overlayDir := filepath.Join(sourcePath, "overlay")
+	writeHelper(t, overlayDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: test-ns
+resources:
+  - cm.yaml
+`)
+	writeHelper(t, overlayDir, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: from-kustomize
+`)
+
+	// Loose YAML file at the source path level.
+	writeHelper(t, sourcePath, "loose.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loose-file
+`)
+
+	builder := kustomize.NewBuilder(repoRoot)
+	output, err := buildSourcePath(builder, sourcePath)
+	if err != nil {
+		t.Fatalf("buildSourcePath: %v", err)
+	}
+
+	outputStr := string(output)
+
+	// Kustomized resource should have namespace applied.
+	if !strings.Contains(outputStr, "from-kustomize") {
+		t.Error("resource from kustomized subdirectory missing")
+	}
+	if !strings.Contains(outputStr, "namespace: test-ns") {
+		t.Error("namespace transformer not applied to kustomized resource")
+	}
+
+	// Loose file should also be present (without namespace).
+	if !strings.Contains(outputStr, "loose-file") {
+		t.Error("loose YAML file missing from output")
+	}
+}
+
 func indexOf(s, substr string) int {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {
@@ -914,4 +1023,168 @@ func indexOf(s, substr string) int {
 		}
 	}
 	return -1
+}
+
+// TestDiscoverKustomizeDirs_NoNestedDuplicates verifies that when an overlay
+// references a base in a subdirectory, the base is NOT discovered separately
+// (it's already built as part of the overlay).
+func TestDiscoverKustomizeDirs_NoNestedDuplicates(t *testing.T) {
+	root := t.TempDir()
+
+	// Overlay references a base subdirectory.
+	overlayDir := filepath.Join(root, "overlay")
+	writeHelper(t, overlayDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: app
+resources:
+  - base
+  - cm.yaml
+`)
+	writeHelper(t, overlayDir, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: overlay-cm
+`)
+
+	// Base inside overlay — should NOT be discovered separately.
+	baseDir := filepath.Join(overlayDir, "base")
+	writeHelper(t, baseDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - base-cm.yaml
+`)
+	writeHelper(t, baseDir, "base-cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-cm
+`)
+
+	// Standalone dir — SHOULD be discovered.
+	standaloneDir := filepath.Join(root, "standalone")
+	writeHelper(t, standaloneDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cm.yaml
+`)
+	writeHelper(t, standaloneDir, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: standalone-cm
+`)
+
+	dirs, err := flux.DiscoverKustomizeDirs(root)
+	if err != nil {
+		t.Fatalf("DiscoverKustomizeDirs: %v", err)
+	}
+
+	// Should discover overlay and standalone, but NOT overlay/base.
+	found := make(map[string]bool)
+	for _, dir := range dirs {
+		found[dir] = true
+		if strings.HasSuffix(dir, filepath.Join("overlay", "base")) {
+			t.Errorf("nested base should not be discovered separately: %s", dir)
+		}
+	}
+	if !found[overlayDir] {
+		t.Error("overlay directory not discovered")
+	}
+	if !found[standaloneDir] {
+		t.Error("standalone directory not discovered")
+	}
+}
+
+// TestDiscoverKustomizeDirs_SiblingBaseOverlay verifies that when overlay
+// references a sibling base via resources: [../base], the base is NOT
+// discovered separately (it's built as part of the overlay).
+func TestDiscoverKustomizeDirs_SiblingBaseOverlay(t *testing.T) {
+	root := t.TempDir()
+
+	// apps/base — referenced by overlay, should NOT be discovered separately.
+	baseDir := filepath.Join(root, "base")
+	writeHelper(t, baseDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cm.yaml
+`)
+	writeHelper(t, baseDir, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-cm
+`)
+
+	// apps/overlay — references ../base, SHOULD be discovered.
+	overlayDir := filepath.Join(root, "overlay")
+	writeHelper(t, overlayDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: app
+resources:
+  - ../base
+  - cm.yaml
+`)
+	writeHelper(t, overlayDir, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: overlay-cm
+`)
+
+	dirs, err := flux.DiscoverKustomizeDirs(root)
+	if err != nil {
+		t.Fatalf("DiscoverKustomizeDirs: %v", err)
+	}
+
+	found := make(map[string]bool)
+	for _, dir := range dirs {
+		found[dir] = true
+		// Base should NOT be discovered — it's referenced by overlay.
+		if strings.HasSuffix(dir, "base") {
+			t.Errorf("sibling base should not be discovered separately: %s", dir)
+		}
+	}
+	if !found[overlayDir] {
+		t.Error("overlay directory not discovered")
+	}
+}
+
+// TestDiscoverKustomizeDirs_AlternateFilenames verifies that kustomization.yml
+// and Kustomization (no extension) are recognized.
+func TestDiscoverKustomizeDirs_AlternateFilenames(t *testing.T) {
+	root := t.TempDir()
+
+	// kustomization.yml
+	dir1 := filepath.Join(root, "yml-dir")
+	writeHelper(t, dir1, "kustomization.yml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+`)
+	writeHelper(t, dir1, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: yml-cm
+`)
+
+	// Kustomization (no extension)
+	dir2 := filepath.Join(root, "noext-dir")
+	writeHelper(t, dir2, "Kustomization", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+`)
+	writeHelper(t, dir2, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: noext-cm
+`)
+
+	dirs, err := flux.DiscoverKustomizeDirs(root)
+	if err != nil {
+		t.Fatalf("DiscoverKustomizeDirs: %v", err)
+	}
+
+	found := make(map[string]bool)
+	for _, dir := range dirs {
+		found[dir] = true
+	}
+	if !found[dir1] {
+		t.Error("directory with kustomization.yml not discovered")
+	}
+	if !found[dir2] {
+		t.Error("directory with Kustomization (no extension) not discovered")
+	}
 }

@@ -17,53 +17,144 @@ type nativeKustomization struct {
 }
 
 // DiscoverKustomizeDirs scans subdirectories under rootPath for native kustomize
-// overlays (kustomization.yaml with apiVersion kustomize.config.k8s.io).
-// It excludes the rootPath itself and directories that contain Flux Kustomization resources.
+// overlays (kustomization.yaml/yml/Kustomization with apiVersion kustomize.config.k8s.io).
+// It excludes:
+//   - the rootPath itself
+//   - directories that contain Flux Kustomization resources
+//   - subdirectories of already discovered kustomize dirs
+//   - directories referenced as resources by another discovered kustomization
+//     (e.g. sibling base/ referenced via resources: [../base])
 func DiscoverKustomizeDirs(rootPath string) ([]string, error) {
-	var dirs []string
-	absRoot, _ := filepath.Abs(rootPath)
+	// First pass: discover ALL kustomize dirs without dedup.
+	type kustEntry struct {
+		path      string
+		absPath   string
+		resources []string // resolved resource paths
+	}
+	var entries []kustEntry
+
+	// Resolve rootPath for consistent path comparison (macOS /var → /private/var).
+	absRootResolved, _ := filepath.Abs(rootPath)
+	if real, err := filepath.EvalSymlinks(absRootResolved); err == nil {
+		absRootResolved = real
+	}
 
 	err := filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if !d.IsDir() {
+		if err != nil || !d.IsDir() {
 			return nil
 		}
 
-		// Skip the root directory itself.
 		absPath, _ := filepath.Abs(path)
-		if absPath == absRoot {
+		if real, err := filepath.EvalSymlinks(absPath); err == nil {
+			absPath = real
+		}
+		if absPath == absRootResolved {
 			return nil
 		}
 
-		// Check for kustomization.yaml in this directory.
-		kustPath := filepath.Join(path, "kustomization.yaml")
-		data, err := os.ReadFile(kustPath)
-		if err != nil {
-			return nil // No kustomization.yaml, skip.
+		kustData := readKustomizationFile(path)
+		if kustData == nil {
+			return nil
 		}
 
-		// Parse to check if it's a native kustomize overlay (not Flux Kustomization).
 		var kust nativeKustomization
-		if err := yaml.Unmarshal(data, &kust); err != nil {
+		if err := yaml.Unmarshal(kustData, &kust); err != nil {
+			return nil
+		}
+		if !isNativeKustomize(kust) {
 			return nil
 		}
 
-		// Native kustomize has apiVersion starting with "kustomize.config.k8s.io"
-		// or no apiVersion at all (just `kind: Kustomization`).
-		if isNativeKustomize(kust) {
-			dirs = append(dirs, path)
-		}
+		// Parse resources to track base/overlay references.
+		resources := parseResourcePaths(kustData, path)
 
+		entries = append(entries, kustEntry{
+			path:      path,
+			absPath:   absPath,
+			resources: resources,
+		})
 		return nil
 	})
-
 	if err != nil {
 		return nil, err
 	}
 
+	// Build set of all referenced paths (bases referenced by overlays).
+	referenced := make(map[string]bool)
+	for _, e := range entries {
+		for _, r := range e.resources {
+			referenced[r] = true
+		}
+	}
+
+	// Second pass: filter — keep only dirs that are NOT referenced by another
+	// kustomization (they'll be built as part of that kustomization).
+	var dirs []string
+	discovered := make(map[string]bool)
+	for _, e := range entries {
+		// Skip if referenced by another kustomization via resources: field
+		// (e.g. sibling base/ referenced as ../base). This is the primary
+		// dedup mechanism and handles both nested and sibling patterns.
+		if referenced[e.absPath] {
+			continue
+		}
+		// Safety-net: also skip physical subdirectories of already discovered
+		// kustomize dirs. The resources: check above is more precise, but this
+		// catches edge cases where a kustomization.yaml exists in a subdirectory
+		// without being referenced in resources: (unusual but possible).
+		skip := false
+		for parent := range discovered {
+			if strings.HasPrefix(e.absPath, parent+string(filepath.Separator)) {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+
+		dirs = append(dirs, e.path)
+		discovered[e.absPath] = true
+	}
+
 	return dirs, nil
+}
+
+// readKustomizationFile reads the first found kustomization file in dir.
+func readKustomizationFile(dir string) []byte {
+	for _, name := range []string{"kustomization.yaml", "kustomization.yml", "Kustomization"} {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err == nil {
+			return data
+		}
+	}
+	return nil
+}
+
+// parseResourcePaths extracts resource paths from a kustomization.yaml and
+// resolves them to absolute paths relative to the kustomization's directory.
+func parseResourcePaths(data []byte, kustDir string) []string {
+	var parsed struct {
+		Resources []string `yaml:"resources"`
+	}
+	if err := yaml.Unmarshal(data, &parsed); err != nil {
+		return nil
+	}
+
+	var resolved []string
+	for _, res := range parsed.Resources {
+		absRes := filepath.Join(kustDir, res)
+		absRes, err := filepath.Abs(absRes)
+		if err != nil {
+			continue
+		}
+		// Resolve symlinks for reliable path comparison.
+		if real, err := filepath.EvalSymlinks(absRes); err == nil {
+			absRes = real
+		}
+		resolved = append(resolved, absRes)
+	}
+	return resolved
 }
 
 // isNativeKustomize checks if the resource is a native kustomize Kustomization
