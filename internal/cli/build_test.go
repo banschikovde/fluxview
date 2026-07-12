@@ -1078,10 +1078,18 @@ metadata:
 	}
 
 	// Should discover overlay and standalone, but NOT overlay/base.
+	found := make(map[string]bool)
 	for _, dir := range dirs {
+		found[dir] = true
 		if strings.HasSuffix(dir, filepath.Join("overlay", "base")) {
 			t.Errorf("nested base should not be discovered separately: %s", dir)
 		}
+	}
+	if !found[overlayDir] {
+		t.Error("overlay directory not discovered")
+	}
+	if !found[standaloneDir] {
+		t.Error("standalone directory not discovered")
 	}
 }
 

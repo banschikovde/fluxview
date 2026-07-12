@@ -92,11 +92,16 @@ func DiscoverKustomizeDirs(rootPath string) ([]string, error) {
 	var dirs []string
 	discovered := make(map[string]bool)
 	for _, e := range entries {
-		// Skip if referenced by another dir (it's a base/dependency).
+		// Skip if referenced by another kustomization via resources: field
+		// (e.g. sibling base/ referenced as ../base). This is the primary
+		// dedup mechanism and handles both nested and sibling patterns.
 		if referenced[e.absPath] {
 			continue
 		}
-		// Skip subdirectories of already discovered dirs.
+		// Safety-net: also skip physical subdirectories of already discovered
+		// kustomize dirs. The resources: check above is more precise, but this
+		// catches edge cases where a kustomization.yaml exists in a subdirectory
+		// without being referenced in resources: (unusual but possible).
 		skip := false
 		for parent := range discovered {
 			if strings.HasPrefix(e.absPath, parent+string(filepath.Separator)) {
