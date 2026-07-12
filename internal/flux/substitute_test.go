@@ -1,6 +1,10 @@
 package flux
 
 import (
+	"bytes"
+	"io"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -548,11 +552,29 @@ func TestResolveValuesFrom_NotFoundWarning(t *testing.T) {
 		},
 	}
 
-	// No matching ConfigMap at all.
+	// Capture stderr.
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
 	result := ResolveValuesFrom(hr, nil, nil)
+
+	w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	stderrOutput := buf.String()
+
 	// result should be non-nil but empty (entry was skipped).
 	if len(result) != 0 {
 		t.Errorf("expected empty result for nonexistent ConfigMap, got %v", result)
+	}
+	// Warning must be printed to stderr.
+	if !strings.Contains(stderrOutput, "Warning:") {
+		t.Errorf("expected warning in stderr, got:\n%s", stderrOutput)
+	}
+	if !strings.Contains(stderrOutput, "nonexistent") {
+		t.Errorf("expected ConfigMap name 'nonexistent' in warning, got:\n%s", stderrOutput)
 	}
 }
 
