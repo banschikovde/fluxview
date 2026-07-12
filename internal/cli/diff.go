@@ -301,7 +301,10 @@ func buildKSContent(ctx context.Context, builder *kustomize.Builder, kustomizati
 		}
 	}
 
-	return output, nil
+	// Deduplicate: overlay builds may reproduce resources already built
+	// by buildAllKustomizations (e.g. when path resolution via securejoin
+	// vs WalkDir produces different string representations on macOS symlinks).
+	return dedupResources(output), nil
 }
 
 // buildAllKustomizations runs kustomize build for all Kustomization resources,
@@ -426,7 +429,54 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 		combined += r
 	}
 
-	return []byte(combined), nil
+	// Deduplicate resources by kind/namespace/name — prevents duplicate
+	// output when the same directory is built by both buildAllKustomizations
+	// (via spec.path) and buildKustomizeOverlays (via native kustomize dirs
+	// discovery). Last occurrence wins (matches kustomize ResMap behavior).
+	return dedupResources([]byte(combined)), nil
+}
+
+// dedupResources removes duplicate YAML documents by kind/namespace/name.
+// Last occurrence wins.
+func dedupResources(data []byte) []byte {
+	docs := flux.SplitYAMLText(data)
+	type resourceKey struct {
+		kind, namespace, name string
+	}
+	seen := make(map[resourceKey]int) // key → index in result
+	var result []string
+
+	for _, doc := range docs {
+		var meta struct {
+			Kind     string `yaml:"kind"`
+			Metadata struct {
+				Name      string `yaml:"name"`
+				Namespace string `yaml:"namespace"`
+			} `yaml:"metadata"`
+		}
+		if err := yaml.Unmarshal([]byte(doc), &meta); err != nil {
+			result = append(result, doc) // keep unparseable docs
+			continue
+		}
+		if meta.Kind == "" || meta.Metadata.Name == "" {
+			result = append(result, doc) // not a resource
+			continue
+		}
+
+		key := resourceKey{meta.Kind, meta.Metadata.Namespace, meta.Metadata.Name}
+		if idx, ok := seen[key]; ok {
+			// Replace existing occurrence.
+			result[idx] = doc
+		} else {
+			seen[key] = len(result)
+			result = append(result, doc)
+		}
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+	return []byte(strings.Join(result, "\n---\n"))
 }
 
 // discoverResourcesFromOutput parses build output for Flux Kustomization

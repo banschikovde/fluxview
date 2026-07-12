@@ -186,6 +186,10 @@ func filterCRDDocs(data []byte) []byte {
 }
 
 // filterByNamespace keeps only YAML documents whose metadata.namespace matches.
+// Special cases:
+//   - kind: Namespace with metadata.name == namespace (cluster-scoped, matches by name)
+//   - namespace == "default": resources with empty metadata.namespace match
+//     (except cluster-scoped kinds like Namespace, ClusterRole, etc.)
 func filterByNamespace(data []byte, namespace string) []byte {
 	if namespace == "" {
 		return data
@@ -194,7 +198,9 @@ func filterByNamespace(data []byte, namespace string) []byte {
 	var result []string
 	for _, doc := range docs {
 		var meta struct {
+			Kind     string `yaml:"kind"`
 			Metadata struct {
+				Name      string `yaml:"name"`
 				Namespace string `yaml:"namespace"`
 			} `yaml:"metadata"`
 		}
@@ -202,11 +208,53 @@ func filterByNamespace(data []byte, namespace string) []byte {
 			fmt.Fprintf(os.Stderr, "Warning: skipping unparseable document in filterByNamespace: %v\n", err)
 			continue
 		}
+
+		// Namespace resources: match by metadata.name.
+		if meta.Kind == "Namespace" && meta.Metadata.Name == namespace {
+			result = append(result, doc)
+			continue
+		}
+
+		// Exact namespace match.
 		if meta.Metadata.Namespace == namespace {
+			result = append(result, doc)
+			continue
+		}
+
+		// Default namespace: resources with empty namespace match
+		// (except cluster-scoped kinds).
+		if namespace == "default" && meta.Metadata.Namespace == "" && !isClusterScoped(meta.Kind) {
 			result = append(result, doc)
 		}
 	}
 	return []byte(strings.Join(result, "\n---\n"))
+}
+
+// isClusterScoped returns true for Kubernetes kinds that are not namespaced.
+var clusterScopedKinds = map[string]bool{
+	"Namespace":                      true,
+	"Node":                           true,
+	"PersistentVolume":               true,
+	"ClusterRole":                    true,
+	"ClusterRoleBinding":             true,
+	"CustomResourceDefinition":       true,
+	"StorageClass":                   true,
+	"PriorityClass":                  true,
+	"ValidatingWebhookConfiguration": true,
+	"MutatingWebhookConfiguration":   true,
+	"APIService":                     true,
+	"PodSecurityPolicy":              true,
+	"RuntimeClass":                   true,
+	"IngressClass":                   true,
+	"VolumeAttachment":               true,
+	"CertificateSigningRequest":      true,
+	"TokenReview":                    true,
+	"SelfSubjectAccessReview":        true,
+	"SubjectAccessReview":            true,
+}
+
+func isClusterScoped(kind string) bool {
+	return clusterScopedKinds[kind]
 }
 
 // stripAllAttrs strips specified keys from all documents in multi-doc YAML.
