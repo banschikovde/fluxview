@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +18,10 @@ import (
 	"github.com/banschikovde/fluxview/internal/kustomize"
 	"gopkg.in/yaml.v3"
 )
+
+// errAlreadyWarned indicates buildDirCached already printed a warning for
+// this directory. Callers should skip their own follow-up warning.
+var errAlreadyWarned = errors.New("build already warned")
 
 // DiffFlags holds flags for the diff command.
 type DiffFlags struct {
@@ -375,8 +380,10 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 
 			output, err := buildSourcePath(builder, sourcePath, cache)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: build failed for %s/%s: %v\n",
-					ks.Metadata.Namespace, ks.Metadata.Name, err)
+				if !errors.Is(err, errAlreadyWarned) {
+					fmt.Fprintf(os.Stderr, "Warning: build failed for %s/%s: %v\n",
+						ks.Metadata.Namespace, ks.Metadata.Name, err)
+				}
 				if ksYAML != nil {
 					results = append(results, string(ksYAML))
 				}
@@ -546,7 +553,7 @@ func buildSourcePath(builder *kustomize.Builder, sourcePath string, cache buildC
 			if output, ok := buildDirCached(builder, sourcePath, cache); ok {
 				return output, nil
 			}
-			return nil, fmt.Errorf("kustomize build failed for %s", sourcePath)
+			return nil, errAlreadyWarned
 		}
 	}
 

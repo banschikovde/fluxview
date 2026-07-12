@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -1229,6 +1230,40 @@ func TestMergeSources_BuildOutputPriority(t *testing.T) {
 	}
 	if !found {
 		t.Error("raw-only resource 'other-cm' should be present in merged result")
+	}
+}
+
+// TestBuildSourcePath_FailedBuildSingleWarning verifies that when a
+// kustomization.yaml exists but the build fails, exactly one warning
+// is printed (from buildDirCached), not a second one from buildAllKustomizations.
+func TestBuildSourcePath_FailedBuildSingleWarning(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	// Directory with kustomization.yaml referencing a non-existent resource.
+	failDir := filepath.Join(repoRoot, "broken")
+	writeHelper(t, failDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - does-not-exist.yaml
+`)
+
+	builder := kustomize.NewBuilder(repoRoot)
+	cache := make(buildCache)
+
+	// buildDirCached will print one warning and cache the error.
+	// buildSourcePath returns errAlreadyWarned.
+	_, err := buildSourcePath(builder, failDir, cache)
+	if err == nil {
+		t.Fatal("expected error for broken kustomization")
+	}
+	if !errors.Is(err, errAlreadyWarned) {
+		t.Errorf("expected errAlreadyWarned, got: %v", err)
+	}
+
+	// Second call should NOT re-build or re-warn (cached failure).
+	_, err = buildSourcePath(builder, failDir, cache)
+	if !errors.Is(err, errAlreadyWarned) {
+		t.Errorf("second call should also return errAlreadyWarned (cached), got: %v", err)
 	}
 }
 
