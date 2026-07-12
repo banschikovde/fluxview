@@ -650,16 +650,17 @@ func TestResolveValuesFrom_SecretStringData(t *testing.T) {
 }
 
 // TestResolveValuesFrom_SecretNoNamespaceNoMatch verifies that a Secret
-// without namespace does NOT match when HR has a specific namespace.
-// In real Flux, the resource must be in the same namespace as the HelmRelease.
+// without namespace does NOT match when valuesFrom explicitly specifies
+// a namespace (prevents stale cross-namespace match).
 func TestResolveValuesFrom_SecretNoNamespaceNoMatch(t *testing.T) {
 	hr := HelmRelease{
 		Metadata: ObjectMeta{Name: "app", Namespace: "podinfo"},
 		Spec: HelmReleaseSpec{
 			ValuesFrom: []interface{}{
 				map[string]interface{}{
-					"kind": "Secret",
-					"name": "app-secrets",
+					"kind":      "Secret",
+					"name":      "app-secrets",
+					"namespace": "test", // explicit namespace
 				},
 			},
 		},
@@ -676,9 +677,44 @@ func TestResolveValuesFrom_SecretNoNamespaceNoMatch(t *testing.T) {
 	}
 
 	result := ResolveValuesFrom(hr, nil, secrets)
-	// Should NOT match — empty namespace is not a valid fallback.
 	if len(result) != 0 {
-		t.Errorf("expected empty result — empty-namespace Secret should not match, got %v", result)
+		t.Errorf("expected empty result — explicit namespace should not fallback, got %v", result)
+	}
+}
+
+// TestResolveValuesFrom_LooseFileFallback verifies that a resource without
+// namespace IS found when valuesFrom doesn't specify a namespace (defaults
+// to HR namespace). This covers legitimate loose-file resources without
+// metadata.namespace that are part of the build output but not transformed
+// by kustomize (e.g. read via os.ReadFile in buildSourcePath Case 1/3).
+func TestResolveValuesFrom_LooseFileFallback(t *testing.T) {
+	hr := HelmRelease{
+		Metadata: ObjectMeta{Name: "app", Namespace: "podinfo"},
+		Spec: HelmReleaseSpec{
+			ValuesFrom: []interface{}{
+				map[string]interface{}{
+					"kind": "ConfigMap",
+					"name": "app-values",
+					// no namespace → defaults to HR namespace "podinfo"
+				},
+			},
+		},
+	}
+
+	// ConfigMap without namespace (loose file, not kustomize-transformed).
+	configMaps := []ConfigMap{
+		{
+			Metadata: ObjectMeta{Name: "app-values"}, // empty namespace
+			Data:     map[string]string{"values.yaml": "key: value\n"},
+		},
+	}
+
+	result := ResolveValuesFrom(hr, configMaps, nil)
+	if result == nil || result["key"] == nil {
+		t.Error("loose-file ConfigMap without namespace should match via fallback when entryNS defaults to HR namespace")
+	}
+	if result["key"] != "value" {
+		t.Errorf("expected key=value, got %v", result["key"])
 	}
 }
 

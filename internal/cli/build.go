@@ -308,16 +308,20 @@ func isExcludedDir(dir string, excludePaths map[string]bool) bool {
 func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomize.Builder, buildCache map[string][]byte) []flux.ConfigMap {
 	parser := flux.NewParser(clusterPath)
 
-	configMaps, err := parser.ParseConfigMaps(ctx)
+	rawCMs, err := parser.ParseConfigMaps(ctx)
 	if err != nil {
-		configMaps = nil
+		rawCMs = nil
 	}
 
 	kustomizeDirs, err := flux.DiscoverKustomizeDirs(clusterPath)
 	if err != nil {
-		return configMaps
+		return rawCMs
 	}
 
+	// Build-output ConfigMaps have correct kustomize-transformed namespaces.
+	// Dedup with raw-parsed by name — build versions are authoritative.
+	// See mergeSources in hr_inflation.go for trade-off explanation.
+	var builtCMs []flux.ConfigMap
 	if len(kustomizeDirs) > 0 {
 		for _, dir := range kustomizeDirs {
 			var output []byte
@@ -334,15 +338,32 @@ func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomi
 				buildCache[dir] = output
 			}
 
-			builtCMs, err := flux.ParseConfigMapsFromBytes(output)
+			cms, err := flux.ParseConfigMapsFromBytes(output)
 			if err != nil {
 				continue
 			}
-			configMaps = append(configMaps, builtCMs...)
+			builtCMs = append(builtCMs, cms...)
 		}
 	}
 
-	return configMaps
+	return mergeConfigMaps(builtCMs, rawCMs)
+}
+
+// mergeConfigMaps deduplicates by name, build-output first (authoritative namespace).
+func mergeConfigMaps(build, raw []flux.ConfigMap) []flux.ConfigMap {
+	seen := make(map[string]bool)
+	result := make([]flux.ConfigMap, 0, len(build)+len(raw))
+
+	for _, cm := range build {
+		seen[cm.Metadata.Name] = true
+		result = append(result, cm)
+	}
+	for _, cm := range raw {
+		if !seen[cm.Metadata.Name] {
+			result = append(result, cm)
+		}
+	}
+	return result
 }
 
 // --- Utilities ---

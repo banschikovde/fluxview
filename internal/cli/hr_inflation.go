@@ -271,6 +271,12 @@ func resolveHelmInflationSources(ctx context.Context, clusterPath, repoRoot stri
 // added if no build-output resource with the same name exists. This prevents
 // stale literal namespaces (pre-kustomize-transform) from causing false
 // matches in ResolveValuesFrom.
+//
+// Trade-off: dedup is by name only, not name+namespace. If two legitimate
+// resources with the same name exist in different namespaces (e.g. shared
+// ConfigMap in team-a and team-b), and the team-a version is in build output,
+// the team-b raw version is dropped. This is fail-safe (missing values + warning
+// instead of wrong values), but could affect cross-namespace valuesFrom references.
 func mergeSources[T any](build []T, raw []T, nameOf func(T) string) []T {
 	seen := make(map[string]bool)
 	result := make([]T, 0, len(build)+len(raw))
