@@ -450,6 +450,55 @@ func TestResolveValuesFrom_ValuesKey(t *testing.T) {
 	}
 }
 
+// TestResolveValuesFrom_MultiEntryConfigMapNamespaceFallback verifies that
+// ConfigMap namespace fallback works for the 2nd+ valuesFrom entry, not
+// just the first one (regression test for two-pass bug where the condition
+// was accidentally tied to the global result map instead of per-entry found flag).
+func TestResolveValuesFrom_MultiEntryConfigMapNamespaceFallback(t *testing.T) {
+	hr := HelmRelease{
+		Metadata: ObjectMeta{Name: "app", Namespace: "podinfo"},
+		Spec: HelmReleaseSpec{
+			ValuesFrom: []interface{}{
+				// First entry: has exact namespace match.
+				map[string]interface{}{
+					"kind": "ConfigMap",
+					"name": "cm-with-ns",
+				},
+				// Second entry: only has empty-namespace version (raw-parsed).
+				map[string]interface{}{
+					"kind": "ConfigMap",
+					"name": "cm-without-ns",
+				},
+			},
+		},
+	}
+
+	configMaps := []ConfigMap{
+		{
+			Metadata: ObjectMeta{Name: "cm-with-ns", Namespace: "podinfo"},
+			Data:     map[string]string{"values.yaml": "key1: val1\n"},
+		},
+		{
+			Metadata: ObjectMeta{Name: "cm-without-ns"}, // empty namespace
+			Data:     map[string]string{"values.yaml": "key2: val2\n"},
+		},
+	}
+
+	result := ResolveValuesFrom(hr, configMaps, nil)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	// First entry (exact match) should have been resolved.
+	if result["key1"] != "val1" {
+		t.Errorf("key1 = %v, want val1 (exact namespace match)", result["key1"])
+	}
+	// Second entry (namespace fallback) should ALSO have been resolved,
+	// even though result was already non-empty from the first entry.
+	if result["key2"] != "val2" {
+		t.Errorf("key2 = %v, want val2 (namespace fallback on 2nd entry)", result["key2"])
+	}
+}
+
 // TestResolveValuesFrom_SecretsNotResolved verifies that real secret values
 // are NOT injected into Helm rendering — instead, YAML-safe placeholder values
 // are used so the chart renders but secrets never leak.

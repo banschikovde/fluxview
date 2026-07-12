@@ -255,56 +255,41 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 		if entryNS == "" {
 			entryNS = hr.Metadata.Namespace
 		}
+		vk := entry.ValuesKey
+		if vk == "" {
+			vk = "values.yaml"
+		}
 
 		switch strings.ToLower(entry.Kind) {
 		case "configmap":
-			// First pass: exact namespace match.
+			found := false
 			for _, cm := range configMaps {
 				if cm.Metadata.Name == entry.Name && cm.Metadata.Namespace == entryNS {
-					vk := entry.ValuesKey
-					if vk == "" {
-						vk = "values.yaml"
-					}
 					mergeConfigMapValues(result, cm.Data, vk)
+					found = true
 					break
 				}
 			}
-			// Second pass: fallback to empty namespace (raw-parsed resources
-			// without kustomize-transformed namespace).
-			if _, found := result[""]; !found && len(result) == 0 {
+			if !found {
 				for _, cm := range configMaps {
 					if cm.Metadata.Name == entry.Name && cm.Metadata.Namespace == "" {
-						vk := entry.ValuesKey
-						if vk == "" {
-							vk = "values.yaml"
-						}
 						mergeConfigMapValues(result, cm.Data, vk)
 						break
 					}
 				}
 			}
 		case "secret":
-			// First pass: exact namespace match.
 			found := false
 			for _, secret := range secrets {
 				if secret.Metadata.Name == entry.Name && secret.Metadata.Namespace == entryNS {
-					vk := entry.ValuesKey
-					if vk == "" {
-						vk = "values.yaml"
-					}
 					mergeSecretPlaceholder(result, secret, vk)
 					found = true
 					break
 				}
 			}
-			// Second pass: fallback to empty namespace.
 			if !found {
 				for _, secret := range secrets {
 					if secret.Metadata.Name == entry.Name && secret.Metadata.Namespace == "" {
-						vk := entry.ValuesKey
-						if vk == "" {
-							vk = "values.yaml"
-						}
 						mergeSecretPlaceholder(result, secret, vk)
 						break
 					}
