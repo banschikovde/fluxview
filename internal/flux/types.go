@@ -256,9 +256,6 @@ type ValuesFromEntry struct {
 	Namespace string `yaml:"namespace,omitempty"`
 	ValuesKey string `yaml:"valuesKey,omitempty"`
 	Optional  bool   `yaml:"optional,omitempty"`
-	// TargetPath specifies the YAML path into the Helm values where the
-	// referenced values should be merged (Flux v2 feature).
-	TargetPath string `yaml:"targetPath,omitempty"`
 }
 
 // GetSecretValue returns the decoded value from a Secret.

@@ -381,8 +381,7 @@ func TestResolveValuesFrom(t *testing.T) {
 		{
 			Metadata: ObjectMeta{Name: "app-config", Namespace: "flux-system"},
 			Data: map[string]string{
-				"key1": "value1",
-				"key2": "value2",
+				"values.yaml": "key1: value1\nkey2: value2\n",
 			},
 		},
 	}
@@ -517,7 +516,7 @@ func TestResolveValuesFrom_MixedConfigMapAndSecret(t *testing.T) {
 		{
 			Metadata: ObjectMeta{Name: "app-config", Namespace: "flux-system"},
 			Data: map[string]string{
-				"replicas": "2",
+				"values.yaml": "replicas: 2\n",
 			},
 		},
 	}
@@ -532,7 +531,7 @@ func TestResolveValuesFrom_MixedConfigMapAndSecret(t *testing.T) {
 
 	result := ResolveValuesFrom(hr, configMaps, secrets)
 
-	// ConfigMap value should be present (parsed as YAML int, not string).
+	// ConfigMap value should be present (parsed as YAML int from values.yaml key).
 	if result["replicas"] != 2 {
 		t.Errorf("ConfigMap value should be resolved, got %v", result["replicas"])
 	}

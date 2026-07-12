@@ -226,9 +226,6 @@ func parseValuesFrom(raw any) []ValuesFromEntry {
 				if optional, ok := m["optional"].(bool); ok {
 					entry.Optional = optional
 				}
-				if tp, ok := m["targetPath"].(string); ok {
-					entry.TargetPath = tp
-				}
 				entries = append(entries, entry)
 			}
 		}
@@ -270,7 +267,12 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 		case "configmap":
 			for _, cm := range configMaps {
 				if cm.Metadata.Name == entry.Name && cm.Metadata.Namespace == entryNS {
-					mergeConfigMapData(result, cm.Data, entry.ValuesKey)
+					// Flux default: valuesKey defaults to "values.yaml" when not specified.
+					vk := entry.ValuesKey
+					if vk == "" {
+						vk = "values.yaml"
+					}
+					mergeConfigMapData(result, cm.Data, vk)
 					break
 				}
 			}
@@ -319,14 +321,10 @@ func mergeConfigMapData(result map[string]any, data map[string]string, valuesKey
 }
 
 // mergeYAMLString parses a YAML string and merges its top-level keys into dst.
+// If the string is a scalar (not a map), it is silently skipped.
 func mergeYAMLString(dst map[string]any, raw string) {
 	var parsed map[string]interface{}
 	if err := yaml.Unmarshal([]byte(raw), &parsed); err != nil {
-		// Not a valid YAML map — try as a scalar.
-		var scalar any
-		if err := yaml.Unmarshal([]byte(raw), &scalar); err == nil && scalar != nil {
-			dst["values"] = scalar
-		}
 		return
 	}
 	for k, v := range parsed {
