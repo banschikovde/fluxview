@@ -272,7 +272,7 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 					if vk == "" {
 						vk = "values.yaml"
 					}
-					mergeConfigMapData(result, cm.Data, vk)
+					mergeConfigMapValues(result, cm.Data, vk)
 					break
 				}
 			}
@@ -285,39 +285,17 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 	return result
 }
 
-// mergeConfigMapData merges ConfigMap data into the Helm values map.
-// If valuesKey is specified, only that key's value is used (parsed as YAML).
-// Otherwise, all keys are used — each value is parsed as YAML if it looks
-// like a YAML map, otherwise kept as a string.
-func mergeConfigMapData(result map[string]any, data map[string]string, valuesKey string) {
-	if valuesKey != "" {
-		// Flux behavior: valuesKey selects a specific key whose value
-		// is parsed as YAML and merged into the values map.
-		raw, ok := data[valuesKey]
-		if !ok {
-			return
-		}
-		mergeYAMLString(result, raw)
+// mergeConfigMapValues selects the value at valuesKey from ConfigMap data,
+// parses it as YAML, and merges the top-level keys into result.
+// This matches Flux HelmController behavior: the ConfigMap data key
+// (default "values.yaml") contains a YAML document whose keys become
+// Helm chart values.
+func mergeConfigMapValues(result map[string]any, data map[string]string, valuesKey string) {
+	raw, ok := data[valuesKey]
+	if !ok {
 		return
 	}
-
-	// No valuesKey: each key in data is a top-level values key.
-	// Values that look like YAML maps are parsed; others stay as strings.
-	for k, v := range data {
-		var parsed any
-		if err := yaml.Unmarshal([]byte(v), &parsed); err == nil {
-			if m, ok := parsed.(map[string]interface{}); ok {
-				// It's a YAML map — merge each key into result.
-				for mk, mv := range m {
-					result[mk] = mv
-				}
-				continue
-			}
-			result[k] = parsed
-		} else {
-			result[k] = v
-		}
-	}
+	mergeYAMLString(result, raw)
 }
 
 // mergeYAMLString parses a YAML string and merges its top-level keys into dst.
