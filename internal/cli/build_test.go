@@ -907,6 +907,115 @@ func TestPrintResourcesBoxed_Empty(t *testing.T) {
 	}
 }
 
+// TestBuildSourcePath_SubdirectoryKustomization verifies that when
+// buildSourcePath encounters a directory without a top-level kustomization.yaml
+// but with subdirectories that have their own kustomization.yaml (with a
+// namespace transformer), the namespace is correctly applied to the output.
+func TestBuildSourcePath_SubdirectoryKustomization(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	// Source path: directory WITHOUT kustomization.yaml at top level.
+	sourcePath := filepath.Join(repoRoot, "apps")
+
+	// Subdirectory with kustomization.yaml that sets namespace.
+	appDir := filepath.Join(sourcePath, "podinfo")
+	writeHelper(t, appDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: podinfo
+resources:
+  - helmrelease.yaml
+  - ocirepository.yaml
+`)
+	writeHelper(t, appDir, "helmrelease.yaml", `apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: podinfo
+spec:
+  interval: 5m
+  chartRef:
+    kind: OCIRepository
+    name: podinfo
+`)
+	writeHelper(t, appDir, "ocirepository.yaml", `apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: podinfo
+spec:
+  interval: 6h
+  url: oci://ghcr.io/stefanprodan/charts/podinfo
+`)
+
+	builder := kustomize.NewBuilder(repoRoot)
+	output, err := buildSourcePath(builder, sourcePath)
+	if err != nil {
+		t.Fatalf("buildSourcePath: %v", err)
+	}
+
+	outputStr := string(output)
+
+	// Namespace from kustomization.yaml must be applied to HelmRelease.
+	if !strings.Contains(outputStr, "kind: HelmRelease") {
+		t.Error("HelmRelease missing from output")
+	}
+	if !strings.Contains(outputStr, "namespace: podinfo") {
+		t.Errorf("namespace: podinfo not applied by kustomize transformer:\n%s", outputStr)
+	}
+
+	// OCIRepository should also have the namespace.
+	if !strings.Contains(outputStr, "kind: OCIRepository") {
+		t.Error("OCIRepository missing from output")
+	}
+}
+
+// TestBuildSourcePath_LooseYAML verifies that loose YAML files (not inside
+// any kustomization.yaml) are still read when mixed with kustomized dirs.
+func TestBuildSourcePath_LooseYAML(t *testing.T) {
+	repoRoot := t.TempDir()
+	sourcePath := filepath.Join(repoRoot, "mixed")
+
+	// Subdirectory with kustomization.yaml.
+	overlayDir := filepath.Join(sourcePath, "overlay")
+	writeHelper(t, overlayDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: test-ns
+resources:
+  - cm.yaml
+`)
+	writeHelper(t, overlayDir, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: from-kustomize
+`)
+
+	// Loose YAML file at the source path level.
+	writeHelper(t, sourcePath, "loose.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loose-file
+`)
+
+	builder := kustomize.NewBuilder(repoRoot)
+	output, err := buildSourcePath(builder, sourcePath)
+	if err != nil {
+		t.Fatalf("buildSourcePath: %v", err)
+	}
+
+	outputStr := string(output)
+
+	// Kustomized resource should have namespace applied.
+	if !strings.Contains(outputStr, "from-kustomize") {
+		t.Error("resource from kustomized subdirectory missing")
+	}
+	if !strings.Contains(outputStr, "namespace: test-ns") {
+		t.Error("namespace transformer not applied to kustomized resource")
+	}
+
+	// Loose file should also be present (without namespace).
+	if !strings.Contains(outputStr, "loose-file") {
+		t.Error("loose YAML file missing from output")
+	}
+}
+
 func indexOf(s, substr string) int {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {
