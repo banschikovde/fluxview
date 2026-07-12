@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -448,7 +450,7 @@ spec:
 	}
 
 	builder := kustomize.NewBuilder(repoRoot)
-	buildCache := make(map[string][]byte)
+	buildCache := make(buildCache)
 	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, nil, true, buildCache)
 	if err != nil {
 		t.Fatalf("buildKSContent: %v", err)
@@ -521,7 +523,7 @@ spec:
 	}
 
 	builder := kustomize.NewBuilder(repoRoot)
-	buildCache := make(map[string][]byte)
+	buildCache := make(buildCache)
 	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, nil, true, buildCache)
 	if err != nil {
 		t.Fatalf("buildKSContent: %v", err)
@@ -946,7 +948,7 @@ spec:
 `)
 
 	builder := kustomize.NewBuilder(repoRoot)
-	output, err := buildSourcePath(builder, sourcePath)
+	output, err := buildSourcePath(builder, sourcePath, make(buildCache))
 	if err != nil {
 		t.Fatalf("buildSourcePath: %v", err)
 	}
@@ -995,7 +997,7 @@ metadata:
 `)
 
 	builder := kustomize.NewBuilder(repoRoot)
-	output, err := buildSourcePath(builder, sourcePath)
+	output, err := buildSourcePath(builder, sourcePath, make(buildCache))
 	if err != nil {
 		t.Fatalf("buildSourcePath: %v", err)
 	}
@@ -1229,6 +1231,87 @@ func TestMergeSources_BuildOutputPriority(t *testing.T) {
 	}
 	if !found {
 		t.Error("raw-only resource 'other-cm' should be present in merged result")
+	}
+}
+
+// TestBuildSourcePath_FailedBuildSingleWarning verifies that when a
+// kustomization.yaml exists but the build fails, exactly one warning
+// is printed (from buildDirCached), not a second one from buildAllKustomizations.
+func TestBuildSourcePath_FailedBuildSingleWarning(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	// Directory with kustomization.yaml referencing a non-existent resource.
+	failDir := filepath.Join(repoRoot, "broken")
+	writeHelper(t, failDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - does-not-exist.yaml
+`)
+
+	builder := kustomize.NewBuilder(repoRoot)
+	cache := make(buildCache)
+
+	_, err := buildSourcePath(builder, failDir, cache)
+	if err == nil {
+		t.Fatal("expected error for broken kustomization")
+	}
+	if !errors.Is(err, errAlreadyWarned) {
+		t.Errorf("expected errAlreadyWarned, got: %v", err)
+	}
+
+	// Second call should NOT re-build or re-warn (cached failure).
+	_, err = buildSourcePath(builder, failDir, cache)
+	if !errors.Is(err, errAlreadyWarned) {
+		t.Errorf("second call should also return errAlreadyWarned (cached), got: %v", err)
+	}
+}
+
+// TestBuildAllKustomizations_FailedBuildSingleWarning verifies that
+// buildAllKustomizations prints exactly one warning when a Flux
+// Kustomization's spec.path build fails (not two — one from
+// buildDirCached, one from buildAllKustomizations itself).
+func TestBuildAllKustomizations_FailedBuildSingleWarning(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	// Broken kustomization directory (missing resource).
+	failDir := filepath.Join(repoRoot, "app", "broken")
+	writeHelper(t, failDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - missing.yaml
+`)
+
+	// Flux Kustomization pointing to the broken directory.
+	clusterPath := filepath.Join(repoRoot, "cluster")
+	writeHelper(t, clusterPath, "ks.yaml", fmt.Sprintf(`apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: broken-app
+  namespace: flux-system
+spec:
+  path: %s
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+`, filepath.Join("..", "app", "broken")))
+
+	ctx := context.Background()
+	kustomizations, err := flux.NewParser(clusterPath).ParseKustomizations(ctx)
+	if err != nil {
+		t.Fatalf("ParseKustomizations: %v", err)
+	}
+
+	builder := kustomize.NewBuilder(repoRoot)
+	cache := make(buildCache)
+
+	stderr := captureStderr(func() {
+		_, _ = buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, true, cache)
+	})
+
+	// Count "Warning:" lines — should be exactly 1.
+	warningCount := strings.Count(stderr, "Warning:")
+	if warningCount != 1 {
+		t.Errorf("expected exactly 1 warning, got %d:\n%s", warningCount, stderr)
 	}
 }
 

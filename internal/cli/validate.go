@@ -94,7 +94,7 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 	}
 
 	builder := kustomize.NewBuilder(repoRoot)
-	buildCache := make(map[string][]byte)
+	buildCache := make(buildCache)
 	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
 
 	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, false, buildCache)
