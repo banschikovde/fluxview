@@ -31,18 +31,25 @@ func ResolveSubstituteVars(ks Kustomization, configMaps []ConfigMap) map[string]
 	entries := parseSubstituteFrom(ks.Spec.PostBuild.SubstituteFrom)
 	for _, entry := range entries {
 		ns := entry.Namespace
+		isExplicitNS := ns != ""
 		if ns == "" {
 			ns = ks.Metadata.Namespace
 		}
+		// Same restricted fallback logic as ResolveValuesFrom:
+		// empty-namespace resources match as fallback only when namespace
+		// was not explicitly set in substituteFrom.
+		allowFallback := !isExplicitNS
 
 		switch strings.ToLower(entry.Kind) {
 		case "configmap":
-			for _, cm := range configMaps {
-				if cm.Metadata.Name == entry.Name && cm.Metadata.Namespace == ns {
-					for k, v := range cm.Data {
-						vars[k] = v
-					}
-				}
+			cm, ok := findConfigMapCandidate(configMaps, entry.Name, ns, allowFallback)
+			if !ok {
+				fmt.Fprintf(os.Stderr, "Warning: substituteFrom ConfigMap %s/%s not found (referenced by Kustomization %s/%s)\n",
+					ns, entry.Name, ks.Metadata.Namespace, ks.Metadata.Name)
+				continue
+			}
+			for k, v := range cm.Data {
+				vars[k] = v
 			}
 		case "secret":
 			// We cannot read actual secret values; use placeholders.

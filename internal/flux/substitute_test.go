@@ -135,6 +135,108 @@ func TestResolveSubstituteVars_InlineOverrides(t *testing.T) {
 	}
 }
 
+// TestResolveSubstituteVars_LooseFileFallback verifies that a ConfigMap
+// without namespace is found via empty-namespace fallback when
+// substituteFrom doesn't specify a namespace explicitly.
+func TestResolveSubstituteVars_LooseFileFallback(t *testing.T) {
+	ks := Kustomization{
+		Metadata: ObjectMeta{Name: "base", Namespace: "flux-system"},
+		Spec: KustomizationSpec{
+			PostBuild: &PostBuild{
+				SubstituteFrom: []interface{}{
+					map[string]interface{}{
+						"kind": "ConfigMap",
+						"name": "cluster-settings",
+					},
+				},
+			},
+		},
+	}
+
+	cms := []ConfigMap{
+		{
+			Metadata: ObjectMeta{Name: "cluster-settings"}, // empty namespace
+			Data:     map[string]string{"CLUSTER_NAME": "test"},
+		},
+	}
+
+	vars := ResolveSubstituteVars(ks, cms)
+	if vars["CLUSTER_NAME"] != "test" {
+		t.Errorf("CLUSTER_NAME = %v, want test (loose-file fallback)", vars["CLUSTER_NAME"])
+	}
+}
+
+// TestResolveSubstituteVars_ExplicitNamespaceNoFallback verifies that
+// explicit namespace in substituteFrom prevents empty-namespace fallback.
+func TestResolveSubstituteVars_ExplicitNamespaceNoFallback(t *testing.T) {
+	ks := Kustomization{
+		Metadata: ObjectMeta{Name: "base", Namespace: "flux-system"},
+		Spec: KustomizationSpec{
+			PostBuild: &PostBuild{
+				SubstituteFrom: []interface{}{
+					map[string]interface{}{
+						"kind":      "ConfigMap",
+						"name":      "cluster-settings",
+						"namespace": "staging",
+					},
+				},
+			},
+		},
+	}
+
+	cms := []ConfigMap{
+		{
+			Metadata: ObjectMeta{Name: "cluster-settings"}, // empty namespace
+			Data:     map[string]string{"CLUSTER_NAME": "test"},
+		},
+	}
+
+	vars := ResolveSubstituteVars(ks, cms)
+	if vars["CLUSTER_NAME"] != "" {
+		t.Errorf("expected no match — explicit namespace should prevent fallback, got %v", vars["CLUSTER_NAME"])
+	}
+}
+
+// TestResolveSubstituteVars_NotFoundWarning verifies warning in stderr
+// when no matching ConfigMap is found.
+func TestResolveSubstituteVars_NotFoundWarning(t *testing.T) {
+	ks := Kustomization{
+		Metadata: ObjectMeta{Name: "base", Namespace: "flux-system"},
+		Spec: KustomizationSpec{
+			PostBuild: &PostBuild{
+				SubstituteFrom: []interface{}{
+					map[string]interface{}{
+						"kind": "ConfigMap",
+						"name": "nonexistent",
+					},
+				},
+			},
+		},
+	}
+
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	vars := ResolveSubstituteVars(ks, nil)
+
+	w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	stderrOutput := buf.String()
+
+	if len(vars) != 0 {
+		t.Errorf("expected empty vars, got %v", vars)
+	}
+	if !strings.Contains(stderrOutput, "Warning:") {
+		t.Errorf("expected warning in stderr, got:\n%s", stderrOutput)
+	}
+	if !strings.Contains(stderrOutput, "nonexistent") {
+		t.Errorf("expected ConfigMap name in warning, got:\n%s", stderrOutput)
+	}
+}
+
 func TestTopologicalSort(t *testing.T) {
 	ks := []Kustomization{
 		{
