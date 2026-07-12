@@ -238,18 +238,11 @@ func parseValuesFrom(raw any) []ValuesFromEntry {
 // Returns a merged map of values where later entries in the valuesFrom list override earlier ones
 // (matching Flux behavior where the order matters).
 //
-// Secret values are intentionally NOT resolved — consistent with the
-// postBuild.substituteFrom behavior ("we cannot read actual secret values").
-// Injecting real secret values into Helm rendering risks leaking them through
-// rendered resources (ConfigMaps, annotations, env vars) that RedactSecrets
-// does not cover (it only masks kind: Secret documents). Charts render with
-// placeholder/missing values; structural correctness is preserved.
+// ConfigMap values are parsed as YAML and merged. Secret values are parsed
+// structurally but every leaf is replaced with SecretRedactedValue — this
+// ensures chart templates render correctly while real secret values never
+// appear in the output.
 func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret) map[string]any {
-	// secrets parameter is intentionally unused: real secret values are not
-	// injected into Helm rendering (see function doc comment). Kept in the
-	// signature for API symmetry with configMaps and call-site compatibility.
-	_ = secrets
-
 	entries := parseValuesFrom(hr.Spec.ValuesFrom)
 	if len(entries) == 0 {
 		return nil
@@ -265,8 +258,9 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 
 		switch strings.ToLower(entry.Kind) {
 		case "configmap":
+			// First pass: exact namespace match.
 			for _, cm := range configMaps {
-				if cm.Metadata.Name == entry.Name && (cm.Metadata.Namespace == entryNS || cm.Metadata.Namespace == "") {
+				if cm.Metadata.Name == entry.Name && cm.Metadata.Namespace == entryNS {
 					vk := entry.ValuesKey
 					if vk == "" {
 						vk = "values.yaml"
@@ -275,15 +269,45 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 					break
 				}
 			}
+			// Second pass: fallback to empty namespace (raw-parsed resources
+			// without kustomize-transformed namespace).
+			if _, found := result[""]; !found && len(result) == 0 {
+				for _, cm := range configMaps {
+					if cm.Metadata.Name == entry.Name && cm.Metadata.Namespace == "" {
+						vk := entry.ValuesKey
+						if vk == "" {
+							vk = "values.yaml"
+						}
+						mergeConfigMapValues(result, cm.Data, vk)
+						break
+					}
+				}
+			}
 		case "secret":
+			// First pass: exact namespace match.
+			found := false
 			for _, secret := range secrets {
-				if secret.Metadata.Name == entry.Name && (secret.Metadata.Namespace == entryNS || secret.Metadata.Namespace == "") {
+				if secret.Metadata.Name == entry.Name && secret.Metadata.Namespace == entryNS {
 					vk := entry.ValuesKey
 					if vk == "" {
 						vk = "values.yaml"
 					}
 					mergeSecretPlaceholder(result, secret, vk)
+					found = true
 					break
+				}
+			}
+			// Second pass: fallback to empty namespace.
+			if !found {
+				for _, secret := range secrets {
+					if secret.Metadata.Name == entry.Name && secret.Metadata.Namespace == "" {
+						vk := entry.ValuesKey
+						if vk == "" {
+							vk = "values.yaml"
+						}
+						mergeSecretPlaceholder(result, secret, vk)
+						break
+					}
 				}
 			}
 		}
@@ -319,17 +343,15 @@ func mergeYAMLString(dst map[string]any, raw string) {
 
 // mergeSecretPlaceholder injects placeholder values for secret-based valuesFrom.
 // It reads the YAML structure from the secret's data key (same as ConfigMap),
-// but replaces every leaf value with a YAML-safe placeholder string. This ensures:
-//   - Chart templates that reference these values render correctly (no template
-//     errors from special characters) — diff detects changes to secret structure
+// but replaces every leaf value with SecretRedactedValue. This ensures:
+//   - Chart templates that reference these values render correctly
+//   - Diff detects changes to secret structure
 //   - Real secret values NEVER appear in the rendered output
 func mergeSecretPlaceholder(result map[string]any, secret Secret, valuesKey string) {
-	raw, ok := secret.Data[valuesKey]
-	if !ok {
-		// Try stringData too.
-		raw, ok = secret.StringData[valuesKey]
-	}
-	if !ok {
+	// Use GetSecretValue which handles both stringData (plaintext) and
+	// data (base64-encoded), matching real-world Kubernetes Secret manifests.
+	raw := secret.GetSecretValue(valuesKey)
+	if raw == "" {
 		return
 	}
 
@@ -360,7 +382,7 @@ func redactRecursive(v any) any {
 		}
 		return result
 	default:
-		return SecretRedactedValue
+		return SecretHelmPlaceholder
 	}
 }
 

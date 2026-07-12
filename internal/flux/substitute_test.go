@@ -451,9 +451,13 @@ func TestResolveValuesFrom_ValuesKey(t *testing.T) {
 }
 
 // TestResolveValuesFrom_SecretsNotResolved verifies that real secret values
-// are NOT injected into Helm rendering — instead, placeholder values
-// (*** (SECRET) ***) are used so the chart renders but secrets never leak.
+// are NOT injected into Helm rendering — instead, YAML-safe placeholder values
+// are used so the chart renders but secrets never leak.
+// Tests with base64-encoded Data (the standard Kubernetes Secret format).
 func TestResolveValuesFrom_SecretsNotResolved(t *testing.T) {
+	// "password: super-secret-password\ntoken: abc123\n" base64-encoded.
+	encoded := "cGFzc3dvcmQ6IHN1cGVyLXNlY3JldC1wYXNzd29yZAp0b2tlbjogYWJjMTIzCg=="
+
 	hr := HelmRelease{
 		Metadata: ObjectMeta{Name: "app", Namespace: "flux-system"},
 		Spec: HelmReleaseSpec{
@@ -470,26 +474,96 @@ func TestResolveValuesFrom_SecretsNotResolved(t *testing.T) {
 		{
 			Metadata: ObjectMeta{Name: "app-secrets", Namespace: "flux-system"},
 			Data: map[string]string{
-				"values.yaml": "password: super-secret-password\ntoken: abc123\n",
+				"values.yaml": encoded, // base64-encoded
 			},
 		},
 	}
 
 	result := ResolveValuesFrom(hr, nil, secrets)
 
-	// Secret keys must be present (so chart templates work)...
 	if result == nil {
 		t.Fatal("expected non-nil result — secret placeholders should be injected")
 	}
 	if _, ok := result["password"]; !ok {
-		t.Error("secret key 'password' missing from result — chart templates need it")
+		t.Error("secret key 'password' missing from result")
 	}
-	// ...but real values must NEVER appear.
+	// Real values must NEVER appear.
 	if result["password"] == "super-secret-password" {
 		t.Error("real secret value leaked into Helm values")
 	}
-	if result["password"] != SecretRedactedValue {
-		t.Errorf("expected %q placeholder, got %v", SecretRedactedValue, result["password"])
+	if result["password"] != SecretHelmPlaceholder {
+		t.Errorf("expected %q placeholder, got %v", SecretHelmPlaceholder, result["password"])
+	}
+	if result["token"] != SecretHelmPlaceholder {
+		t.Errorf("expected %q placeholder for token, got %v", SecretHelmPlaceholder, result["token"])
+	}
+}
+
+// TestResolveValuesFrom_SecretStringData verifies that stringData (plaintext)
+// secret values are also handled correctly.
+func TestResolveValuesFrom_SecretStringData(t *testing.T) {
+	hr := HelmRelease{
+		Metadata: ObjectMeta{Name: "app", Namespace: "podinfo"},
+		Spec: HelmReleaseSpec{
+			ValuesFrom: []interface{}{
+				map[string]interface{}{
+					"kind":      "Secret",
+					"name":      "app-secrets",
+					"valuesKey": "values.yaml",
+				},
+			},
+		},
+	}
+
+	secrets := []Secret{
+		{
+			Metadata: ObjectMeta{Name: "app-secrets", Namespace: "podinfo"},
+			StringData: map[string]string{
+				"values.yaml": "backend: \"http://example.com\"\n",
+			},
+		},
+	}
+
+	result := ResolveValuesFrom(hr, nil, secrets)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result["backend"] != SecretHelmPlaceholder {
+		t.Errorf("expected %q placeholder, got %v", SecretHelmPlaceholder, result["backend"])
+	}
+}
+
+// TestResolveValuesFrom_SecretNamespaceFallback verifies that secrets without
+// explicit namespace are found when HR has a namespace (raw-parsed secrets).
+func TestResolveValuesFrom_SecretNamespaceFallback(t *testing.T) {
+	hr := HelmRelease{
+		Metadata: ObjectMeta{Name: "app", Namespace: "podinfo"},
+		Spec: HelmReleaseSpec{
+			ValuesFrom: []interface{}{
+				map[string]interface{}{
+					"kind": "Secret",
+					"name": "app-secrets",
+				},
+			},
+		},
+	}
+
+	// Secret with no namespace (raw-parsed from file, no kustomize transform).
+	secrets := []Secret{
+		{
+			Metadata: ObjectMeta{Name: "app-secrets"}, // empty namespace
+			StringData: map[string]string{
+				"values.yaml": "key: value\n",
+			},
+		},
+	}
+
+	result := ResolveValuesFrom(hr, nil, secrets)
+	if result == nil {
+		t.Fatal("expected non-nil result — namespace fallback should find the secret")
+	}
+	if result["key"] != SecretHelmPlaceholder {
+		t.Errorf("expected placeholder via namespace fallback, got %v", result["key"])
 	}
 }
 
