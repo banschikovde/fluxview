@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // substituteFromEntry represents a single entry in the postBuild.substituteFrom list.
@@ -218,8 +220,14 @@ func parseValuesFrom(raw any) []ValuesFromEntry {
 				if ns, ok := m["namespace"].(string); ok {
 					entry.Namespace = ns
 				}
+				if vk, ok := m["valuesKey"].(string); ok {
+					entry.ValuesKey = vk
+				}
 				if optional, ok := m["optional"].(bool); ok {
 					entry.Optional = optional
+				}
+				if tp, ok := m["targetPath"].(string); ok {
+					entry.TargetPath = tp
 				}
 				entries = append(entries, entry)
 			}
@@ -262,9 +270,7 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 		case "configmap":
 			for _, cm := range configMaps {
 				if cm.Metadata.Name == entry.Name && cm.Metadata.Namespace == entryNS {
-					for k, v := range cm.Data {
-						result[k] = v
-					}
+					mergeConfigMapData(result, cm.Data, entry.ValuesKey)
 					break
 				}
 			}
@@ -275,6 +281,57 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 	}
 
 	return result
+}
+
+// mergeConfigMapData merges ConfigMap data into the Helm values map.
+// If valuesKey is specified, only that key's value is used (parsed as YAML).
+// Otherwise, all keys are used — each value is parsed as YAML if it looks
+// like a YAML map, otherwise kept as a string.
+func mergeConfigMapData(result map[string]any, data map[string]string, valuesKey string) {
+	if valuesKey != "" {
+		// Flux behavior: valuesKey selects a specific key whose value
+		// is parsed as YAML and merged into the values map.
+		raw, ok := data[valuesKey]
+		if !ok {
+			return
+		}
+		mergeYAMLString(result, raw)
+		return
+	}
+
+	// No valuesKey: each key in data is a top-level values key.
+	// Values that look like YAML maps are parsed; others stay as strings.
+	for k, v := range data {
+		var parsed any
+		if err := yaml.Unmarshal([]byte(v), &parsed); err == nil {
+			if m, ok := parsed.(map[string]interface{}); ok {
+				// It's a YAML map — merge each key into result.
+				for mk, mv := range m {
+					result[mk] = mv
+				}
+				continue
+			}
+			result[k] = parsed
+		} else {
+			result[k] = v
+		}
+	}
+}
+
+// mergeYAMLString parses a YAML string and merges its top-level keys into dst.
+func mergeYAMLString(dst map[string]any, raw string) {
+	var parsed map[string]interface{}
+	if err := yaml.Unmarshal([]byte(raw), &parsed); err != nil {
+		// Not a valid YAML map — try as a scalar.
+		var scalar any
+		if err := yaml.Unmarshal([]byte(raw), &scalar); err == nil && scalar != nil {
+			dst["values"] = scalar
+		}
+		return
+	}
+	for k, v := range parsed {
+		dst[k] = v
+	}
 }
 
 // SubstituteNeeded returns true if the Kustomization has postBuild substitution configured.

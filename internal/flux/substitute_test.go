@@ -399,6 +399,58 @@ func TestResolveValuesFrom(t *testing.T) {
 	}
 }
 
+// TestResolveValuesFrom_ValuesKey verifies that valuesKey selects a specific
+// key from ConfigMap data and parses it as YAML (Flux behavior).
+func TestResolveValuesFrom_ValuesKey(t *testing.T) {
+	hr := HelmRelease{
+		Metadata: ObjectMeta{Name: "app", Namespace: "podinfo"},
+		Spec: HelmReleaseSpec{
+			ValuesFrom: []interface{}{
+				map[string]interface{}{
+					"kind":      "ConfigMap",
+					"name":      "app-values",
+					"valuesKey": "values.yaml",
+				},
+			},
+		},
+	}
+
+	configMaps := []ConfigMap{
+		{
+			Metadata: ObjectMeta{Name: "app-values", Namespace: "podinfo"},
+			Data: map[string]string{
+				"values.yaml": "ui:\n  color: \"#114463\"\n  message: hello\n",
+				"other-key":   "should-be-ignored",
+			},
+		},
+	}
+
+	result := ResolveValuesFrom(hr, configMaps, nil)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	// valuesKey content should be parsed as YAML and merged.
+	ui, ok := result["ui"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected 'ui' map in result, got %T for 'ui'", result["ui"])
+	}
+	if ui["color"] != "#114463" {
+		t.Errorf("ui.color = %v, want #114463", ui["color"])
+	}
+	if ui["message"] != "hello" {
+		t.Errorf("ui.message = %v, want hello", ui["message"])
+	}
+
+	// Keys NOT referenced by valuesKey should NOT be in result.
+	if _, exists := result["other-key"]; exists {
+		t.Error("non-valuesKey data should not be in result")
+	}
+	if _, exists := result["values.yaml"]; exists {
+		t.Error("values.yaml key itself should not be in result (it's the valuesKey selector)")
+	}
+}
+
 // TestResolveValuesFrom_SecretsNotResolved verifies that secret values are
 // NOT injected into Helm rendering. This prevents leakage of real secret
 // values through rendered non-Secret resources (ConfigMaps, annotations, etc.)
@@ -480,8 +532,8 @@ func TestResolveValuesFrom_MixedConfigMapAndSecret(t *testing.T) {
 
 	result := ResolveValuesFrom(hr, configMaps, secrets)
 
-	// ConfigMap value should be present.
-	if result["replicas"] != "2" {
+	// ConfigMap value should be present (parsed as YAML int, not string).
+	if result["replicas"] != 2 {
 		t.Errorf("ConfigMap value should be resolved, got %v", result["replicas"])
 	}
 	// Secret value must NOT be present.
