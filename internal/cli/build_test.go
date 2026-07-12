@@ -1407,7 +1407,8 @@ data:
 }
 
 // TestBuildKustomizeOverlays_NonK8sYamlSkipped verifies that loose YAML
-// files that don't look like k8s resources (no apiVersion + kind) are skipped.
+// files that don't look like k8s resources (no apiVersion + kind) are skipped,
+// and in multi-doc files only valid k8s documents are included.
 func TestBuildKustomizeOverlays_NonK8sYamlSkipped(t *testing.T) {
 	clusterPath := t.TempDir()
 
@@ -1415,11 +1416,14 @@ func TestBuildKustomizeOverlays_NonK8sYamlSkipped(t *testing.T) {
 	writeHelper(t, clusterPath, "README.yaml", `title: Some Documentation
 description: Not a k8s resource
 `)
-	// Loose file that IS a k8s resource.
-	writeHelper(t, clusterPath, "config.yaml", `apiVersion: v1
+	// Multi-doc file: one valid k8s resource + one non-resource document.
+	writeHelper(t, clusterPath, "mixed.yaml", `apiVersion: v1
 kind: ConfigMap
 metadata:
   name: real-resource
+---
+title: Not a k8s document
+description: Should be filtered out
 `)
 
 	outputs := buildKustomizeOverlays(clusterPath, clusterPath, map[string]bool{}, make(buildCache))
@@ -1429,10 +1433,13 @@ metadata:
 	}
 
 	if strings.Contains(combined, "Some Documentation") {
-		t.Error("non-k8s YAML should be skipped")
+		t.Error("non-k8s YAML file should be skipped entirely")
 	}
 	if !strings.Contains(combined, "real-resource") {
 		t.Error("valid k8s resource should be included")
+	}
+	if strings.Contains(combined, "Not a k8s document") {
+		t.Error("non-k8s document in multi-doc file should be filtered out")
 	}
 }
 
