@@ -17,11 +17,13 @@ type nativeKustomization struct {
 }
 
 // DiscoverKustomizeDirs scans subdirectories under rootPath for native kustomize
-// overlays (kustomization.yaml with apiVersion kustomize.config.k8s.io).
-// It excludes the rootPath itself and directories that contain Flux Kustomization resources.
+// overlays (kustomization.yaml/yml/Kustomization with apiVersion kustomize.config.k8s.io).
+// It excludes the rootPath itself, directories that contain Flux Kustomization resources,
+// and subdirectories of already discovered kustomize dirs (to prevent base/overlay duplicates).
 func DiscoverKustomizeDirs(rootPath string) ([]string, error) {
 	var dirs []string
 	absRoot, _ := filepath.Abs(rootPath)
+	discovered := make(map[string]bool)
 
 	err := filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -31,29 +33,40 @@ func DiscoverKustomizeDirs(rootPath string) ([]string, error) {
 			return nil
 		}
 
-		// Skip the root directory itself.
 		absPath, _ := filepath.Abs(path)
 		if absPath == absRoot {
 			return nil
 		}
 
-		// Check for kustomization.yaml in this directory.
-		kustPath := filepath.Join(path, "kustomization.yaml")
-		data, err := os.ReadFile(kustPath)
-		if err != nil {
-			return nil // No kustomization.yaml, skip.
+		// Skip subdirectories of already discovered kustomize dirs —
+		// they'll be built as part of the parent kustomization.
+		for parent := range discovered {
+			if strings.HasPrefix(absPath, parent+string(filepath.Separator)) {
+				return filepath.SkipDir
+			}
 		}
 
-		// Parse to check if it's a native kustomize overlay (not Flux Kustomization).
+		// Check for kustomization file in this directory.
+		var kustData []byte
+		for _, name := range []string{"kustomization.yaml", "kustomization.yml", "Kustomization"} {
+			data, err := os.ReadFile(filepath.Join(path, name))
+			if err == nil {
+				kustData = data
+				break
+			}
+		}
+		if kustData == nil {
+			return nil // No kustomization file, skip.
+		}
+
 		var kust nativeKustomization
-		if err := yaml.Unmarshal(data, &kust); err != nil {
+		if err := yaml.Unmarshal(kustData, &kust); err != nil {
 			return nil
 		}
 
-		// Native kustomize has apiVersion starting with "kustomize.config.k8s.io"
-		// or no apiVersion at all (just `kind: Kustomization`).
 		if isNativeKustomize(kust) {
 			dirs = append(dirs, path)
+			discovered[absPath] = true
 		}
 
 		return nil

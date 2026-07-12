@@ -502,7 +502,7 @@ func buildSourcePath(builder *kustomize.Builder, sourcePath string) ([]byte, err
 func buildSubdirectoriesAndLooseFiles(builder *kustomize.Builder, sourcePath string) ([]byte, error) {
 	kustomizeDirs, err := flux.DiscoverKustomizeDirs(sourcePath)
 	if err != nil {
-		// Discovery failed — fall back to plain recursive read.
+		fmt.Fprintf(os.Stderr, "Warning: kustomize directory discovery failed for %s: %v\n", sourcePath, err)
 		return readYAMLFilesRecursive(sourcePath)
 	}
 

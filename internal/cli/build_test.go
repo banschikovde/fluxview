@@ -1024,3 +1024,75 @@ func indexOf(s, substr string) int {
 	}
 	return -1
 }
+
+// TestDiscoverKustomizeDirs_NoNestedDuplicates verifies that when an overlay
+// references a base in a subdirectory, the base is NOT discovered separately
+// (it's already built as part of the overlay).
+func TestDiscoverKustomizeDirs_NoNestedDuplicates(t *testing.T) {
+	root := t.TempDir()
+
+	// Overlay references a base subdirectory.
+	overlayDir := filepath.Join(root, "overlay")
+	writeHelper(t, overlayDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: app
+resources:
+  - base
+  - cm.yaml
+`)
+	writeHelper(t, overlayDir, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: overlay-cm
+`)
+
+	// Base inside overlay — should NOT be discovered separately.
+	baseDir := filepath.Join(overlayDir, "base")
+	writeHelper(t, baseDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - base-cm.yaml
+`)
+	writeHelper(t, baseDir, "base-cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-cm
+`)
+
+	// Standalone dir — SHOULD be discovered.
+	standaloneDir := filepath.Join(root, "standalone")
+	writeHelper(t, standaloneDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cm.yaml
+`)
+	writeHelper(t, standaloneDir, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: standalone-cm
+`)
+
+	dirs, err := flux.DiscoverKustomizeDirs(root)
+	if err != nil {
+		t.Fatalf("DiscoverKustomizeDirs: %v", err)
+	}
+
+	// Should discover overlay and standalone, but NOT overlay/base.
+	for _, dir := range dirs {
+		if strings.HasSuffix(dir, "base") {
+			t.Errorf("base subdirectory should not be discovered separately: %s", dir)
+		}
+	}
+
+	// Verify at least overlay and standalone are found.
+	found := make(map[string]bool)
+	for _, dir := range dirs {
+		found[dir] = true
+	}
+	if !found[overlayDir] {
+		t.Error("overlay directory not discovered")
+	}
+	if !found[standaloneDir] {
+		t.Error("standalone directory not discovered")
+	}
+}
