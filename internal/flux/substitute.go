@@ -266,8 +266,7 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 		switch strings.ToLower(entry.Kind) {
 		case "configmap":
 			for _, cm := range configMaps {
-				if cm.Metadata.Name == entry.Name && cm.Metadata.Namespace == entryNS {
-					// Flux default: valuesKey defaults to "values.yaml" when not specified.
+				if cm.Metadata.Name == entry.Name && (cm.Metadata.Namespace == entryNS || cm.Metadata.Namespace == "") {
 					vk := entry.ValuesKey
 					if vk == "" {
 						vk = "values.yaml"
@@ -277,8 +276,16 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 				}
 			}
 		case "secret":
-			// Deliberately skip: real secret values are not injected into Helm
-			// rendering to prevent leakage through non-Secret resources.
+			for _, secret := range secrets {
+				if secret.Metadata.Name == entry.Name && (secret.Metadata.Namespace == entryNS || secret.Metadata.Namespace == "") {
+					vk := entry.ValuesKey
+					if vk == "" {
+						vk = "values.yaml"
+					}
+					mergeSecretPlaceholder(result, secret, vk)
+					break
+				}
+			}
 		}
 	}
 
@@ -307,6 +314,53 @@ func mergeYAMLString(dst map[string]any, raw string) {
 	}
 	for k, v := range parsed {
 		dst[k] = v
+	}
+}
+
+// mergeSecretPlaceholder injects placeholder values for secret-based valuesFrom.
+// It reads the YAML structure from the secret's data key (same as ConfigMap),
+// but replaces every leaf value with a YAML-safe placeholder string. This ensures:
+//   - Chart templates that reference these values render correctly (no template
+//     errors from special characters) — diff detects changes to secret structure
+//   - Real secret values NEVER appear in the rendered output
+func mergeSecretPlaceholder(result map[string]any, secret Secret, valuesKey string) {
+	raw, ok := secret.Data[valuesKey]
+	if !ok {
+		// Try stringData too.
+		raw, ok = secret.StringData[valuesKey]
+	}
+	if !ok {
+		return
+	}
+
+	var parsed map[string]interface{}
+	if err := yaml.Unmarshal([]byte(raw), &parsed); err != nil {
+		return
+	}
+
+	for k, v := range parsed {
+		result[k] = redactRecursive(v)
+	}
+}
+
+// redactRecursive replaces all scalar leaf values with a YAML-safe placeholder,
+// preserving the structure of nested maps and lists.
+func redactRecursive(v any) any {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		result := make(map[string]interface{})
+		for k, child := range val {
+			result[k] = redactRecursive(child)
+		}
+		return result
+	case []interface{}:
+		result := make([]interface{}, len(val))
+		for i, child := range val {
+			result[i] = redactRecursive(child)
+		}
+		return result
+	default:
+		return SecretHelmPlaceholder
 	}
 }
 

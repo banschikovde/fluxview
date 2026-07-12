@@ -450,10 +450,9 @@ func TestResolveValuesFrom_ValuesKey(t *testing.T) {
 	}
 }
 
-// TestResolveValuesFrom_SecretsNotResolved verifies that secret values are
-// NOT injected into Helm rendering. This prevents leakage of real secret
-// values through rendered non-Secret resources (ConfigMaps, annotations, etc.)
-// that RedactSecrets does not cover.
+// TestResolveValuesFrom_SecretsNotResolved verifies that real secret values
+// are NOT injected into Helm rendering — instead, placeholder values
+// (*** (SECRET) ***) are used so the chart renders but secrets never leak.
 func TestResolveValuesFrom_SecretsNotResolved(t *testing.T) {
 	hr := HelmRelease{
 		Metadata: ObjectMeta{Name: "app", Namespace: "flux-system"},
@@ -471,24 +470,26 @@ func TestResolveValuesFrom_SecretsNotResolved(t *testing.T) {
 		{
 			Metadata: ObjectMeta{Name: "app-secrets", Namespace: "flux-system"},
 			Data: map[string]string{
-				"password": "c2VjcmV0LXBhc3N3b3Jk", // base64 of "secret-password"
-			},
-			StringData: map[string]string{
-				"token": "real-token-value",
+				"values.yaml": "password: super-secret-password\ntoken: abc123\n",
 			},
 		},
 	}
 
 	result := ResolveValuesFrom(hr, nil, secrets)
 
-	// Secret values must NOT appear in the result map.
-	if result != nil {
-		if v, ok := result["password"]; ok {
-			t.Errorf("secret value for 'password' leaked into Helm values: %v", v)
-		}
-		if v, ok := result["token"]; ok {
-			t.Errorf("secret value for 'token' leaked into Helm values: %v", v)
-		}
+	// Secret keys must be present (so chart templates work)...
+	if result == nil {
+		t.Fatal("expected non-nil result — secret placeholders should be injected")
+	}
+	if _, ok := result["password"]; !ok {
+		t.Error("secret key 'password' missing from result — chart templates need it")
+	}
+	// ...but real values must NEVER appear.
+	if result["password"] == "super-secret-password" {
+		t.Error("real secret value leaked into Helm values")
+	}
+	if result["password"] != SecretHelmPlaceholder {
+		t.Errorf("expected %q placeholder, got %v", SecretHelmPlaceholder, result["password"])
 	}
 }
 

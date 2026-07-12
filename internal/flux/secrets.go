@@ -7,8 +7,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// SecretRedactedValue is the placeholder for redacted secret data.
+// SecretRedactedValue is the placeholder for redacted secret data in output.
 const SecretRedactedValue = "*** (SECRET) ***"
+
+// SecretHelmPlaceholder is a YAML-safe placeholder injected into Helm values
+// for secret-based valuesFrom. Unlike SecretRedactedValue, it doesn't contain
+// characters that break Helm template rendering (e.g. * at start of YAML value).
+const SecretHelmPlaceholder = "REDACTED"
 
 // RedactSecrets scans multi-document YAML and replaces secret data values
 // with a visual placeholder. Secret kind resources are preserved but their

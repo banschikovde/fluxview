@@ -76,11 +76,13 @@ func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespac
 	buildRepos, _ := flux.ParseHelmRepositoriesFromBytes(output)
 	buildOCI, _ := flux.ParseOCIRepositoriesFromBytes(output)
 	buildCMs, _ := flux.ParseConfigMapsFromBytes(output)
-	rawRepos, rawOCI, rawCMs, secrets := resolveHelmInflationSources(ctx, clusterPath, repoRoot)
+	buildSecrets, _ := flux.ParseSecretsFromBytes(output)
+	rawRepos, rawOCI, rawCMs, rawSecrets := resolveHelmInflationSources(ctx, clusterPath, repoRoot)
 
 	helmRepos := append(buildRepos, rawRepos...)
 	ociRepos := append(buildOCI, rawOCI...)
 	inflationCMs := append(buildCMs, rawCMs...)
+	secrets := append(buildSecrets, rawSecrets...)
 
 	inflater, err := helm.NewInflater()
 	if err != nil {
