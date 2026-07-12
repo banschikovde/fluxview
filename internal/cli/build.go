@@ -290,23 +290,85 @@ func collectKustomizationPaths(repoRoot string, kustomizations []flux.Kustomizat
 
 func buildKustomizeOverlays(clusterPath, repoRoot string, excludePaths map[string]bool, cache buildCache) [][]byte {
 	kustomizeDirs, err := flux.DiscoverKustomizeDirs(clusterPath)
-	if err != nil || len(kustomizeDirs) == 0 {
-		return nil
-	}
-
 	builder := kustomize.NewBuilder(repoRoot)
 	var outputs [][]byte
 
-	for _, dir := range kustomizeDirs {
-		if isExcludedDir(dir, excludePaths) {
-			continue
-		}
-		if output, ok := buildDirCached(builder, dir, cache); ok {
-			outputs = append(outputs, output)
+	// Track ALL directories that have a kustomization.yaml (attempted build),
+	// not just successful ones. This prevents loose-file walker from reading
+	// raw files out of a directory whose kustomization.yaml exists but build
+	// failed — those files would leak as untransformed, plus the
+	// kustomization.yaml itself would appear as a garbage document.
+	kustDirs := make(map[string]bool)
+	if err == nil {
+		for _, dir := range kustomizeDirs {
+			kustDirs[dir] = true
+			if isExcludedDir(dir, excludePaths) {
+				continue
+			}
+			if output, ok := buildDirCached(builder, dir, cache); ok {
+				outputs = append(outputs, output)
+			}
 		}
 	}
 
+	// Read loose YAML files from directories WITHOUT kustomization.yaml
+	// that are not excluded and not inside any kustomize directory.
+	// Only include files that look like k8s resources (have apiVersion + kind).
+	filepath.Walk(clusterPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext != ".yaml" && ext != ".yml" {
+			return nil
+		}
+		dir := filepath.Dir(path)
+
+		// Skip files inside any directory that has a kustomization.yaml
+		// (regardless of build success/failure).
+		for kd := range kustDirs {
+			if dir == kd || strings.HasPrefix(dir, kd+string(filepath.Separator)) {
+				return nil
+			}
+		}
+		// Skip files inside excluded directories (spec.path of Flux Kustomizations).
+		if isExcludedDir(dir, excludePaths) {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		// Only include documents that look like k8s resources.
+		filtered := filterK8sResources(data)
+		if filtered != nil {
+			outputs = append(outputs, filtered)
+		}
+		return nil
+	})
+
 	return outputs
+}
+
+// filterK8sResources returns only documents that look like k8s resources
+// (have non-empty apiVersion and kind). Non-resource documents in a
+// multi-doc YAML file are silently dropped.
+func filterK8sResources(data []byte) []byte {
+	var result []string
+	for _, doc := range flux.SplitYAMLText(data) {
+		var meta struct {
+			APIVersion string `yaml:"apiVersion"`
+			Kind       string `yaml:"kind"`
+		}
+		if yaml.Unmarshal([]byte(doc), &meta) != nil || meta.APIVersion == "" || meta.Kind == "" {
+			continue
+		}
+		result = append(result, doc)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return []byte(strings.Join(result, "\n---\n"))
 }
 
 func isExcludedDir(dir string, excludePaths map[string]bool) bool {
