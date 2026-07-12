@@ -95,9 +95,9 @@ type PostBuild struct {
 
 // KustomizationSourceRef references the source for a Kustomization.
 type KustomizationSourceRef struct {
-	APIVersion string `yaml:"apiVersion"`
-	Kind       string `yaml:"kind"`
-	Name       string `yaml:"name"`
+	APIVersion string `yaml:"apiVersion,omitempty"`
+	Kind       string `yaml:"kind,omitempty"`
+	Name       string `yaml:"name,omitempty"`
 	Namespace  string `yaml:"namespace,omitempty"`
 }
 
