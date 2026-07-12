@@ -167,16 +167,17 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 	}
 
 	// Apply postRenderers (kustomize patches) if configured.
-	if len(hr.Spec.PostRenderers) > 0 {
-		for _, pr := range hr.Spec.PostRenderers {
-			if pr.Kustomize != nil && len(pr.Kustomize.Patches) > 0 {
-				patched, err := kustomizepkg.ApplyPatches(converted, pr.Kustomize.Patches)
-				if err != nil {
-					return converted, nil // don't fail on patch error
-				}
-				converted = patched
-			}
+	for _, pr := range hr.Spec.PostRenderers {
+		if pr.Kustomize == nil || len(pr.Kustomize.Patches) == 0 {
+			continue
 		}
+		patched, err := kustomizepkg.ApplyPatches(converted, pr.Kustomize.Patches)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to apply postRenderer patches for %s/%s: %v\n",
+				hr.Metadata.Namespace, hr.Metadata.Name, err)
+			continue
+		}
+		converted = patched
 	}
 
 	return converted, nil
