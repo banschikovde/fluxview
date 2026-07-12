@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -1250,8 +1251,6 @@ resources:
 	builder := kustomize.NewBuilder(repoRoot)
 	cache := make(buildCache)
 
-	// buildDirCached will print one warning and cache the error.
-	// buildSourcePath returns errAlreadyWarned.
 	_, err := buildSourcePath(builder, failDir, cache)
 	if err == nil {
 		t.Fatal("expected error for broken kustomization")
@@ -1264,6 +1263,55 @@ resources:
 	_, err = buildSourcePath(builder, failDir, cache)
 	if !errors.Is(err, errAlreadyWarned) {
 		t.Errorf("second call should also return errAlreadyWarned (cached), got: %v", err)
+	}
+}
+
+// TestBuildAllKustomizations_FailedBuildSingleWarning verifies that
+// buildAllKustomizations prints exactly one warning when a Flux
+// Kustomization's spec.path build fails (not two — one from
+// buildDirCached, one from buildAllKustomizations itself).
+func TestBuildAllKustomizations_FailedBuildSingleWarning(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	// Broken kustomization directory (missing resource).
+	failDir := filepath.Join(repoRoot, "app", "broken")
+	writeHelper(t, failDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - missing.yaml
+`)
+
+	// Flux Kustomization pointing to the broken directory.
+	clusterPath := filepath.Join(repoRoot, "cluster")
+	writeHelper(t, clusterPath, "ks.yaml", fmt.Sprintf(`apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: broken-app
+  namespace: flux-system
+spec:
+  path: %s
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+`, filepath.Join("..", "app", "broken")))
+
+	ctx := context.Background()
+	kustomizations, err := flux.NewParser(clusterPath).ParseKustomizations(ctx)
+	if err != nil {
+		t.Fatalf("ParseKustomizations: %v", err)
+	}
+
+	builder := kustomize.NewBuilder(repoRoot)
+	cache := make(buildCache)
+
+	stderr := captureStderr(func() {
+		_, _ = buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, true, cache)
+	})
+
+	// Count "Warning:" lines — should be exactly 1.
+	warningCount := strings.Count(stderr, "Warning:")
+	if warningCount != 1 {
+		t.Errorf("expected exactly 1 warning, got %d:\n%s", warningCount, stderr)
 	}
 }
 
