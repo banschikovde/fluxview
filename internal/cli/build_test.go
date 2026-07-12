@@ -1231,3 +1231,134 @@ func TestMergeSources_BuildOutputPriority(t *testing.T) {
 		t.Error("raw-only resource 'other-cm' should be present in merged result")
 	}
 }
+
+// TestDedupResources verifies that duplicate resources (same group/kind/namespace/name)
+// are collapsed to one, last occurrence wins. Resources from different API groups
+// with the same kind name are NOT collapsed.
+func TestDedupResources(t *testing.T) {
+	input := []byte(`apiVersion: v1
+kind: Namespace
+metadata:
+  name: podinfo
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: podinfo
+data:
+  key: first
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: podinfo
+data:
+  key: second
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: podinfo
+  namespace: podinfo
+`)
+	result := dedupResources(input)
+	resultStr := string(result)
+
+	// Count top-level kind lines (after newline or at start).
+	docs := flux.SplitYAMLText(result)
+	if len(docs) != 3 {
+		t.Errorf("expected 3 unique documents, got %d", len(docs))
+	}
+
+	// Last occurrence of ConfigMap should win.
+	if strings.Contains(resultStr, "first") {
+		t.Error("expected 'first' to be replaced by 'second' (last wins)")
+	}
+	if !strings.Contains(resultStr, "second") {
+		t.Error("expected 'second' to be present (last occurrence wins)")
+	}
+}
+
+// TestDedupResources_DifferentGroups verifies that resources with the same
+// kind/namespace/name but different API groups are NOT deduped.
+func TestDedupResources_DifferentGroups(t *testing.T) {
+	input := []byte(`apiVersion: example.com/v1
+kind: Endpoint
+metadata:
+  name: shared
+  namespace: default
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Endpoint
+metadata:
+  name: shared
+  namespace: default
+`)
+	result := dedupResources(input)
+	resultStr := string(result)
+
+	// Both should survive — different API groups.
+	if !strings.Contains(resultStr, "example.com/v1") {
+		t.Error("example.com/v1 Endpoint should survive (different group)")
+	}
+	if !strings.Contains(resultStr, "monitoring.coreos.com/v1") {
+		t.Error("monitoring.coreos.com/v1 Endpoint should survive (different group)")
+	}
+}
+
+// TestFilterByNamespace_NamespaceResource verifies that kind: Namespace
+// with metadata.name matching the filter is included.
+func TestFilterByNamespace_NamespaceResource(t *testing.T) {
+	input := []byte(`apiVersion: v1
+kind: Namespace
+metadata:
+  name: podinfo
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app
+  namespace: podinfo
+data:
+  key: val
+`)
+	result := filterByNamespace(input, "podinfo")
+	resultStr := string(result)
+
+	if !strings.Contains(resultStr, "kind: Namespace") {
+		t.Error("Namespace resource should be included when name matches filter")
+	}
+	if !strings.Contains(resultStr, "kind: ConfigMap") {
+		t.Error("ConfigMap in matching namespace should be included")
+	}
+}
+
+// TestFilterByNamespace_DefaultNamespace verifies that resources with empty
+// metadata.namespace match when filter is "default" (except cluster-scoped kinds).
+func TestFilterByNamespace_DefaultNamespace(t *testing.T) {
+	input := []byte(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: no-namespace
+data:
+  key: val
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: podinfo
+`)
+	result := filterByNamespace(input, "default")
+	resultStr := string(result)
+
+	// ConfigMap with empty namespace should match "default".
+	if !strings.Contains(resultStr, "no-namespace") {
+		t.Error("ConfigMap without namespace should match 'default' filter")
+	}
+	// Namespace resource should NOT match "default" (it's cluster-scoped).
+	if strings.Contains(resultStr, "kind: Namespace") {
+		t.Error("Namespace resource should NOT match 'default' filter")
+	}
+}
