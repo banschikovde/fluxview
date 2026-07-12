@@ -451,20 +451,16 @@ func TestResolveValuesFrom_ValuesKey(t *testing.T) {
 }
 
 // TestResolveValuesFrom_MultiEntryConfigMapNamespaceFallback verifies that
-// ConfigMap namespace fallback works for the 2nd+ valuesFrom entry, not
-// just the first one (regression test for two-pass bug where the condition
-// was accidentally tied to the global result map instead of per-entry found flag).
+// ConfigMap namespace fallback works for the 2nd+ valuesFrom entry.
 func TestResolveValuesFrom_MultiEntryConfigMapNamespaceFallback(t *testing.T) {
 	hr := HelmRelease{
 		Metadata: ObjectMeta{Name: "app", Namespace: "podinfo"},
 		Spec: HelmReleaseSpec{
 			ValuesFrom: []interface{}{
-				// First entry: has exact namespace match.
 				map[string]interface{}{
 					"kind": "ConfigMap",
 					"name": "cm-with-ns",
 				},
-				// Second entry: only has empty-namespace version (raw-parsed).
 				map[string]interface{}{
 					"kind": "ConfigMap",
 					"name": "cm-without-ns",
@@ -479,7 +475,7 @@ func TestResolveValuesFrom_MultiEntryConfigMapNamespaceFallback(t *testing.T) {
 			Data:     map[string]string{"values.yaml": "key1: val1\n"},
 		},
 		{
-			Metadata: ObjectMeta{Name: "cm-without-ns"}, // empty namespace
+			Metadata: ObjectMeta{Name: "cm-without-ns"},
 			Data:     map[string]string{"values.yaml": "key2: val2\n"},
 		},
 	}
@@ -488,14 +484,75 @@ func TestResolveValuesFrom_MultiEntryConfigMapNamespaceFallback(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
-	// First entry (exact match) should have been resolved.
 	if result["key1"] != "val1" {
 		t.Errorf("key1 = %v, want val1 (exact namespace match)", result["key1"])
 	}
-	// Second entry (namespace fallback) should ALSO have been resolved,
-	// even though result was already non-empty from the first entry.
 	if result["key2"] != "val2" {
 		t.Errorf("key2 = %v, want val2 (namespace fallback on 2nd entry)", result["key2"])
+	}
+}
+
+// TestResolveValuesFrom_DifferentNamespaceIgnored verifies that a resource
+// with an explicit different namespace is NOT used as fallback — only
+// empty-namespace resources qualify as fallback candidates.
+func TestResolveValuesFrom_DifferentNamespaceIgnored(t *testing.T) {
+	hr := HelmRelease{
+		Metadata: ObjectMeta{Name: "app", Namespace: "test"},
+		Spec: HelmReleaseSpec{
+			ValuesFrom: []interface{}{
+				map[string]interface{}{
+					"kind": "ConfigMap",
+					"name": "shared-cm",
+				},
+			},
+		},
+	}
+
+	// Two candidates: one in "staging" (different explicit ns), one with empty ns.
+	configMaps := []ConfigMap{
+		{
+			Metadata: ObjectMeta{Name: "shared-cm", Namespace: "staging"},
+			Data:     map[string]string{"values.yaml": "from-staging: true\n"},
+		},
+		{
+			Metadata: ObjectMeta{Name: "shared-cm"}, // empty namespace
+			Data:     map[string]string{"values.yaml": "from-fallback: true\n"},
+		},
+	}
+
+	result := ResolveValuesFrom(hr, configMaps, nil)
+	if result == nil {
+		t.Fatal("expected non-nil result — fallback should find empty-ns ConfigMap")
+	}
+	// Should use the empty-namespace fallback, NOT the staging one.
+	if result["from-staging"] != nil {
+		t.Error("ConfigMap from different explicit namespace should be ignored")
+	}
+	if result["from-fallback"] != true {
+		t.Errorf("expected from-fallback=true, got %v", result["from-fallback"])
+	}
+}
+
+// TestResolveValuesFrom_NotFoundWarning verifies that when no matching resource
+// is found (neither exact nor fallback), a warning is printed to stderr.
+func TestResolveValuesFrom_NotFoundWarning(t *testing.T) {
+	hr := HelmRelease{
+		Metadata: ObjectMeta{Name: "app", Namespace: "test"},
+		Spec: HelmReleaseSpec{
+			ValuesFrom: []interface{}{
+				map[string]interface{}{
+					"kind": "ConfigMap",
+					"name": "nonexistent",
+				},
+			},
+		},
+	}
+
+	// No matching ConfigMap at all.
+	result := ResolveValuesFrom(hr, nil, nil)
+	// result should be non-nil but empty (entry was skipped).
+	if len(result) != 0 {
+		t.Errorf("expected empty result for nonexistent ConfigMap, got %v", result)
 	}
 }
 
