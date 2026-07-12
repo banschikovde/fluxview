@@ -1188,3 +1188,46 @@ metadata:
 		t.Error("directory with Kustomization (no extension) not discovered")
 	}
 }
+
+// TestMergeSources_BuildOutputPriority verifies that when a resource exists
+// in both build output (kustomize-transformed namespace) and raw-parsed
+// (literal namespace from file), the build-output version wins and the
+// raw-parsed version with stale namespace is excluded.
+func TestMergeSources_BuildOutputPriority(t *testing.T) {
+	// Build-output version: correct namespace after kustomize transform.
+	build := []flux.ConfigMap{
+		{Metadata: flux.ObjectMeta{Name: "app-values", Namespace: "podinfo"}},
+	}
+	// Raw-parsed: stale namespace from source file (pre-kustomize).
+	raw := []flux.ConfigMap{
+		{Metadata: flux.ObjectMeta{Name: "app-values", Namespace: "test"}},  // stale
+		{Metadata: flux.ObjectMeta{Name: "other-cm", Namespace: "default"}}, // not in build
+	}
+
+	merged := mergeSources(build, raw, func(c flux.ConfigMap) string { return c.Metadata.Name })
+
+	if len(merged) != 2 {
+		t.Fatalf("expected 2 items (1 from build + 1 new from raw), got %d", len(merged))
+	}
+
+	// First item should be from build (podinfo namespace).
+	if merged[0].Metadata.Namespace != "podinfo" {
+		t.Errorf("expected build-output version (podinfo), got namespace %q", merged[0].Metadata.Namespace)
+	}
+	// Stale raw version (test namespace) must NOT be present.
+	for _, cm := range merged {
+		if cm.Metadata.Name == "app-values" && cm.Metadata.Namespace == "test" {
+			t.Error("stale raw-parsed version should be excluded")
+		}
+	}
+	// New resource from raw (not in build) should be present.
+	found := false
+	for _, cm := range merged {
+		if cm.Metadata.Name == "other-cm" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("raw-only resource 'other-cm' should be present in merged result")
+	}
+}
