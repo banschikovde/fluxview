@@ -53,6 +53,8 @@ func ResolveSubstituteVars(ks Kustomization, configMaps []ConfigMap) map[string]
 			}
 		case "secret":
 			// We cannot read actual secret values; use placeholders.
+			// This is consistent with Flux behavior where secrets are available
+			// at runtime but we don't have access to them locally.
 		}
 	}
 
