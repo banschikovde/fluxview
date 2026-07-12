@@ -450,11 +450,63 @@ func TestResolveValuesFrom_ValuesKey(t *testing.T) {
 	}
 }
 
-// TestResolveValuesFrom_SecretsNotResolved verifies that secret values are
-// NOT injected into Helm rendering. This prevents leakage of real secret
-// values through rendered non-Secret resources (ConfigMaps, annotations, etc.)
-// that RedactSecrets does not cover.
+// TestResolveValuesFrom_MultiEntryConfigMapNamespaceFallback verifies that
+// ConfigMap namespace fallback works for the 2nd+ valuesFrom entry, not
+// just the first one (regression test for two-pass bug where the condition
+// was accidentally tied to the global result map instead of per-entry found flag).
+func TestResolveValuesFrom_MultiEntryConfigMapNamespaceFallback(t *testing.T) {
+	hr := HelmRelease{
+		Metadata: ObjectMeta{Name: "app", Namespace: "podinfo"},
+		Spec: HelmReleaseSpec{
+			ValuesFrom: []interface{}{
+				// First entry: has exact namespace match.
+				map[string]interface{}{
+					"kind": "ConfigMap",
+					"name": "cm-with-ns",
+				},
+				// Second entry: only has empty-namespace version (raw-parsed).
+				map[string]interface{}{
+					"kind": "ConfigMap",
+					"name": "cm-without-ns",
+				},
+			},
+		},
+	}
+
+	configMaps := []ConfigMap{
+		{
+			Metadata: ObjectMeta{Name: "cm-with-ns", Namespace: "podinfo"},
+			Data:     map[string]string{"values.yaml": "key1: val1\n"},
+		},
+		{
+			Metadata: ObjectMeta{Name: "cm-without-ns"}, // empty namespace
+			Data:     map[string]string{"values.yaml": "key2: val2\n"},
+		},
+	}
+
+	result := ResolveValuesFrom(hr, configMaps, nil)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	// First entry (exact match) should have been resolved.
+	if result["key1"] != "val1" {
+		t.Errorf("key1 = %v, want val1 (exact namespace match)", result["key1"])
+	}
+	// Second entry (namespace fallback) should ALSO have been resolved,
+	// even though result was already non-empty from the first entry.
+	if result["key2"] != "val2" {
+		t.Errorf("key2 = %v, want val2 (namespace fallback on 2nd entry)", result["key2"])
+	}
+}
+
+// TestResolveValuesFrom_SecretsNotResolved verifies that real secret values
+// are NOT injected into Helm rendering — instead, YAML-safe placeholder values
+// are used so the chart renders but secrets never leak.
+// Tests with base64-encoded Data (the standard Kubernetes Secret format).
 func TestResolveValuesFrom_SecretsNotResolved(t *testing.T) {
+	// "password: super-secret-password\ntoken: abc123\n" base64-encoded.
+	encoded := "cGFzc3dvcmQ6IHN1cGVyLXNlY3JldC1wYXNzd29yZAp0b2tlbjogYWJjMTIzCg=="
+
 	hr := HelmRelease{
 		Metadata: ObjectMeta{Name: "app", Namespace: "flux-system"},
 		Spec: HelmReleaseSpec{
@@ -471,24 +523,96 @@ func TestResolveValuesFrom_SecretsNotResolved(t *testing.T) {
 		{
 			Metadata: ObjectMeta{Name: "app-secrets", Namespace: "flux-system"},
 			Data: map[string]string{
-				"password": "c2VjcmV0LXBhc3N3b3Jk", // base64 of "secret-password"
-			},
-			StringData: map[string]string{
-				"token": "real-token-value",
+				"values.yaml": encoded, // base64-encoded
 			},
 		},
 	}
 
 	result := ResolveValuesFrom(hr, nil, secrets)
 
-	// Secret values must NOT appear in the result map.
-	if result != nil {
-		if v, ok := result["password"]; ok {
-			t.Errorf("secret value for 'password' leaked into Helm values: %v", v)
-		}
-		if v, ok := result["token"]; ok {
-			t.Errorf("secret value for 'token' leaked into Helm values: %v", v)
-		}
+	if result == nil {
+		t.Fatal("expected non-nil result — secret placeholders should be injected")
+	}
+	if _, ok := result["password"]; !ok {
+		t.Error("secret key 'password' missing from result")
+	}
+	// Real values must NEVER appear.
+	if result["password"] == "super-secret-password" {
+		t.Error("real secret value leaked into Helm values")
+	}
+	if result["password"] != SecretHelmPlaceholder {
+		t.Errorf("expected %q placeholder, got %v", SecretHelmPlaceholder, result["password"])
+	}
+	if result["token"] != SecretHelmPlaceholder {
+		t.Errorf("expected %q placeholder for token, got %v", SecretHelmPlaceholder, result["token"])
+	}
+}
+
+// TestResolveValuesFrom_SecretStringData verifies that stringData (plaintext)
+// secret values are also handled correctly.
+func TestResolveValuesFrom_SecretStringData(t *testing.T) {
+	hr := HelmRelease{
+		Metadata: ObjectMeta{Name: "app", Namespace: "podinfo"},
+		Spec: HelmReleaseSpec{
+			ValuesFrom: []interface{}{
+				map[string]interface{}{
+					"kind":      "Secret",
+					"name":      "app-secrets",
+					"valuesKey": "values.yaml",
+				},
+			},
+		},
+	}
+
+	secrets := []Secret{
+		{
+			Metadata: ObjectMeta{Name: "app-secrets", Namespace: "podinfo"},
+			StringData: map[string]string{
+				"values.yaml": "backend: \"http://example.com\"\n",
+			},
+		},
+	}
+
+	result := ResolveValuesFrom(hr, nil, secrets)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result["backend"] != SecretHelmPlaceholder {
+		t.Errorf("expected %q placeholder, got %v", SecretHelmPlaceholder, result["backend"])
+	}
+}
+
+// TestResolveValuesFrom_SecretNamespaceFallback verifies that secrets without
+// explicit namespace are found when HR has a namespace (raw-parsed secrets).
+func TestResolveValuesFrom_SecretNamespaceFallback(t *testing.T) {
+	hr := HelmRelease{
+		Metadata: ObjectMeta{Name: "app", Namespace: "podinfo"},
+		Spec: HelmReleaseSpec{
+			ValuesFrom: []interface{}{
+				map[string]interface{}{
+					"kind": "Secret",
+					"name": "app-secrets",
+				},
+			},
+		},
+	}
+
+	// Secret with no namespace (raw-parsed from file, no kustomize transform).
+	secrets := []Secret{
+		{
+			Metadata: ObjectMeta{Name: "app-secrets"}, // empty namespace
+			StringData: map[string]string{
+				"values.yaml": "key: value\n",
+			},
+		},
+	}
+
+	result := ResolveValuesFrom(hr, nil, secrets)
+	if result == nil {
+		t.Fatal("expected non-nil result — namespace fallback should find the secret")
+	}
+	if result["key"] != SecretHelmPlaceholder {
+		t.Errorf("expected placeholder via namespace fallback, got %v", result["key"])
 	}
 }
 

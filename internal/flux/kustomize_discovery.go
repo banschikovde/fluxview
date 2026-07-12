@@ -228,3 +228,9 @@ func ParseConfigMapsFromBytes(data []byte) ([]ConfigMap, error) {
 		return api == "v1" && kind == "ConfigMap"
 	})
 }
+
+func ParseSecretsFromBytes(data []byte) ([]Secret, error) {
+	return parseResourcesFromBytes[Secret](data, func(kind, api string) bool {
+		return api == "v1" && kind == "Secret"
+	})
+}

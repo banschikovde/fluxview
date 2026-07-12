@@ -238,18 +238,11 @@ func parseValuesFrom(raw any) []ValuesFromEntry {
 // Returns a merged map of values where later entries in the valuesFrom list override earlier ones
 // (matching Flux behavior where the order matters).
 //
-// Secret values are intentionally NOT resolved — consistent with the
-// postBuild.substituteFrom behavior ("we cannot read actual secret values").
-// Injecting real secret values into Helm rendering risks leaking them through
-// rendered resources (ConfigMaps, annotations, env vars) that RedactSecrets
-// does not cover (it only masks kind: Secret documents). Charts render with
-// placeholder/missing values; structural correctness is preserved.
+// ConfigMap values are parsed as YAML and merged. Secret values are parsed
+// structurally but every leaf is replaced with SecretRedactedValue — this
+// ensures chart templates render correctly while real secret values never
+// appear in the output.
 func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret) map[string]any {
-	// secrets parameter is intentionally unused: real secret values are not
-	// injected into Helm rendering (see function doc comment). Kept in the
-	// signature for API symmetry with configMaps and call-site compatibility.
-	_ = secrets
-
 	entries := parseValuesFrom(hr.Spec.ValuesFrom)
 	if len(entries) == 0 {
 		return nil
@@ -262,23 +255,46 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 		if entryNS == "" {
 			entryNS = hr.Metadata.Namespace
 		}
+		vk := entry.ValuesKey
+		if vk == "" {
+			vk = "values.yaml"
+		}
 
 		switch strings.ToLower(entry.Kind) {
 		case "configmap":
+			found := false
 			for _, cm := range configMaps {
 				if cm.Metadata.Name == entry.Name && cm.Metadata.Namespace == entryNS {
-					// Flux default: valuesKey defaults to "values.yaml" when not specified.
-					vk := entry.ValuesKey
-					if vk == "" {
-						vk = "values.yaml"
-					}
 					mergeConfigMapValues(result, cm.Data, vk)
+					found = true
 					break
 				}
 			}
+			if !found {
+				for _, cm := range configMaps {
+					if cm.Metadata.Name == entry.Name && cm.Metadata.Namespace == "" {
+						mergeConfigMapValues(result, cm.Data, vk)
+						break
+					}
+				}
+			}
 		case "secret":
-			// Deliberately skip: real secret values are not injected into Helm
-			// rendering to prevent leakage through non-Secret resources.
+			found := false
+			for _, secret := range secrets {
+				if secret.Metadata.Name == entry.Name && secret.Metadata.Namespace == entryNS {
+					mergeSecretPlaceholder(result, secret, vk)
+					found = true
+					break
+				}
+			}
+			if !found {
+				for _, secret := range secrets {
+					if secret.Metadata.Name == entry.Name && secret.Metadata.Namespace == "" {
+						mergeSecretPlaceholder(result, secret, vk)
+						break
+					}
+				}
+			}
 		}
 	}
 
@@ -307,6 +323,51 @@ func mergeYAMLString(dst map[string]any, raw string) {
 	}
 	for k, v := range parsed {
 		dst[k] = v
+	}
+}
+
+// mergeSecretPlaceholder injects placeholder values for secret-based valuesFrom.
+// It reads the YAML structure from the secret's data key (same as ConfigMap),
+// but replaces every leaf value with SecretRedactedValue. This ensures:
+//   - Chart templates that reference these values render correctly
+//   - Diff detects changes to secret structure
+//   - Real secret values NEVER appear in the rendered output
+func mergeSecretPlaceholder(result map[string]any, secret Secret, valuesKey string) {
+	// Use GetSecretValue which handles both stringData (plaintext) and
+	// data (base64-encoded), matching real-world Kubernetes Secret manifests.
+	raw := secret.GetSecretValue(valuesKey)
+	if raw == "" {
+		return
+	}
+
+	var parsed map[string]interface{}
+	if err := yaml.Unmarshal([]byte(raw), &parsed); err != nil {
+		return
+	}
+
+	for k, v := range parsed {
+		result[k] = redactRecursive(v)
+	}
+}
+
+// redactRecursive replaces all scalar leaf values with a YAML-safe placeholder,
+// preserving the structure of nested maps and lists.
+func redactRecursive(v any) any {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		result := make(map[string]interface{})
+		for k, child := range val {
+			result[k] = redactRecursive(child)
+		}
+		return result
+	case []interface{}:
+		result := make([]interface{}, len(val))
+		for i, child := range val {
+			result[i] = redactRecursive(child)
+		}
+		return result
+	default:
+		return SecretHelmPlaceholder
 	}
 }
 
