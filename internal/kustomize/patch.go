@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/cyphar/filepath-securejoin"
 	"gopkg.in/yaml.v3"
 	"sigs.k8s.io/kustomize/api/krusty"
 	"sigs.k8s.io/kustomize/api/types"
@@ -33,9 +34,11 @@ type PatchTarget struct {
 
 // ApplyPatches applies kustomize-style patches (JSON6902) to an already
 // materialized set of resources, in memory. No directory on disk needed.
+// baseDir restricts patches[].path resolution — any path escaping baseDir
+// is rejected (prevents path traversal from untrusted repo content).
 // If a patch target doesn't match any resource, the patch is silently
 // skipped (matching Flux/kustomize behavior).
-func ApplyPatches(resources []byte, patches []PatchSpec) ([]byte, error) {
+func ApplyPatches(resources []byte, patches []PatchSpec, baseDir string) ([]byte, error) {
 	if len(patches) == 0 {
 		return resources, nil
 	}
@@ -65,10 +68,17 @@ func ApplyPatches(resources []byte, patches []PatchSpec) ([]byte, error) {
 		Resources: resourceFiles,
 	}
 	for _, p := range patches {
-		// If Path is set, read patch content from file.
+		// If Path is set, read patch content from file (with path traversal protection).
 		patchContent := p.Patch
 		if p.Path != "" {
-			data, err := os.ReadFile(p.Path)
+			resolved, err := securejoin.SecureJoin(baseDir, p.Path)
+			if err != nil {
+				return nil, fmt.Errorf("resolving patch path %s: %w", p.Path, err)
+			}
+			if !IsPathWithinRoot(resolved, baseDir) {
+				return nil, fmt.Errorf("patch path %s escapes base directory", p.Path)
+			}
+			data, err := os.ReadFile(resolved)
 			if err != nil {
 				return nil, fmt.Errorf("reading patch file %s: %w", p.Path, err)
 			}

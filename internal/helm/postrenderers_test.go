@@ -48,7 +48,7 @@ spec:
 	// Simulate InflateHelmRelease's postRenderers loop.
 	postRenderers := [][]kustomize.PatchSpec{patch1, patch2}
 	for _, patches := range postRenderers {
-		patched, err := kustomize.ApplyPatches(converted, patches)
+		patched, err := kustomize.ApplyPatches(converted, patches, "/")
 		if err != nil {
 			t.Fatalf("ApplyPatches: %v", err)
 		}
@@ -105,7 +105,7 @@ spec:
 	// Simulate InflateHelmRelease's postRenderers loop.
 	postRenderers := [][]kustomize.PatchSpec{badPatch, goodPatch}
 	for _, patches := range postRenderers {
-		patched, err := kustomize.ApplyPatches(converted, patches)
+		patched, err := kustomize.ApplyPatches(converted, patches, "/")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to apply postRenderer patches for %s/%s: %v\n",
 				hrNS, hrName, err)

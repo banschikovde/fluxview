@@ -83,19 +83,29 @@ func newRestrictedFs(rootDir string) filesys.FileSystem {
 
 // isWithinRoot checks if path stays within rootDir after resolution.
 func (fs *restrictedFs) isWithinRoot(path string) bool {
+	return IsPathWithinRoot(path, fs.rootDir)
+}
+
+// IsPathWithinRoot checks if path resolves to within root (after symlink
+// resolution on both path and root). Exported for reuse by ApplyPatches.
+func IsPathWithinRoot(path, root string) bool {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	if resolved, err := filepath.EvalSymlinks(absRoot); err == nil {
+		absRoot = resolved
+	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return false
 	}
-	// Resolve symlinks to prevent escape via symlink chains.
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		// Path doesn't exist yet (kustomize may stat before creating) —
-		// check the literal path. EvalSymlinks only fails on non-existent paths.
 		resolved = abs
 	}
-	return resolved == fs.rootDir ||
-		strings.HasPrefix(resolved+string(filepath.Separator), fs.rootDir+string(filepath.Separator))
+	return resolved == absRoot ||
+		strings.HasPrefix(resolved+string(filepath.Separator), absRoot+string(filepath.Separator))
 }
 
 func (fs *restrictedFs) ReadFile(path string) ([]byte, error) {

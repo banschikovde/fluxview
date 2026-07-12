@@ -45,7 +45,7 @@ func NewInflater() (*Inflater, error) {
 // InflateHelmRelease inflates a Flux HelmRelease resource using the Helm Go SDK.
 // It locates/downloads the chart from the given repo URL and renders templates
 // equivalent to: helm template <name> <chart> --repo <url> --version <ver> --namespace <ns> --include-crds
-func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRelease, repoURL string, username, password string, configMaps []fluxtypes.ConfigMap, secrets []fluxtypes.Secret) ([]byte, error) {
+func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRelease, repoURL string, username, password string, configMaps []fluxtypes.ConfigMap, secrets []fluxtypes.Secret, repoRoot string) ([]byte, error) {
 	chartName := hr.Spec.Chart.Spec.Chart
 
 	// Set up the action configuration for template rendering (no k8s cluster needed).
@@ -171,7 +171,7 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 		if pr.Kustomize == nil || len(pr.Kustomize.Patches) == 0 {
 			continue
 		}
-		patched, err := kustomizepkg.ApplyPatches(converted, pr.Kustomize.Patches)
+		patched, err := kustomizepkg.ApplyPatches(converted, pr.Kustomize.Patches, repoRoot)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to apply postRenderer patches for %s/%s: %v\n",
 				hr.Metadata.Namespace, hr.Metadata.Name, err)

@@ -2,6 +2,7 @@ package kustomize
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -28,7 +29,7 @@ spec:
 		},
 	}
 
-	result, err := ApplyPatches(resources, patches)
+	result, err := ApplyPatches(resources, patches, "/")
 	if err != nil {
 		t.Fatalf("ApplyPatches: %v", err)
 	}
@@ -63,7 +64,7 @@ spec:
 		},
 	}
 
-	result, err := ApplyPatches(resources, patches)
+	result, err := ApplyPatches(resources, patches, "/")
 	if err != nil {
 		t.Fatalf("ApplyPatches with no-match target should not error: %v", err)
 	}
@@ -79,7 +80,7 @@ kind: ConfigMap
 metadata:
   name: test
 `)
-	result, err := ApplyPatches(resources, nil)
+	result, err := ApplyPatches(resources, nil, "/")
 	if err != nil {
 		t.Fatalf("ApplyPatches with nil patches: %v", err)
 	}
@@ -119,7 +120,7 @@ spec:
 		},
 	}
 
-	result, err := ApplyPatches(resources, patches)
+	result, err := ApplyPatches(resources, patches, "/")
 	if err != nil {
 		t.Fatalf("ApplyPatches with duplicate Namespace should not error: %v", err)
 	}
@@ -130,8 +131,8 @@ spec:
 
 func TestApplyPatches_FromFile(t *testing.T) {
 	// Create a temp patch file.
-	patchDir := t.TempDir()
-	patchFile := patchDir + "/patch.yaml"
+	baseDir := t.TempDir()
+	patchFile := baseDir + "/patch.yaml"
 	os.WriteFile(patchFile, []byte(`- op: replace
   path: /spec/replicas
   value: 7
@@ -148,15 +149,43 @@ spec:
 	patches := []PatchSpec{
 		{
 			Target: &PatchTarget{Kind: "Deployment", Name: "podinfo"},
-			Path:   patchFile,
+			Path:   "patch.yaml", // relative to baseDir
 		},
 	}
 
-	result, err := ApplyPatches(resources, patches)
+	result, err := ApplyPatches(resources, patches, baseDir)
 	if err != nil {
 		t.Fatalf("ApplyPatches from file: %v", err)
 	}
 	if !strings.Contains(string(result), "replicas: 7") {
 		t.Errorf("expected replicas: 7 from file-based patch:\n%s", string(result))
+	}
+}
+
+func TestApplyPatches_PathTraversalRejected(t *testing.T) {
+	baseDir := t.TempDir()
+	// Write a file outside baseDir.
+	outsideDir := t.TempDir()
+	outsideFile := outsideDir + "/secret.txt"
+	os.WriteFile(outsideFile, []byte("sensitive"), 0644)
+
+	resources := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: podinfo
+spec:
+  replicas: 1
+`)
+	relOutside, _ := filepath.Rel(baseDir, outsideFile)
+	patches := []PatchSpec{
+		{
+			Target: &PatchTarget{Kind: "Deployment", Name: "podinfo"},
+			Path:   relOutside,
+		},
+	}
+
+	_, err := ApplyPatches(resources, patches, baseDir)
+	if err == nil {
+		t.Fatal("expected error for path traversal, got nil")
 	}
 }
