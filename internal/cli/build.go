@@ -290,21 +290,53 @@ func collectKustomizationPaths(repoRoot string, kustomizations []flux.Kustomizat
 
 func buildKustomizeOverlays(clusterPath, repoRoot string, excludePaths map[string]bool, cache buildCache) [][]byte {
 	kustomizeDirs, err := flux.DiscoverKustomizeDirs(clusterPath)
-	if err != nil || len(kustomizeDirs) == 0 {
-		return nil
-	}
-
 	builder := kustomize.NewBuilder(repoRoot)
 	var outputs [][]byte
 
-	for _, dir := range kustomizeDirs {
-		if isExcludedDir(dir, excludePaths) {
-			continue
-		}
-		if output, ok := buildDirCached(builder, dir, cache); ok {
-			outputs = append(outputs, output)
+	// Build native kustomize directories (with kustomization.yaml).
+	builtDirs := make(map[string]bool)
+	if err == nil {
+		for _, dir := range kustomizeDirs {
+			if isExcludedDir(dir, excludePaths) {
+				continue
+			}
+			if output, ok := buildDirCached(builder, dir, cache); ok {
+				outputs = append(outputs, output)
+				builtDirs[dir] = true
+			}
 		}
 	}
+
+	// Also read loose YAML files from directories WITHOUT kustomization.yaml
+	// that are not excluded (not spec.path of any Flux Kustomization) and not
+	// inside an already-built kustomize directory. This ensures resources like
+	// vars/cluster-settings.yaml are included even without a kustomization.yaml.
+	filepath.Walk(clusterPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext != ".yaml" && ext != ".yml" {
+			return nil
+		}
+		// Skip files inside already-built kustomize directories.
+		dir := filepath.Dir(path)
+		for builtDir := range builtDirs {
+			if dir == builtDir || strings.HasPrefix(dir, builtDir+string(filepath.Separator)) {
+				return nil
+			}
+		}
+		// Skip files inside excluded directories (spec.path of Flux Kustomizations).
+		if isExcludedDir(dir, excludePaths) {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		outputs = append(outputs, data)
+		return nil
+	})
 
 	return outputs
 }

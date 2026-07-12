@@ -1315,6 +1315,55 @@ spec:
 	}
 }
 
+// TestBuildKustomizeOverlays_LooseFiles verifies that loose YAML files in
+// directories WITHOUT kustomization.yaml under clusterPath are included
+// in the output (previously they were silently dropped).
+func TestBuildKustomizeOverlays_LooseFiles(t *testing.T) {
+	clusterPath := t.TempDir()
+
+	// Directory with kustomization.yaml.
+	kustDir := filepath.Join(clusterPath, "overlay")
+	writeHelper(t, kustDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cm.yaml
+`)
+	writeHelper(t, kustDir, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: from-kustomize
+`)
+
+	// Directory WITHOUT kustomization.yaml — loose files.
+	looseDir := filepath.Join(clusterPath, "vars")
+	writeHelper(t, looseDir, "settings.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-settings
+  namespace: flux-system
+data:
+  CLUSTER_NAME: test
+`)
+
+	outputs := buildKustomizeOverlays(clusterPath, clusterPath, map[string]bool{}, make(buildCache))
+	combined := ""
+	for _, o := range outputs {
+		if len(combined) > 0 {
+			combined += "\n"
+		}
+		combined += string(o)
+	}
+
+	// Kustomized resource should be present.
+	if !strings.Contains(combined, "from-kustomize") {
+		t.Error("resource from kustomized directory missing")
+	}
+	// Loose-file resource should also be present.
+	if !strings.Contains(combined, "cluster-settings") {
+		t.Error("loose YAML resource from directory without kustomization.yaml missing")
+	}
+}
+
 // TestDedupResources verifies that duplicate resources (same group/kind/namespace/name)
 // are collapsed to one, last occurrence wins. Resources from different API groups
 // with the same kind name are NOT collapsed.
