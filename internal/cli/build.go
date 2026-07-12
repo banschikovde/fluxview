@@ -339,30 +339,36 @@ func buildKustomizeOverlays(clusterPath, repoRoot string, excludePaths map[strin
 		if err != nil {
 			return nil
 		}
-		// Only include files that look like k8s resources.
-		if !looksLikeK8sResource(data) {
-			return nil
+		// Only include documents that look like k8s resources.
+		filtered := filterK8sResources(data)
+		if filtered != nil {
+			outputs = append(outputs, filtered)
 		}
-		outputs = append(outputs, data)
 		return nil
 	})
 
 	return outputs
 }
 
-// looksLikeK8sResource checks if YAML data contains at least one document
-// with non-empty apiVersion and kind at the top level.
-func looksLikeK8sResource(data []byte) bool {
+// filterK8sResources returns only documents that look like k8s resources
+// (have non-empty apiVersion and kind). Non-resource documents in a
+// multi-doc YAML file are silently dropped.
+func filterK8sResources(data []byte) []byte {
+	var result []string
 	for _, doc := range flux.SplitYAMLText(data) {
 		var meta struct {
 			APIVersion string `yaml:"apiVersion"`
 			Kind       string `yaml:"kind"`
 		}
-		if yaml.Unmarshal([]byte(doc), &meta) == nil && meta.APIVersion != "" && meta.Kind != "" {
-			return true
+		if yaml.Unmarshal([]byte(doc), &meta) != nil || meta.APIVersion == "" || meta.Kind == "" {
+			continue
 		}
+		result = append(result, doc)
 	}
-	return false
+	if len(result) == 0 {
+		return nil
+	}
+	return []byte(strings.Join(result, "\n---\n"))
 }
 
 func isExcludedDir(dir string, excludePaths map[string]bool) bool {
