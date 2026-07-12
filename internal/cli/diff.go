@@ -436,20 +436,22 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 	return dedupResources([]byte(combined)), nil
 }
 
-// dedupResources removes duplicate YAML documents by kind/namespace/name.
-// Last occurrence wins.
+// dedupResources removes duplicate YAML documents by group/kind/namespace/name.
+// Last occurrence wins. Group is extracted from apiVersion to distinguish
+// resources from different API groups that share the same kind name.
 func dedupResources(data []byte) []byte {
 	docs := flux.SplitYAMLText(data)
 	type resourceKey struct {
-		kind, namespace, name string
+		group, kind, namespace, name string
 	}
 	seen := make(map[resourceKey]int) // key → index in result
 	var result []string
 
 	for _, doc := range docs {
 		var meta struct {
-			Kind     string `yaml:"kind"`
-			Metadata struct {
+			APIVersion string `yaml:"apiVersion"`
+			Kind       string `yaml:"kind"`
+			Metadata   struct {
 				Name      string `yaml:"name"`
 				Namespace string `yaml:"namespace"`
 			} `yaml:"metadata"`
@@ -463,7 +465,13 @@ func dedupResources(data []byte) []byte {
 			continue
 		}
 
-		key := resourceKey{meta.Kind, meta.Metadata.Namespace, meta.Metadata.Name}
+		// Extract group from apiVersion (e.g. "apps/v1" → "apps", "v1" → "").
+		group := ""
+		if idx := strings.Index(meta.APIVersion, "/"); idx > 0 {
+			group = meta.APIVersion[:idx]
+		}
+
+		key := resourceKey{group, meta.Kind, meta.Metadata.Namespace, meta.Metadata.Name}
 		if idx, ok := seen[key]; ok {
 			// Replace existing occurrence.
 			result[idx] = doc

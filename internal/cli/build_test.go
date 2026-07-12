@@ -1232,8 +1232,9 @@ func TestMergeSources_BuildOutputPriority(t *testing.T) {
 	}
 }
 
-// TestDedupResources verifies that duplicate resources (same kind/namespace/name)
-// are collapsed to one, last occurrence wins.
+// TestDedupResources verifies that duplicate resources (same group/kind/namespace/name)
+// are collapsed to one, last occurrence wins. Resources from different API groups
+// with the same kind name are NOT collapsed.
 func TestDedupResources(t *testing.T) {
 	input := []byte(`apiVersion: v1
 kind: Namespace
@@ -1265,10 +1266,10 @@ metadata:
 	result := dedupResources(input)
 	resultStr := string(result)
 
-	// Should have 2 unique resources (Namespace + HelmRelease), ConfigMap deduped to 1.
-	docCount := strings.Count(resultStr, "kind: ")
-	if docCount != 3 {
-		t.Errorf("expected 3 unique documents, got %d", docCount)
+	// Count top-level kind lines (after newline or at start).
+	docs := flux.SplitYAMLText(result)
+	if len(docs) != 3 {
+		t.Errorf("expected 3 unique documents, got %d", len(docs))
 	}
 
 	// Last occurrence of ConfigMap should win.
@@ -1277,6 +1278,33 @@ metadata:
 	}
 	if !strings.Contains(resultStr, "second") {
 		t.Error("expected 'second' to be present (last occurrence wins)")
+	}
+}
+
+// TestDedupResources_DifferentGroups verifies that resources with the same
+// kind/namespace/name but different API groups are NOT deduped.
+func TestDedupResources_DifferentGroups(t *testing.T) {
+	input := []byte(`apiVersion: example.com/v1
+kind: Endpoint
+metadata:
+  name: shared
+  namespace: default
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Endpoint
+metadata:
+  name: shared
+  namespace: default
+`)
+	result := dedupResources(input)
+	resultStr := string(result)
+
+	// Both should survive — different API groups.
+	if !strings.Contains(resultStr, "example.com/v1") {
+		t.Error("example.com/v1 Endpoint should survive (different group)")
+	}
+	if !strings.Contains(resultStr, "monitoring.coreos.com/v1") {
+		t.Error("monitoring.coreos.com/v1 Endpoint should survive (different group)")
 	}
 }
 

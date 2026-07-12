@@ -198,8 +198,9 @@ func filterByNamespace(data []byte, namespace string) []byte {
 	var result []string
 	for _, doc := range docs {
 		var meta struct {
-			Kind     string `yaml:"kind"`
-			Metadata struct {
+			APIVersion string `yaml:"apiVersion"`
+			Kind       string `yaml:"kind"`
+			Metadata   struct {
 				Name      string `yaml:"name"`
 				Namespace string `yaml:"namespace"`
 			} `yaml:"metadata"`
@@ -209,8 +210,8 @@ func filterByNamespace(data []byte, namespace string) []byte {
 			continue
 		}
 
-		// Namespace resources: match by metadata.name.
-		if meta.Kind == "Namespace" && meta.Metadata.Name == namespace {
+		// Namespace resources (v1): match by metadata.name.
+		if meta.APIVersion == "v1" && meta.Kind == "Namespace" && meta.Metadata.Name == namespace {
 			result = append(result, doc)
 			continue
 		}
