@@ -254,6 +254,7 @@ type ValuesFromEntry struct {
 	Kind      string `yaml:"kind"`
 	Name      string `yaml:"name"`
 	Namespace string `yaml:"namespace,omitempty"`
+	ValuesKey string `yaml:"valuesKey,omitempty"`
 	Optional  bool   `yaml:"optional,omitempty"`
 }
 

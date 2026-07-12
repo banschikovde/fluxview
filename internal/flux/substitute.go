@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // substituteFromEntry represents a single entry in the postBuild.substituteFrom list.
@@ -218,6 +220,9 @@ func parseValuesFrom(raw any) []ValuesFromEntry {
 				if ns, ok := m["namespace"].(string); ok {
 					entry.Namespace = ns
 				}
+				if vk, ok := m["valuesKey"].(string); ok {
+					entry.ValuesKey = vk
+				}
 				if optional, ok := m["optional"].(bool); ok {
 					entry.Optional = optional
 				}
@@ -262,9 +267,12 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 		case "configmap":
 			for _, cm := range configMaps {
 				if cm.Metadata.Name == entry.Name && cm.Metadata.Namespace == entryNS {
-					for k, v := range cm.Data {
-						result[k] = v
+					// Flux default: valuesKey defaults to "values.yaml" when not specified.
+					vk := entry.ValuesKey
+					if vk == "" {
+						vk = "values.yaml"
 					}
+					mergeConfigMapValues(result, cm.Data, vk)
 					break
 				}
 			}
@@ -275,6 +283,31 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 	}
 
 	return result
+}
+
+// mergeConfigMapValues selects the value at valuesKey from ConfigMap data,
+// parses it as YAML, and merges the top-level keys into result.
+// This matches Flux HelmController behavior: the ConfigMap data key
+// (default "values.yaml") contains a YAML document whose keys become
+// Helm chart values.
+func mergeConfigMapValues(result map[string]any, data map[string]string, valuesKey string) {
+	raw, ok := data[valuesKey]
+	if !ok {
+		return
+	}
+	mergeYAMLString(result, raw)
+}
+
+// mergeYAMLString parses a YAML string and merges its top-level keys into dst.
+// If the string is a scalar (not a map), it is silently skipped.
+func mergeYAMLString(dst map[string]any, raw string) {
+	var parsed map[string]interface{}
+	if err := yaml.Unmarshal([]byte(raw), &parsed); err != nil {
+		return
+	}
+	for k, v := range parsed {
+		dst[k] = v
+	}
 }
 
 // SubstituteNeeded returns true if the Kustomization has postBuild substitution configured.
