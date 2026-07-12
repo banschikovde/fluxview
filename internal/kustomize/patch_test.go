@@ -86,3 +86,43 @@ metadata:
 		t.Error("empty patches should return resources unchanged")
 	}
 }
+
+func TestApplyPatches_DuplicateResourceIDs(t *testing.T) {
+	// Two resources with same kind/name/namespace — kustomize would reject
+	// these in a single file, but as separate files they're fine.
+	resources := []byte(`apiVersion: v1
+kind: Namespace
+metadata:
+  name: podinfo
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: podinfo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: podinfo
+  namespace: podinfo
+spec:
+  replicas: 1
+`)
+	patches := []PatchSpec{
+		{
+			Target: &PatchTarget{Kind: "Deployment", Name: "podinfo"},
+			Patch: `- op: replace
+  path: /spec/replicas
+  value: 3
+`,
+		},
+	}
+
+	result, err := ApplyPatches(resources, patches)
+	if err != nil {
+		t.Fatalf("ApplyPatches with duplicate Namespace should not error: %v", err)
+	}
+	if !strings.Contains(string(result), "replicas: 3") {
+		t.Error("patch should be applied despite duplicate resource IDs in input")
+	}
+}
