@@ -398,6 +398,17 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 				}
 			}
 
+			// Apply Kustomization.spec.patches (JSON6902).
+			if len(ks.Spec.Patches) > 0 {
+				patched, err := kustomize.ApplyPatches(output, ks.Spec.Patches)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to apply patches for %s/%s: %v\n",
+						ks.Metadata.Namespace, ks.Metadata.Name, err)
+				} else {
+					output = patched
+				}
+			}
+
 			// Scan output for new resources (KS only).
 			newKS := discoverResourcesFromOutput(output, seen)
 			if len(newKS) > 0 {

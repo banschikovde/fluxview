@@ -20,6 +20,7 @@ import (
 	"helm.sh/helm/v4/pkg/storage/driver"
 
 	fluxtypes "github.com/banschikovde/fluxview/internal/flux"
+	kustomizepkg "github.com/banschikovde/fluxview/internal/kustomize"
 )
 
 // Inflater renders Helm charts via the Helm Go SDK.
@@ -163,6 +164,19 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 	if err != nil {
 		// If conversion fails, return original manifest
 		return []byte(manifest), nil
+	}
+
+	// Apply postRenderers (kustomize patches) if configured.
+	if len(hr.Spec.PostRenderers) > 0 {
+		for _, pr := range hr.Spec.PostRenderers {
+			if pr.Kustomize != nil && len(pr.Kustomize.Patches) > 0 {
+				patched, err := kustomizepkg.ApplyPatches(converted, pr.Kustomize.Patches)
+				if err != nil {
+					return converted, nil // don't fail on patch error
+				}
+				converted = patched
+			}
+		}
 	}
 
 	return converted, nil

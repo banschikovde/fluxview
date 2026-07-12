@@ -3,6 +3,8 @@ package flux
 
 import (
 	"encoding/base64"
+
+	"github.com/banschikovde/fluxview/internal/kustomize"
 )
 
 // Supported Flux API versions and kinds.
@@ -65,8 +67,8 @@ type KustomizationSpec struct {
 	DependsOn []DependsOnEntry `yaml:"dependsOn,omitempty"`
 	// PostBuild contains post-build substitutions.
 	PostBuild *PostBuild `yaml:"postBuild,omitempty"`
-	// Patches lists patches to apply.
-	Patches any `yaml:"patches,omitempty"`
+	// Patches lists JSON6902 patches to apply to the build output.
+	Patches []kustomize.PatchSpec `yaml:"patches,omitempty"`
 	// Images lists image overrides.
 	Images any `yaml:"images,omitempty"`
 	// Suspend indicates if the resource is suspended.
@@ -142,6 +144,18 @@ type HelmReleaseSpec struct {
 	Upgrade any `yaml:"upgrade,omitempty"`
 	// DependsOn lists dependencies.
 	DependsOn []DependsOnEntry `yaml:"dependsOn,omitempty"`
+	// PostRenderers lists post-renderers applied after helm template.
+	PostRenderers []PostRenderer `yaml:"postRenderers,omitempty"`
+}
+
+// PostRenderer represents a single postRenderer entry.
+type PostRenderer struct {
+	Kustomize *PostRendererKustomize `yaml:"kustomize,omitempty"`
+}
+
+// PostRendererKustomize holds kustomize patches for post-rendering.
+type PostRendererKustomize struct {
+	Patches []kustomize.PatchSpec `yaml:"patches,omitempty"`
 }
 
 // HelmReleaseChart references the Helm chart to use.
