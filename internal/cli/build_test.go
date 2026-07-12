@@ -1364,6 +1364,78 @@ data:
 	}
 }
 
+// TestBuildKustomizeOverlays_FailedBuildNoLeak verifies that when a directory
+// HAS kustomization.yaml but the build fails, its raw YAML files do NOT
+// leak into the output (no garbage kustomization.yaml, no untransformed resources).
+func TestBuildKustomizeOverlays_FailedBuildNoLeak(t *testing.T) {
+	clusterPath := t.TempDir()
+
+	// Directory with kustomization.yaml referencing a missing resource.
+	failDir := filepath.Join(clusterPath, "vars")
+	writeHelper(t, failDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - missing.yaml
+`)
+	writeHelper(t, failDir, "settings.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-settings
+  namespace: flux-system
+data:
+  CLUSTER_NAME: test
+`)
+
+	outputs := buildKustomizeOverlays(clusterPath, clusterPath, map[string]bool{}, make(buildCache))
+	combined := ""
+	for _, o := range outputs {
+		if len(combined) > 0 {
+			combined += "\n"
+		}
+		combined += string(o)
+	}
+
+	// Neither the kustomization.yaml (garbage) nor the raw settings.yaml
+	// should appear — the directory has a kustomization.yaml, build failed,
+	// loose-file walker must skip it entirely.
+	if strings.Contains(combined, "kustomize.config.k8s.io") {
+		t.Error("kustomization.yaml should NOT leak into output when build fails")
+	}
+	if strings.Contains(combined, "cluster-settings") {
+		t.Error("raw YAML from failed-build directory should NOT leak into output")
+	}
+}
+
+// TestBuildKustomizeOverlays_NonK8sYamlSkipped verifies that loose YAML
+// files that don't look like k8s resources (no apiVersion + kind) are skipped.
+func TestBuildKustomizeOverlays_NonK8sYamlSkipped(t *testing.T) {
+	clusterPath := t.TempDir()
+
+	// Loose file that is NOT a k8s resource.
+	writeHelper(t, clusterPath, "README.yaml", `title: Some Documentation
+description: Not a k8s resource
+`)
+	// Loose file that IS a k8s resource.
+	writeHelper(t, clusterPath, "config.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: real-resource
+`)
+
+	outputs := buildKustomizeOverlays(clusterPath, clusterPath, map[string]bool{}, make(buildCache))
+	combined := ""
+	for _, o := range outputs {
+		combined += string(o)
+	}
+
+	if strings.Contains(combined, "Some Documentation") {
+		t.Error("non-k8s YAML should be skipped")
+	}
+	if !strings.Contains(combined, "real-resource") {
+		t.Error("valid k8s resource should be included")
+	}
+}
+
 // TestDedupResources verifies that duplicate resources (same group/kind/namespace/name)
 // are collapsed to one, last occurrence wins. Resources from different API groups
 // with the same kind name are NOT collapsed.

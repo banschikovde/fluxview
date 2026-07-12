@@ -571,17 +571,19 @@ func buildSubdirectoriesAndLooseFiles(builder *kustomize.Builder, sourcePath str
 		return readYAMLFilesRecursive(sourcePath)
 	}
 
-	builtDirs := make(map[string]bool)
+	// Track ALL directories that have a kustomization.yaml (attempted build),
+	// not just successful ones. Loose-file walker must skip these entirely.
+	kustDirs := make(map[string]bool)
 	var results []string
 
 	for _, dir := range kustomizeDirs {
+		kustDirs[dir] = true
 		if output, ok := buildDirCached(builder, dir, cache); ok {
 			results = append(results, string(output))
-			builtDirs[dir] = true
 		}
 	}
 
-	// Read loose YAML files not inside any built kustomize directory.
+	// Read loose YAML files not inside any kustomize directory.
 	err = filepath.Walk(sourcePath, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
@@ -590,10 +592,10 @@ func buildSubdirectoriesAndLooseFiles(builder *kustomize.Builder, sourcePath str
 		if ext != ".yaml" && ext != ".yml" {
 			return nil
 		}
-		// Skip files inside directories that were already built by kustomize.
 		dir := filepath.Dir(path)
-		for builtDir := range builtDirs {
-			if dir == builtDir || strings.HasPrefix(dir, builtDir+string(filepath.Separator)) {
+		// Skip files inside any directory that has a kustomization.yaml.
+		for kd := range kustDirs {
+			if dir == kd || strings.HasPrefix(dir, kd+string(filepath.Separator)) {
 				return nil
 			}
 		}
