@@ -146,13 +146,33 @@ func dedupInputDocs(data []byte) []byte {
 }
 
 // splitYAMLDocs splits multi-doc YAML on document separators.
+// A separator is a line that is exactly "---" at column 0 (no indentation),
+// matching the same logic as flux.SplitYAMLText to avoid false splits on
+// content like -----BEGIN CERTIFICATE----- inside block scalars.
 func splitYAMLDocs(data []byte) []string {
+	lines := strings.Split(string(data), "\n")
 	var docs []string
-	for _, doc := range strings.Split(string(data), "\n---") {
-		d := strings.TrimSpace(doc)
-		if d != "" {
-			docs = append(docs, d)
+	var current []string
+
+	flush := func() {
+		if len(current) == 0 {
+			return
 		}
+		doc := strings.TrimSpace(strings.Join(current, "\n"))
+		if doc != "" {
+			docs = append(docs, doc)
+		}
+		current = nil
 	}
+
+	for _, line := range lines {
+		if strings.TrimRight(line, " \t") == "---" {
+			flush()
+			continue
+		}
+		current = append(current, line)
+	}
+	flush()
+
 	return docs
 }
