@@ -488,8 +488,8 @@ func TestResolveValuesFrom_SecretsNotResolved(t *testing.T) {
 	if result["password"] == "super-secret-password" {
 		t.Error("real secret value leaked into Helm values")
 	}
-	if result["password"] != SecretHelmPlaceholder {
-		t.Errorf("expected %q placeholder, got %v", SecretHelmPlaceholder, result["password"])
+	if result["password"] != SecretRedactedValue {
+		t.Errorf("expected %q placeholder, got %v", SecretRedactedValue, result["password"])
 	}
 }
 

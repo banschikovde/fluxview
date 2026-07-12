@@ -360,7 +360,7 @@ func redactRecursive(v any) any {
 		}
 		return result
 	default:
-		return SecretHelmPlaceholder
+		return SecretRedactedValue
 	}
 }
 
