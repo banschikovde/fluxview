@@ -126,3 +126,74 @@ func TestInflateHelmRelease_CRDDefault(t *testing.T) {
 		})
 	}
 }
+
+// TestInflateHelmRelease_ReleaseName verifies that spec.releaseName overrides
+// the Helm release name ({{ .Release.Name }} in templates), falling back to
+// metadata.name when unset.
+func TestInflateHelmRelease_ReleaseName(t *testing.T) {
+	chartDir := filepath.Join(t.TempDir(), "testchart")
+	// Chart with a label derived from the release name.
+	write := func(path, content string) {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	write(filepath.Join(chartDir, "Chart.yaml"), `apiVersion: v2
+name: testchart
+version: 1.0.0
+`)
+	write(filepath.Join(chartDir, "values.yaml"), "")
+	write(filepath.Join(chartDir, "templates", "cm.yaml"), `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+data:
+  release: {{ .Release.Name }}
+`)
+
+	inflater, err := NewInflater()
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+
+	t.Run("explicit releaseName", func(t *testing.T) {
+		hr := flux.HelmRelease{
+			Metadata: flux.ObjectMeta{Name: "my-hr", Namespace: "test"},
+			Spec: flux.HelmReleaseSpec{
+				Chart:       flux.HelmReleaseChart{Spec: flux.HelmReleaseChartSpec{Chart: chartDir}},
+				ReleaseName: "custom-release",
+			},
+		}
+		out, err := inflater.InflateHelmRelease(context.Background(), hr, "", "", "", nil, nil, "")
+		if err != nil {
+			t.Fatalf("InflateHelmRelease: %v", err)
+		}
+		rendered := string(out)
+		if !strings.Contains(rendered, "custom-release-config") {
+			t.Errorf("expected resource named after releaseName 'custom-release':\n%s", rendered)
+		}
+		if strings.Contains(rendered, "my-hr-config") {
+			t.Errorf("resource should use releaseName, not metadata.name:\n%s", rendered)
+		}
+	})
+
+	t.Run("defaults to metadata.name", func(t *testing.T) {
+		hr := flux.HelmRelease{
+			Metadata: flux.ObjectMeta{Name: "my-hr", Namespace: "test"},
+			Spec: flux.HelmReleaseSpec{
+				Chart: flux.HelmReleaseChart{Spec: flux.HelmReleaseChartSpec{Chart: chartDir}},
+			},
+		}
+		out, err := inflater.InflateHelmRelease(context.Background(), hr, "", "", "", nil, nil, "")
+		if err != nil {
+			t.Fatalf("InflateHelmRelease: %v", err)
+		}
+		rendered := string(out)
+		if !strings.Contains(rendered, "my-hr-config") {
+			t.Errorf("expected resource named after metadata.name 'my-hr' as fallback:\n%s", rendered)
+		}
+	})
+}

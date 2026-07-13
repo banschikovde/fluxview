@@ -145,6 +145,9 @@ type HelmReleaseSpec struct {
 	Suspend bool `yaml:"suspend,omitempty"`
 	// TargetNamespace overrides the release namespace.
 	TargetNamespace string `yaml:"targetNamespace,omitempty"`
+	// ReleaseName overrides the Helm release name (defaults to metadata.name).
+	// Affects {{ .Release.Name }} in chart templates.
+	ReleaseName string `yaml:"releaseName,omitempty"`
 	// Install holds install-specific configuration.
 	Install *InstallSpec `yaml:"install,omitempty"`
 	// Upgrade holds upgrade-specific configuration.
