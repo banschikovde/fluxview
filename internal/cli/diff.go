@@ -609,14 +609,18 @@ func buildSubdirectoriesAndLooseFiles(builder *kustomize.Builder, sourcePath str
 
 	// Track ALL directories that have a kustomization.yaml (attempted build),
 	// not just successful ones. Loose-file walker must skip these entirely.
+	// Also includes orphan kind: Component dirs (any kustomization file) so their
+	// files don't leak as raw resources.
 	kustDirs := make(map[string]bool)
 	var results []string
-
 	for _, dir := range kustomizeDirs {
 		kustDirs[dir] = true
 		if output, ok := buildDirCached(builder, dir, cache); ok {
 			results = append(results, string(output))
 		}
+	}
+	for _, dir := range mustDiscoverKustomizationFileDirs(sourcePath) {
+		kustDirs[dir] = true
 	}
 
 	// Read loose YAML files not inside any kustomize directory.

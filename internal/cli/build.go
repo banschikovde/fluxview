@@ -310,6 +310,13 @@ func buildKustomizeOverlays(clusterPath, repoRoot string, excludePaths map[strin
 			}
 		}
 	}
+	// Also skip ANY directory containing a kustomization file (any kind),
+	// including orphan kind: Component dirs not returned by DiscoverKustomizeDirs.
+	// Their files are kustomize inputs, not standalone resources — the loose-file
+	// walker must not emit them raw (neither the Component doc nor its resources).
+	for _, dir := range mustDiscoverKustomizationFileDirs(clusterPath) {
+		kustDirs[dir] = true
+	}
 
 	// Read loose YAML files from directories WITHOUT kustomization.yaml
 	// that are not excluded and not inside any kustomize directory.
@@ -381,6 +388,14 @@ func isExcludedDir(dir string, excludePaths map[string]bool) bool {
 		}
 	}
 	return false
+}
+
+// mustDiscoverKustomizationFileDirs returns directories under root that contain
+// a kustomization file of any kind (Kustomization or Component). Errors are
+// treated as "no dirs" — discovery failure must not abort the loose-file walker.
+func mustDiscoverKustomizationFileDirs(root string) []string {
+	dirs, _ := flux.DiscoverKustomizationFileDirs(root)
+	return dirs
 }
 
 // --- ConfigMaps ---

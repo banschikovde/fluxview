@@ -1728,3 +1728,56 @@ metadata:
 		t.Error("Namespace resource should NOT match 'default' filter")
 	}
 }
+
+// TestBuildKustomizeOverlays_OrphanComponentNoLeak verifies that an orphan
+// kind: Component directory (not referenced by any Kustomization) does NOT
+// leak into the output — neither its kustomization.yaml (the Component doc) nor
+// its referenced resource files. Components are kustomize inputs, not standalone
+// resources; only a parent Kustomization referencing them via components: should
+// pull them in.
+func TestBuildKustomizeOverlays_OrphanComponentNoLeak(t *testing.T) {
+	clusterPath := t.TempDir()
+
+	// Orphan Component directory with a kustomization.yaml (kind: Component)
+	// and a referenced resource.
+	compDir := filepath.Join(clusterPath, "components", "foo")
+	writeHelper(t, compDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - dep.yaml
+`)
+	writeHelper(t, compDir, "dep.yaml", `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: comp-app
+`)
+
+	// A legitimate loose resource elsewhere — must still be present.
+	writeHelper(t, clusterPath, "real.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: real-cm
+`)
+
+	outputs := buildKustomizeOverlays(clusterPath, clusterPath, map[string]bool{}, make(buildCache))
+	combined := ""
+	for _, o := range outputs {
+		if len(combined) > 0 {
+			combined += "\n"
+		}
+		combined += string(o)
+	}
+
+	// The orphan Component doc must not leak.
+	if strings.Contains(combined, "kind: Component") {
+		t.Errorf("orphan Component doc leaked into output:\n%s", combined)
+	}
+	// Its referenced resource must not leak either.
+	if strings.Contains(combined, "comp-app") {
+		t.Errorf("orphan Component resource 'comp-app' leaked into output:\n%s", combined)
+	}
+	// The legitimate loose resource must still be present.
+	if !strings.Contains(combined, "real-cm") {
+		t.Errorf("legitimate loose resource 'real-cm' missing from output:\n%s", combined)
+	}
+}

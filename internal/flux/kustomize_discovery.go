@@ -120,6 +120,27 @@ func DiscoverKustomizeDirs(rootPath string) ([]string, error) {
 	return dirs, nil
 }
 
+// DiscoverKustomizationFileDirs returns all directories under rootPath that
+// contain a kustomization file (kustomization.yaml/yml/Kustomization),
+// regardless of the declared kind. The loose-file walker uses this to skip any
+// such directory's files so they don't leak as raw, untransformed resources —
+// this notably covers orphan kind: Component directories (not referenced by any
+// Kustomization) whose kustomization.yaml and resource inputs would otherwise
+// appear in the output. Only kind: Kustomization directories are actually built.
+func DiscoverKustomizationFileDirs(rootPath string) ([]string, error) {
+	var dirs []string
+	err := filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil
+		}
+		if readKustomizationFile(path) != nil {
+			dirs = append(dirs, path)
+		}
+		return nil
+	})
+	return dirs, err
+}
+
 // readKustomizationFile reads the first found kustomization file in dir.
 func readKustomizationFile(dir string) []byte {
 	for _, name := range []string{"kustomization.yaml", "kustomization.yml", "Kustomization"} {
