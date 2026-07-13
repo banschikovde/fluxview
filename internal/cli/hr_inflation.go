@@ -151,6 +151,13 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 				}
 				hr.Spec.Chart.Spec.Chart = resolved
 				// repoURL stays empty → InflateHelmRelease renders from the local directory.
+			} else if hr.Spec.Chart.Spec.SourceRef.Kind == flux.KindBucket {
+				// Bucket content lives in object storage, never in the local git
+				// checkout, so it cannot be resolved offline. Emit a dedicated,
+				// explicit warning (see README limitations).
+				fmt.Fprintf(os.Stderr, "Warning: Bucket-sourced chart for HelmRelease %s/%s (chart %q) is not supported, skipping\n",
+					hr.Metadata.Namespace, hr.Metadata.Name, hr.Spec.Chart.Spec.Chart)
+				continue
 			} else {
 				repoURL, username, password = resolveHelmRepoURL(hr, helmRepos, secrets)
 				if repoURL == "" {

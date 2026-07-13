@@ -1052,6 +1052,48 @@ spec:
 	}
 }
 
+// TestInflateHelmReleasesShared_BucketUnsupported verifies that a Bucket-sourced
+// HelmRelease is skipped with an explicit "not supported" warning (rather than
+// the generic "HelmRepository not found" message, which is misleading for Bucket).
+func TestInflateHelmReleasesShared_BucketUnsupported(t *testing.T) {
+	repoRoot := t.TempDir()
+	hr := []flux.HelmRelease{{
+		Metadata: flux.ObjectMeta{Name: "app", Namespace: "apps"},
+		Spec: flux.HelmReleaseSpec{
+			Chart: flux.HelmReleaseChart{
+				Spec: flux.HelmReleaseChartSpec{
+					Chart: "./charts/my-chart",
+					SourceRef: struct {
+						Kind      string `yaml:"kind"`
+						Name      string `yaml:"name"`
+						Namespace string `yaml:"namespace,omitempty"`
+					}{Kind: flux.KindBucket, Name: "my-bucket"},
+				},
+			},
+		},
+	}}
+
+	inflater, err := helm.NewInflater()
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+
+	var outputs [][]byte
+	stderr := captureStderr(func() {
+		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, true, repoRoot)
+	})
+
+	if len(outputs) != 0 {
+		t.Errorf("expected 0 outputs for Bucket-sourced chart, got %d", len(outputs))
+	}
+	if !strings.Contains(stderr, "Bucket-sourced chart") || !strings.Contains(stderr, "not supported") {
+		t.Errorf("expected explicit 'Bucket-sourced chart ... not supported' warning, got:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "HelmRepository not found") {
+		t.Errorf("Bucket case must not emit the generic 'HelmRepository not found' warning, got:\n%s", stderr)
+	}
+}
+
 // TestInflateHelmReleasesShared_LocalSourceChartMissing verifies that when the
 // chart path of a GitRepository-sourced HelmRelease does not exist locally, a
 // warning is printed and the release is skipped.
