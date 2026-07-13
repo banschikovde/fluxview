@@ -562,6 +562,67 @@ func namespaceOfBuildTest(t *testing.T, data []byte, kind, name string) string {
 	return ""
 }
 
+// Test: Kustomization.spec.images rewrites container image references via the
+// kustomize image transformer.
+func TestBuildAllKustomizations_Images(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	overlayDir := filepath.Join(repoRoot, "apps", "base")
+	writeHelper(t, overlayDir, "deployment.yaml", `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          image: podinfo:5.0.0
+`)
+	writeHelper(t, overlayDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - deployment.yaml
+`)
+
+	clusterPath := filepath.Join(repoRoot, "clusters", "test")
+	writeHelper(t, clusterPath, "ks.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: app
+  namespace: flux-system
+spec:
+  path: ../../apps/base
+  images:
+    - name: podinfo
+      newName: ghcr.io/stefanprodan/podinfo
+      newTag: 6.0.0
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+`)
+
+	ctx := context.Background()
+	kustomizations, err := flux.NewParser(clusterPath).ParseKustomizations(ctx)
+	if err != nil {
+		t.Fatalf("ParseKustomizations: %v", err)
+	}
+
+	builder := kustomize.NewBuilder(repoRoot)
+	buildCache := make(buildCache)
+	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, true, buildCache)
+	if err != nil {
+		t.Fatalf("buildAllKustomizations: %v", err)
+	}
+
+	if !strings.Contains(string(output), "ghcr.io/stefanprodan/podinfo:6.0.0") {
+		t.Errorf("expected rewritten image in output:\n%s", string(output))
+	}
+	if strings.Contains(string(output), "podinfo:5.0.0") {
+		t.Errorf("original image podinfo:5.0.0 should have been replaced:\n%s", string(output))
+	}
+}
+
 // Test: Two Flux Kustomizations referencing the same shared base — the
 // HelmRelease appears in the build output (possibly twice), dedup is handled
 // internally by buildHRInflation.

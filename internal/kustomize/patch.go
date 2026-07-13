@@ -32,6 +32,17 @@ type PatchTarget struct {
 	AnnotationSelector string `yaml:"annotationSelector,omitempty"`
 }
 
+// ImageOverride mirrors kustomize's image-transformer entry (sigs.k8s.io/kustomize/api/types.Image),
+// shared by Kustomization.spec.images. Fields match the Flux spec: an image is
+// identified by Name and overridden via NewName/NewTag/TagSuffix/Digest.
+type ImageOverride struct {
+	Name      string `yaml:"name,omitempty"`
+	NewName   string `yaml:"newName,omitempty"`
+	NewTag    string `yaml:"newTag,omitempty"`
+	TagSuffix string `yaml:"tagSuffix,omitempty"`
+	Digest    string `yaml:"digest,omitempty"`
+}
+
 // ApplyPatches applies kustomize-style patches (JSON6902) to an already
 // materialized set of resources, in memory. No directory on disk needed.
 // baseDir restricts patches[].path resolution — any path escaping baseDir
@@ -100,6 +111,28 @@ func ApplyTargetNamespace(resources []byte, namespace string) ([]byte, error) {
 	}
 	kust := types.Kustomization{
 		Namespace: namespace,
+	}
+	return runInMemoryBuild(resources, kust)
+}
+
+// ApplyImages applies kustomize image overrides (newName/newTag/tagSuffix/digest)
+// to an already materialized set of resources, in memory. Mirrors kustomize's
+// image transformer, which rewrites container image references in workload
+// manifests (Deployment, StatefulSet, CronJob, etc.). If images is empty the
+// input is returned unchanged.
+func ApplyImages(resources []byte, images []ImageOverride) ([]byte, error) {
+	if len(images) == 0 {
+		return resources, nil
+	}
+	kust := types.Kustomization{}
+	for _, img := range images {
+		kust.Images = append(kust.Images, types.Image{
+			Name:      img.Name,
+			NewName:   img.NewName,
+			NewTag:    img.NewTag,
+			TagSuffix: img.TagSuffix,
+			Digest:    img.Digest,
+		})
 	}
 	return runInMemoryBuild(resources, kust)
 }

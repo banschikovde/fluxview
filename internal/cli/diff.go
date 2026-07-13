@@ -422,6 +422,18 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 				}
 			}
 
+			// Apply Kustomization.spec.images — rewrites container image
+			// references (kustomize image transformer).
+			if len(ks.Spec.Images) > 0 {
+				rewritten, err := kustomize.ApplyImages(output, ks.Spec.Images)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to apply images for %s/%s: %v\n",
+						ks.Metadata.Namespace, ks.Metadata.Name, err)
+				} else {
+					output = rewritten
+				}
+			}
+
 			// Scan output for new resources (KS only).
 			newKS := discoverResourcesFromOutput(output, seen)
 			if len(newKS) > 0 {

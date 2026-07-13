@@ -310,3 +310,124 @@ metadata:
 		t.Error("empty namespace should return resources unchanged")
 	}
 }
+
+// firstContainerImage returns the first container image in the first
+// workload-like document, parsed out of multi-doc YAML.
+func firstContainerImage(t *testing.T, data []byte) string {
+	t.Helper()
+	for _, doc := range splitYAMLDocs(data) {
+		var m struct {
+			Spec struct {
+				Template struct {
+					Spec struct {
+						Containers []struct {
+							Image string `yaml:"image"`
+						} `yaml:"containers"`
+					} `yaml:"spec"`
+				} `yaml:"template"`
+			} `yaml:"spec"`
+		}
+		if yaml.Unmarshal([]byte(doc), &m) != nil {
+			continue
+		}
+		if len(m.Spec.Template.Spec.Containers) > 0 {
+			return m.Spec.Template.Spec.Containers[0].Image
+		}
+	}
+	t.Fatalf("no container image found in output:\n%s", string(data))
+	return ""
+}
+
+func TestApplyImages_NewTag(t *testing.T) {
+	resources := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          image: ghcr.io/stefanprodan/podinfo:5.0.0
+`)
+	images := []ImageOverride{
+		{Name: "ghcr.io/stefanprodan/podinfo", NewTag: "6.0.0"},
+	}
+	result, err := ApplyImages(resources, images)
+	if err != nil {
+		t.Fatalf("ApplyImages: %v", err)
+	}
+	got := firstContainerImage(t, result)
+	want := "ghcr.io/stefanprodan/podinfo:6.0.0"
+	if got != want {
+		t.Errorf("image = %q, want %q", got, want)
+	}
+}
+
+func TestApplyImages_NewName(t *testing.T) {
+	resources := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          image: podinfo:5.0.0
+`)
+	images := []ImageOverride{
+		{Name: "podinfo", NewName: "ghcr.io/stefanprodan/podinfo", NewTag: "6.0.0"},
+	}
+	result, err := ApplyImages(resources, images)
+	if err != nil {
+		t.Fatalf("ApplyImages: %v", err)
+	}
+	got := firstContainerImage(t, result)
+	want := "ghcr.io/stefanprodan/podinfo:6.0.0"
+	if got != want {
+		t.Errorf("image = %q, want %q", got, want)
+	}
+}
+
+func TestApplyImages_Digest(t *testing.T) {
+	resources := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          image: podinfo:5.0.0
+`)
+	digest := "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	images := []ImageOverride{
+		{Name: "podinfo", Digest: digest},
+	}
+	result, err := ApplyImages(resources, images)
+	if err != nil {
+		t.Fatalf("ApplyImages: %v", err)
+	}
+	got := firstContainerImage(t, result)
+	want := "podinfo@" + digest
+	if got != want {
+		t.Errorf("image = %q, want %q", got, want)
+	}
+}
+
+func TestApplyImages_Empty(t *testing.T) {
+	resources := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+`)
+	result, err := ApplyImages(resources, nil)
+	if err != nil {
+		t.Fatalf("ApplyImages with nil images: %v", err)
+	}
+	if string(result) != string(resources) {
+		t.Error("empty images should return resources unchanged")
+	}
+}

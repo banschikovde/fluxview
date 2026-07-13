@@ -73,8 +73,9 @@ type KustomizationSpec struct {
 	// the build output, matching Flux's Kustomization.spec.targetNamespace.
 	// Cluster-scoped resources are left untouched.
 	TargetNamespace string `yaml:"targetNamespace,omitempty"`
-	// Images lists image overrides.
-	Images any `yaml:"images,omitempty"`
+	// Images lists image overrides (kustomize image transformer), applied to
+	// the build output to rewrite container image references.
+	Images []kustomize.ImageOverride `yaml:"images,omitempty"`
 	// Suspend indicates if the resource is suspended.
 	Suspend bool `yaml:"suspend,omitempty"`
 	// HealthChecks lists health check references.
