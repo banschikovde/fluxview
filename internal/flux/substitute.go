@@ -14,6 +14,9 @@ type substituteFromEntry struct {
 	Kind      string `yaml:"kind"`
 	Name      string `yaml:"name"`
 	Namespace string `yaml:"namespace,omitempty"`
+	// Optional: when true, a missing referenced resource is silently ignored
+	// (no warning), matching Flux behavior.
+	Optional bool `yaml:"optional,omitempty"`
 }
 
 // ResolveSubstituteVars resolves all substitution variables for a Kustomization.
@@ -44,8 +47,10 @@ func ResolveSubstituteVars(ks Kustomization, configMaps []ConfigMap) map[string]
 		case "configmap":
 			cm, ok := findConfigMapCandidate(configMaps, entry.Name, ns, allowFallback)
 			if !ok {
-				fmt.Fprintf(os.Stderr, "Warning: substituteFrom ConfigMap %s/%s not found (referenced by Kustomization %s/%s)\n",
-					ns, entry.Name, ks.Metadata.Namespace, ks.Metadata.Name)
+				if !entry.Optional {
+					fmt.Fprintf(os.Stderr, "Warning: substituteFrom ConfigMap %s/%s not found (referenced by Kustomization %s/%s)\n",
+						ns, entry.Name, ks.Metadata.Namespace, ks.Metadata.Name)
+				}
 				continue
 			}
 			for k, v := range cm.Data {
@@ -131,6 +136,9 @@ func parseSubstituteFrom(raw any) []substituteFromEntry {
 				}
 				if ns, ok := m["namespace"].(string); ok {
 					entry.Namespace = ns
+				}
+				if optional, ok := m["optional"].(bool); ok {
+					entry.Optional = optional
 				}
 				entries = append(entries, entry)
 			}
@@ -285,8 +293,10 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 		case "configmap":
 			cm, ok := findConfigMapCandidate(configMaps, entry.Name, entryNS, allowFallback)
 			if !ok {
-				fmt.Fprintf(os.Stderr, "Warning: valuesFrom ConfigMap %s/%s not found (referenced by HelmRelease %s/%s)\n",
-					entryNS, entry.Name, hr.Metadata.Namespace, hr.Metadata.Name)
+				if !entry.Optional {
+					fmt.Fprintf(os.Stderr, "Warning: valuesFrom ConfigMap %s/%s not found (referenced by HelmRelease %s/%s)\n",
+						entryNS, entry.Name, hr.Metadata.Namespace, hr.Metadata.Name)
+				}
 				continue
 			}
 			mergeConfigMapValues(result, cm.Data, vk)
@@ -294,8 +304,10 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 		case "secret":
 			secret, ok := findSecretCandidate(secrets, entry.Name, entryNS, allowFallback)
 			if !ok {
-				fmt.Fprintf(os.Stderr, "Warning: valuesFrom Secret %s/%s not found (referenced by HelmRelease %s/%s)\n",
-					entryNS, entry.Name, hr.Metadata.Namespace, hr.Metadata.Name)
+				if !entry.Optional {
+					fmt.Fprintf(os.Stderr, "Warning: valuesFrom Secret %s/%s not found (referenced by HelmRelease %s/%s)\n",
+						entryNS, entry.Name, hr.Metadata.Namespace, hr.Metadata.Name)
+				}
 				continue
 			}
 			mergeSecretPlaceholder(result, secret, vk)

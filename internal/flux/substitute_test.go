@@ -237,6 +237,45 @@ func TestResolveSubstituteVars_NotFoundWarning(t *testing.T) {
 	}
 }
 
+// TestResolveSubstituteVars_OptionalNoWarning verifies that when optional:true
+// is set on a substituteFrom entry and the referenced ConfigMap is missing,
+// no warning is printed (Flux behavior: optional sources are silently skipped).
+func TestResolveSubstituteVars_OptionalNoWarning(t *testing.T) {
+	ks := Kustomization{
+		Metadata: ObjectMeta{Name: "base", Namespace: "flux-system"},
+		Spec: KustomizationSpec{
+			PostBuild: &PostBuild{
+				SubstituteFrom: []interface{}{
+					map[string]interface{}{
+						"kind":     "ConfigMap",
+						"name":     "maybe-missing",
+						"optional": true,
+					},
+				},
+			},
+		},
+	}
+
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	vars := ResolveSubstituteVars(ks, nil)
+
+	w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	stderrOutput := buf.String()
+
+	if len(vars) != 0 {
+		t.Errorf("expected empty vars for missing optional source, got %v", vars)
+	}
+	if strings.Contains(stderrOutput, "Warning:") {
+		t.Errorf("expected NO warning for optional source, got:\n%s", stderrOutput)
+	}
+}
+
 func TestTopologicalSort(t *testing.T) {
 	ks := []Kustomization{
 		{
@@ -665,6 +704,79 @@ func TestResolveValuesFrom_NotFoundWarning(t *testing.T) {
 	}
 	if !strings.Contains(stderrOutput, "nonexistent") {
 		t.Errorf("expected ConfigMap name 'nonexistent' in warning, got:\n%s", stderrOutput)
+	}
+}
+
+// TestResolveValuesFrom_OptionalNoWarning verifies that an optional:true
+// valuesFrom entry pointing at a missing ConfigMap produces NO warning and no
+// values (common Flux pattern: apply extra values only if the config exists).
+func TestResolveValuesFrom_OptionalNoWarning(t *testing.T) {
+	hr := HelmRelease{
+		Metadata: ObjectMeta{Name: "app", Namespace: "test"},
+		Spec: HelmReleaseSpec{
+			ValuesFrom: []interface{}{
+				map[string]interface{}{
+					"kind":     "ConfigMap",
+					"name":     "maybe-missing",
+					"optional": true,
+				},
+			},
+		},
+	}
+
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	result := ResolveValuesFrom(hr, nil, nil)
+
+	w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	stderrOutput := buf.String()
+
+	if len(result) != 0 {
+		t.Errorf("expected empty result for missing optional ConfigMap, got %v", result)
+	}
+	if strings.Contains(stderrOutput, "Warning:") {
+		t.Errorf("expected NO warning for optional valuesFrom, got:\n%s", stderrOutput)
+	}
+}
+
+// TestResolveValuesFrom_OptionalSecretNoWarning verifies the same optional
+// semantics for a Secret-typed valuesFrom entry.
+func TestResolveValuesFrom_OptionalSecretNoWarning(t *testing.T) {
+	hr := HelmRelease{
+		Metadata: ObjectMeta{Name: "app", Namespace: "test"},
+		Spec: HelmReleaseSpec{
+			ValuesFrom: []interface{}{
+				map[string]interface{}{
+					"kind":     "Secret",
+					"name":     "maybe-missing",
+					"optional": true,
+				},
+			},
+		},
+	}
+
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	result := ResolveValuesFrom(hr, nil, nil)
+
+	w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	stderrOutput := buf.String()
+
+	if len(result) != 0 {
+		t.Errorf("expected empty result for missing optional Secret, got %v", result)
+	}
+	if strings.Contains(stderrOutput, "Warning:") {
+		t.Errorf("expected NO warning for optional Secret valuesFrom, got:\n%s", stderrOutput)
 	}
 }
 
