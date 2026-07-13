@@ -138,13 +138,26 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 		return nil, fmt.Errorf("loading chart from %s: %w", chartPath, err)
 	}
 
-	// Start with valuesFrom (ConfigMaps and Secrets) as base values.
-	values := fluxtypes.ResolveValuesFrom(hr, configMaps, secrets)
-	if values == nil {
-		values = make(map[string]interface{})
+	// Build the values map in Flux precedence order:
+	//   chart's values.yaml (applied by the SDK as base)
+	//   < chart.spec.valuesFiles   (extra values files inside the chart)
+	//   < spec.valuesFrom          (ConfigMaps/Secrets, external)
+	//   < spec.values              (inline, highest priority)
+	values := make(map[string]interface{})
+
+	for _, vf := range hr.Spec.Chart.Spec.ValuesFiles {
+		if err := mergeChartValuesFile(values, chartPath, vf); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to read chart values file %q for %s/%s: %v\n",
+				vf, hr.Metadata.Namespace, hr.Metadata.Name, err)
+		}
 	}
 
-	// Merge inline values from HelmRelease spec (they have highest priority).
+	// valuesFrom (ConfigMaps/Secrets) override chart valuesFiles.
+	for k, v := range fluxtypes.ResolveValuesFrom(hr, configMaps, secrets) {
+		values[k] = v
+	}
+
+	// Inline values have the highest priority.
 	for k, v := range hr.Spec.Values {
 		values[k] = v
 	}
@@ -186,6 +199,31 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 	}
 
 	return converted, nil
+}
+
+// mergeChartValuesFile reads a values file (path relative to the chart root)
+// and merges its top-level keys into dst with a shallow merge — the same
+// strategy used for valuesFrom/inline values. The path is constrained to stay
+// within the chart directory (valuesFiles come from HR spec, i.e. repo content,
+// so a path like ../../etc/passwd must not escape). Missing files are returned
+// as an error so the caller can warn; they don't abort the render.
+func mergeChartValuesFile(dst map[string]interface{}, chartPath, name string) error {
+	path := filepath.Join(chartPath, name)
+	if !kustomizepkg.IsPathWithinRoot(path, chartPath) {
+		return fmt.Errorf("values file %q escapes chart directory", name)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var parsed map[string]interface{}
+	if err := yaml.Unmarshal(data, &parsed); err != nil {
+		return fmt.Errorf("parsing %s: %w", name, err)
+	}
+	for k, v := range parsed {
+		dst[k] = v
+	}
+	return nil
 }
 
 // FindHelmRepoURL finds the URL for a HelmRepository referenced by a HelmRelease.

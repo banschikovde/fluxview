@@ -249,8 +249,11 @@ type HelmReleaseChartSpec struct {
 		Name      string `yaml:"name"`
 		Namespace string `yaml:"namespace,omitempty"`
 	} `yaml:"sourceRef"`
-	Interval          any    `yaml:"interval,omitempty"`
-	ReconcileStrategy string `yaml:"reconcileStrategy,omitempty"`
+	// ValuesFiles lists extra values files inside the chart itself, merged over
+	// the chart's values.yaml in order (Flux chart.spec.valuesFiles).
+	ValuesFiles       []string `yaml:"valuesFiles,omitempty"`
+	Interval          any      `yaml:"interval,omitempty"`
+	ReconcileStrategy string   `yaml:"reconcileStrategy,omitempty"`
 }
 
 // HelmRepository represents a Flux HelmRepository resource.

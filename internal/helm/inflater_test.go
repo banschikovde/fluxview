@@ -197,3 +197,129 @@ data:
 		}
 	})
 }
+
+// TestInflateHelmRelease_ValuesFiles verifies that chart.spec.valuesFiles (extra
+// values files inside the chart) are merged over the chart's values.yaml, and
+// that external valuesFrom/inline values still take precedence.
+func TestInflateHelmRelease_ValuesFiles(t *testing.T) {
+	chartDir := filepath.Join(t.TempDir(), "testchart")
+	write := func(path, content string) {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	write(filepath.Join(chartDir, "Chart.yaml"), `apiVersion: v2
+name: testchart
+version: 1.0.0
+`)
+	// Chart's own default values.
+	write(filepath.Join(chartDir, "values.yaml"), `replicas: "1"
+`)
+	// Extra values file inside the chart (e.g. prod overrides).
+	write(filepath.Join(chartDir, "values-prod.yaml"), `replicas: "5"
+`)
+	write(filepath.Join(chartDir, "templates", "cm.yaml"), `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: values-snapshot
+data:
+  replicas: {{ .Values.replicas | quote }}
+`)
+
+	inflater, err := NewInflater()
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+
+	t.Run("valuesFiles override chart defaults", func(t *testing.T) {
+		hr := flux.HelmRelease{
+			Metadata: flux.ObjectMeta{Name: "app", Namespace: "test"},
+			Spec: flux.HelmReleaseSpec{
+				Chart: flux.HelmReleaseChart{Spec: flux.HelmReleaseChartSpec{
+					Chart:       chartDir,
+					ValuesFiles: []string{"values-prod.yaml"},
+				}},
+			},
+		}
+		out, err := inflater.InflateHelmRelease(context.Background(), hr, "", "", "", nil, nil, "")
+		if err != nil {
+			t.Fatalf("InflateHelmRelease: %v", err)
+		}
+		rendered := string(out)
+		if !strings.Contains(rendered, `replicas: "5"`) {
+			t.Errorf("expected values-prod.yaml (replicas=5) to override chart default:\n%s", rendered)
+		}
+		if strings.Contains(rendered, `replicas: "1"`) {
+			t.Errorf("chart default replicas=1 should have been overridden by valuesFiles:\n%s", rendered)
+		}
+	})
+
+	t.Run("inline values override valuesFiles", func(t *testing.T) {
+		hr := flux.HelmRelease{
+			Metadata: flux.ObjectMeta{Name: "app", Namespace: "test"},
+			Spec: flux.HelmReleaseSpec{
+				Chart: flux.HelmReleaseChart{Spec: flux.HelmReleaseChartSpec{
+					Chart:       chartDir,
+					ValuesFiles: []string{"values-prod.yaml"},
+				}},
+				Values: map[string]any{"replicas": "7"},
+			},
+		}
+		out, err := inflater.InflateHelmRelease(context.Background(), hr, "", "", "", nil, nil, "")
+		if err != nil {
+			t.Fatalf("InflateHelmRelease: %v", err)
+		}
+		rendered := string(out)
+		if !strings.Contains(rendered, `replicas: "7"`) {
+			t.Errorf("expected inline values (replicas=7) to override valuesFiles:\n%s", rendered)
+		}
+		if strings.Contains(rendered, `replicas: "5"`) {
+			t.Errorf("valuesFiles replicas=5 should have been overridden by inline values:\n%s", rendered)
+		}
+	})
+
+	t.Run("no valuesFiles uses chart defaults", func(t *testing.T) {
+		hr := flux.HelmRelease{
+			Metadata: flux.ObjectMeta{Name: "app", Namespace: "test"},
+			Spec: flux.HelmReleaseSpec{
+				Chart: flux.HelmReleaseChart{Spec: flux.HelmReleaseChartSpec{Chart: chartDir}},
+			},
+		}
+		out, err := inflater.InflateHelmRelease(context.Background(), hr, "", "", "", nil, nil, "")
+		if err != nil {
+			t.Fatalf("InflateHelmRelease: %v", err)
+		}
+		rendered := string(out)
+		if !strings.Contains(rendered, `replicas: "1"`) {
+			t.Errorf("expected chart default replicas=1 when no valuesFiles set:\n%s", rendered)
+		}
+	})
+
+	t.Run("valuesFiles path traversal rejected", func(t *testing.T) {
+		// A file outside the chart dir.
+		outside := filepath.Join(filepath.Dir(chartDir), "secret.yaml")
+		if err := os.WriteFile(outside, []byte(`replicas: "leaked"\n`), 0o644); err != nil {
+			t.Fatalf("write outside: %v", err)
+		}
+		hr := flux.HelmRelease{
+			Metadata: flux.ObjectMeta{Name: "app", Namespace: "test"},
+			Spec: flux.HelmReleaseSpec{
+				Chart: flux.HelmReleaseChart{Spec: flux.HelmReleaseChartSpec{
+					Chart:       chartDir,
+					ValuesFiles: []string{"../secret.yaml"},
+				}},
+			},
+		}
+		out, err := inflater.InflateHelmRelease(context.Background(), hr, "", "", "", nil, nil, "")
+		if err != nil {
+			t.Fatalf("InflateHelmRelease: %v", err)
+		}
+		rendered := string(out)
+		if strings.Contains(rendered, "leaked") {
+			t.Errorf("valuesFile path traversal must not leak outside-chart content:\n%s", rendered)
+		}
+	})
+}
