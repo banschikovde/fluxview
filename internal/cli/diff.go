@@ -409,6 +409,19 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 				}
 			}
 
+			// Apply Kustomization.spec.targetNamespace — sets metadata.namespace
+			// on all namespaced resources (Flux controller behavior). Applied
+			// after patches so patch targets resolve against original namespaces.
+			if ks.Spec.TargetNamespace != "" {
+				namespaced, err := kustomize.ApplyTargetNamespace(output, ks.Spec.TargetNamespace)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to apply targetNamespace %q for %s/%s: %v\n",
+						ks.Spec.TargetNamespace, ks.Metadata.Namespace, ks.Metadata.Name, err)
+				} else {
+					output = namespaced
+				}
+			}
+
 			// Scan output for new resources (KS only).
 			newKS := discoverResourcesFromOutput(output, seen)
 			if len(newKS) > 0 {

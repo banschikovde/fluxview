@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestApplyPatches_JSON6902(t *testing.T) {
@@ -187,5 +189,124 @@ spec:
 	_, err := ApplyPatches(resources, patches, baseDir)
 	if err == nil {
 		t.Fatal("expected error for path traversal, got nil")
+	}
+}
+
+// namespaceOf parses multi-doc YAML and returns the metadata.namespace of the
+// document matching the given kind/name, plus whether it was found.
+func namespaceOf(t *testing.T, data []byte, kind, name string) (string, bool) {
+	t.Helper()
+	for _, doc := range splitYAMLDocs(data) {
+		var m struct {
+			Kind     string `yaml:"kind"`
+			Metadata struct {
+				Name      string `yaml:"name"`
+				Namespace string `yaml:"namespace"`
+			} `yaml:"metadata"`
+		}
+		if yaml.Unmarshal([]byte(doc), &m) != nil {
+			continue
+		}
+		if m.Kind == kind && m.Metadata.Name == name {
+			return m.Metadata.Namespace, true
+		}
+	}
+	return "", false
+}
+
+func TestApplyTargetNamespace_Basic(t *testing.T) {
+	resources := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  replicas: 1
+`)
+	result, err := ApplyTargetNamespace(resources, "team-a")
+	if err != nil {
+		t.Fatalf("ApplyTargetNamespace: %v", err)
+	}
+	ns, ok := namespaceOf(t, result, "Deployment", "app")
+	if !ok {
+		t.Fatalf("Deployment app not found in output:\n%s", string(result))
+	}
+	if ns != "team-a" {
+		t.Errorf("namespace = %q, want %q", ns, "team-a")
+	}
+}
+
+func TestApplyTargetNamespace_OverridesExisting(t *testing.T) {
+	resources := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: default
+spec:
+  replicas: 1
+`)
+	result, err := ApplyTargetNamespace(resources, "team-a")
+	if err != nil {
+		t.Fatalf("ApplyTargetNamespace: %v", err)
+	}
+	ns, ok := namespaceOf(t, result, "Deployment", "app")
+	if !ok {
+		t.Fatalf("Deployment app not found in output:\n%s", string(result))
+	}
+	if ns != "team-a" {
+		t.Errorf("namespace = %q, want targetNamespace to override to %q", ns, "team-a")
+	}
+}
+
+func TestApplyTargetNamespace_ClusterScopedSkipped(t *testing.T) {
+	// ClusterRole is cluster-scoped: its namespace must NOT be set.
+	resources := []byte(`apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: app-role
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  replicas: 1
+`)
+	result, err := ApplyTargetNamespace(resources, "team-a")
+	if err != nil {
+		t.Fatalf("ApplyTargetNamespace: %v", err)
+	}
+	crNS, ok := namespaceOf(t, result, "ClusterRole", "app-role")
+	if !ok {
+		t.Fatalf("ClusterRole app-role not found in output:\n%s", string(result))
+	}
+	if crNS != "" {
+		t.Errorf("cluster-scoped ClusterRole namespace = %q, want empty (not namespaced)", crNS)
+	}
+	depNS, ok := namespaceOf(t, result, "Deployment", "app")
+	if !ok {
+		t.Fatalf("Deployment app not found in output:\n%s", string(result))
+	}
+	if depNS != "team-a" {
+		t.Errorf("Deployment namespace = %q, want %q", depNS, "team-a")
+	}
+}
+
+func TestApplyTargetNamespace_EmptyNamespace(t *testing.T) {
+	resources := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: default
+`)
+	result, err := ApplyTargetNamespace(resources, "")
+	if err != nil {
+		t.Fatalf("ApplyTargetNamespace with empty namespace: %v", err)
+	}
+	if string(result) != string(resources) {
+		t.Error("empty namespace should return resources unchanged")
 	}
 }

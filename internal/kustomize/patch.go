@@ -43,30 +43,7 @@ func ApplyPatches(resources []byte, patches []PatchSpec, baseDir string) ([]byte
 		return resources, nil
 	}
 
-	// Deduplicate input resources — kustomize rejects duplicate resource IDs.
-	// Last occurrence wins (matches kustomize ResMap behavior).
-	resources = dedupInputDocs(resources)
-
-	fsys := filesys.MakeFsInMemory()
-
-	// Split multi-doc YAML into separate files — kustomize works best with
-	// individual resource files rather than a single multi-doc file.
-	var resourceFiles []string
-	for i, doc := range splitYAMLDocs(resources) {
-		doc = strings.TrimSpace(doc)
-		if doc == "" {
-			continue
-		}
-		name := fmt.Sprintf("/resource-%d.yaml", i)
-		if err := fsys.WriteFile(name, []byte(doc)); err != nil {
-			return nil, fmt.Errorf("writing resource to in-memory fs: %w", err)
-		}
-		resourceFiles = append(resourceFiles, name)
-	}
-
-	kust := types.Kustomization{
-		Resources: resourceFiles,
-	}
+	kust := types.Kustomization{}
 	for _, p := range patches {
 		// If Path is set, read patch content from file (with path traversal protection).
 		patchContent := p.Patch
@@ -109,6 +86,51 @@ func ApplyPatches(resources []byte, patches []PatchSpec, baseDir string) ([]byte
 		kust.Patches = append(kust.Patches, kp)
 	}
 
+	return runInMemoryBuild(resources, kust)
+}
+
+// ApplyTargetNamespace sets metadata.namespace on all namespaced resources to
+// the given namespace, mimicking Flux's Kustomization.spec.targetNamespace.
+// It reuses kustomize's native namespace transformer, which overrides existing
+// namespaces and automatically skips cluster-scoped resources. If namespace is
+// empty the input is returned unchanged.
+func ApplyTargetNamespace(resources []byte, namespace string) ([]byte, error) {
+	if namespace == "" {
+		return resources, nil
+	}
+	kust := types.Kustomization{
+		Namespace: namespace,
+	}
+	return runInMemoryBuild(resources, kust)
+}
+
+// runInMemoryBuild runs an in-memory kustomize build over the given resources.
+// Resources are deduplicated and written to an in-memory filesystem, then built
+// with the additional kustomization fields set in kust (Resources is filled
+// automatically). Shared by ApplyPatches and ApplyTargetNamespace.
+func runInMemoryBuild(resources []byte, kust types.Kustomization) ([]byte, error) {
+	// Deduplicate input resources — kustomize rejects duplicate resource IDs.
+	// Last occurrence wins (matches kustomize ResMap behavior).
+	resources = dedupInputDocs(resources)
+
+	fsys := filesys.MakeFsInMemory()
+
+	// Split multi-doc YAML into separate files — kustomize works best with
+	// individual resource files rather than a single multi-doc file.
+	var resourceFiles []string
+	for i, doc := range splitYAMLDocs(resources) {
+		doc = strings.TrimSpace(doc)
+		if doc == "" {
+			continue
+		}
+		name := fmt.Sprintf("/resource-%d.yaml", i)
+		if err := fsys.WriteFile(name, []byte(doc)); err != nil {
+			return nil, fmt.Errorf("writing resource to in-memory fs: %w", err)
+		}
+		resourceFiles = append(resourceFiles, name)
+	}
+	kust.Resources = resourceFiles
+
 	kustYAML, err := yaml.Marshal(kust)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling kustomization: %w", err)
@@ -121,7 +143,7 @@ func ApplyPatches(resources []byte, patches []PatchSpec, baseDir string) ([]byte
 	kustomizer := krusty.MakeKustomizer(opts)
 	resMap, err := kustomizer.Run(fsys, "/")
 	if err != nil {
-		return nil, fmt.Errorf("applying patches: %w", err)
+		return nil, fmt.Errorf("running in-memory kustomize build: %w", err)
 	}
 
 	return resMap.AsYaml()

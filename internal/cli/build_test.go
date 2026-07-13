@@ -15,6 +15,7 @@ import (
 	"github.com/banschikovde/fluxview/internal/flux"
 	"github.com/banschikovde/fluxview/internal/helm"
 	"github.com/banschikovde/fluxview/internal/kustomize"
+	"gopkg.in/yaml.v3"
 )
 
 func TestReorderYAMLFields(t *testing.T) {
@@ -466,6 +467,99 @@ spec:
 	if helmReleases[0].Metadata.Namespace != "apps" {
 		t.Errorf("namespace = %q, want %q", helmReleases[0].Metadata.Namespace, "apps")
 	}
+}
+
+// Test: Kustomization.spec.targetNamespace rewrites metadata.namespace on all
+// namespaced resources in the build output, while leaving cluster-scoped
+// resources untouched.
+func TestBuildAllKustomizations_TargetNamespace(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	// Overlay with a namespaced + a cluster-scoped resource.
+	overlayDir := filepath.Join(repoRoot, "apps", "base")
+	writeHelper(t, overlayDir, "deployment.yaml", `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: default
+spec:
+  replicas: 1
+`)
+	writeHelper(t, overlayDir, "clusterrole.yaml", `apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: app-role
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get"]
+`)
+	writeHelper(t, overlayDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - deployment.yaml
+  - clusterrole.yaml
+`)
+
+	// Flux Kustomization with targetNamespace set.
+	clusterPath := filepath.Join(repoRoot, "clusters", "test")
+	writeHelper(t, clusterPath, "ks.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: app
+  namespace: flux-system
+spec:
+  path: ../../apps/base
+  targetNamespace: team-a
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+`)
+
+	ctx := context.Background()
+	kustomizations, err := flux.NewParser(clusterPath).ParseKustomizations(ctx)
+	if err != nil {
+		t.Fatalf("ParseKustomizations: %v", err)
+	}
+
+	builder := kustomize.NewBuilder(repoRoot)
+	buildCache := make(buildCache)
+	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, true, buildCache)
+	if err != nil {
+		t.Fatalf("buildAllKustomizations: %v", err)
+	}
+
+	deployNS := namespaceOfBuildTest(t, output, "Deployment", "app")
+	if deployNS != "team-a" {
+		t.Errorf("Deployment namespace = %q, want %q (targetNamespace override)", deployNS, "team-a")
+	}
+	crNS := namespaceOfBuildTest(t, output, "ClusterRole", "app-role")
+	if crNS != "" {
+		t.Errorf("ClusterRole namespace = %q, want empty (cluster-scoped must be skipped)", crNS)
+	}
+}
+
+// namespaceOfBuildTest parses multi-doc YAML and returns the metadata.namespace
+// of the document matching the given kind/name.
+func namespaceOfBuildTest(t *testing.T, data []byte, kind, name string) string {
+	t.Helper()
+	for _, doc := range flux.SplitYAMLText(data) {
+		var m struct {
+			Kind     string `yaml:"kind"`
+			Metadata struct {
+				Name      string `yaml:"name"`
+				Namespace string `yaml:"namespace"`
+			} `yaml:"metadata"`
+		}
+		if yaml.Unmarshal([]byte(doc), &m) != nil {
+			continue
+		}
+		if m.Kind == kind && m.Metadata.Name == name {
+			return m.Metadata.Namespace
+		}
+	}
+	t.Fatalf("resource %s/%s not found in output:\n%s", kind, name, string(data))
+	return ""
 }
 
 // Test: Two Flux Kustomizations referencing the same shared base — the

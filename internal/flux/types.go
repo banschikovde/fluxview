@@ -69,6 +69,10 @@ type KustomizationSpec struct {
 	PostBuild *PostBuild `yaml:"postBuild,omitempty"`
 	// Patches lists JSON6902 patches to apply to the build output.
 	Patches []kustomize.PatchSpec `yaml:"patches,omitempty"`
+	// TargetNamespace sets metadata.namespace on all namespaced resources in
+	// the build output, matching Flux's Kustomization.spec.targetNamespace.
+	// Cluster-scoped resources are left untouched.
+	TargetNamespace string `yaml:"targetNamespace,omitempty"`
 	// Images lists image overrides.
 	Images any `yaml:"images,omitempty"`
 	// Suspend indicates if the resource is suspended.
