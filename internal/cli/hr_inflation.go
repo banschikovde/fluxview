@@ -8,6 +8,7 @@ import (
 	"github.com/banschikovde/fluxview/internal/flux"
 	"github.com/banschikovde/fluxview/internal/helm"
 	"github.com/banschikovde/fluxview/internal/kustomize"
+	"github.com/cyphar/filepath-securejoin"
 )
 
 // buildHRInflation discovers HelmReleases through the Flux Kustomization pipeline
@@ -131,11 +132,30 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 					hr.Metadata.Namespace, hr.Metadata.Name)
 				continue
 			}
-			repoURL, username, password = resolveHelmRepoURL(hr, helmRepos, secrets)
-			if repoURL == "" {
-				fmt.Fprintf(os.Stderr, "Warning: could not resolve source for HelmRelease %s/%s (chart %q) — HelmRepository not found, skipping\n",
-					hr.Metadata.Namespace, hr.Metadata.Name, hr.Spec.Chart.Spec.Chart)
-				continue
+			// Chart sourced from a GitRepository/Bucket: the chart already lives in
+			// the local checkout, so resolve it as a directory path (no network).
+			// Mirrors how Kustomization.spec.path is resolved via securejoin.
+			if sourceKind := hr.Spec.Chart.Spec.SourceRef.Kind; sourceKind == flux.KindGitRepository || sourceKind == flux.KindBucket {
+				resolved, err := securejoin.SecureJoin(repoRoot, hr.Spec.Chart.Spec.Chart)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: cannot safely resolve chart path %s for HelmRelease %s/%s: %v, skipping\n",
+						hr.Spec.Chart.Spec.Chart, hr.Metadata.Namespace, hr.Metadata.Name, err)
+					continue
+				}
+				if _, err := os.Stat(resolved); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: chart %q for HelmRelease %s/%s not found locally (%s source) — skipping\n",
+						hr.Spec.Chart.Spec.Chart, hr.Metadata.Namespace, hr.Metadata.Name, sourceKind)
+					continue
+				}
+				hr.Spec.Chart.Spec.Chart = resolved
+				// repoURL stays empty → InflateHelmRelease renders from the local directory.
+			} else {
+				repoURL, username, password = resolveHelmRepoURL(hr, helmRepos, secrets)
+				if repoURL == "" {
+					fmt.Fprintf(os.Stderr, "Warning: could not resolve source for HelmRelease %s/%s (chart %q) — HelmRepository not found, skipping\n",
+						hr.Metadata.Namespace, hr.Metadata.Name, hr.Spec.Chart.Spec.Chart)
+					continue
+				}
 			}
 		}
 

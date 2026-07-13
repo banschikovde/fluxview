@@ -13,6 +13,8 @@ const (
 	KindHelmRelease    = "HelmRelease"
 	KindHelmRepository = "HelmRepository"
 	KindOCIRepository  = "OCIRepository"
+	KindGitRepository  = "GitRepository"
+	KindBucket         = "Bucket"
 
 	GroupSourceToolkitFluxHelmIO    = "source.toolkit.fluxcd.io"
 	GroupKustomizeToolkitFluxHelmIO = "kustomize.toolkit.fluxcd.io"
