@@ -160,7 +160,10 @@ type InstallSpec struct {
 	CRDs string `yaml:"crds,omitempty"`
 }
 
-// UpgradeSpec holds upgrade-specific configuration. Only CRDs is parsed.
+// UpgradeSpec holds upgrade-specific configuration. CRDs is parsed for API
+// completeness but intentionally unused: InflateHelmRelease always renders via
+// action.NewInstall (it cannot know whether the release is already installed in
+// a real cluster), so spec.upgrade.crds is irrelevant for this rendering pipeline.
 type UpgradeSpec struct {
 	CRDs string `yaml:"crds,omitempty"`
 }
