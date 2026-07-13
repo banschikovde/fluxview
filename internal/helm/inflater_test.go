@@ -1,7 +1,11 @@
 package helm
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -298,28 +302,110 @@ data:
 		}
 	})
 
-	t.Run("valuesFiles path traversal rejected", func(t *testing.T) {
-		// A file outside the chart dir.
-		outside := filepath.Join(filepath.Dir(chartDir), "secret.yaml")
-		if err := os.WriteFile(outside, []byte(`replicas: "leaked"\n`), 0o644); err != nil {
-			t.Fatalf("write outside: %v", err)
-		}
+	t.Run("valuesFile not in chart is ignored", func(t *testing.T) {
+		// valuesFiles are resolved from the chart's own Files (in-memory), so a
+		// name that isn't part of the chart is simply not found — it can never
+		// reach the host filesystem, so there is no traversal surface.
 		hr := flux.HelmRelease{
 			Metadata: flux.ObjectMeta{Name: "app", Namespace: "test"},
 			Spec: flux.HelmReleaseSpec{
 				Chart: flux.HelmReleaseChart{Spec: flux.HelmReleaseChartSpec{
 					Chart:       chartDir,
-					ValuesFiles: []string{"../secret.yaml"},
+					ValuesFiles: []string{"does-not-exist.yaml"},
 				}},
 			},
 		}
-		out, err := inflater.InflateHelmRelease(context.Background(), hr, "", "", "", nil, nil, "")
-		if err != nil {
-			t.Fatalf("InflateHelmRelease: %v", err)
-		}
-		rendered := string(out)
-		if strings.Contains(rendered, "leaked") {
-			t.Errorf("valuesFile path traversal must not leak outside-chart content:\n%s", rendered)
+		stderr := captureStderrHelm(func() {
+			out, err := inflater.InflateHelmRelease(context.Background(), hr, "", "", "", nil, nil, "")
+			if err != nil {
+				t.Fatalf("InflateHelmRelease: %v", err)
+			}
+			// Chart default must still apply — the missing valuesFile is ignored.
+			if !strings.Contains(string(out), `replicas: "1"`) {
+				t.Errorf("expected chart default when valuesFile is absent:\n%s", string(out))
+			}
+		})
+		if !strings.Contains(stderr, "not found in chart") {
+			t.Errorf("expected 'not found in chart' warning, got:\n%s", stderr)
 		}
 	})
+}
+
+// TestInflateHelmRelease_ValuesFiles_TgzArchive is the regression test for the
+// HelmRepository scenario: the chart is loaded from a .tgz archive, so chartPath
+// is a file, not a directory. valuesFiles must still resolve via the in-memory
+// chart object (chartObj.Files), not by re-reading from the (archive) path.
+func TestInflateHelmRelease_ValuesFiles_TgzArchive(t *testing.T) {
+	tgzPath := filepath.Join(t.TempDir(), "testchart-1.0.0.tgz")
+	writeTgzChart(t, tgzPath, map[string]string{
+		"Chart.yaml":        "apiVersion: v2\nname: testchart\nversion: 1.0.0\n",
+		"values.yaml":       "replicas: \"1\"\n",
+		"values-prod.yaml":  "replicas: \"5\"\n",
+		"templates/cm.yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: snap\ndata:\n  replicas: {{ .Values.replicas | quote }}\n",
+	})
+
+	inflater, err := NewInflater()
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+	hr := flux.HelmRelease{
+		Metadata: flux.ObjectMeta{Name: "app", Namespace: "test"},
+		Spec: flux.HelmReleaseSpec{
+			Chart: flux.HelmReleaseChart{Spec: flux.HelmReleaseChartSpec{
+				Chart:       tgzPath,
+				ValuesFiles: []string{"values-prod.yaml"},
+			}},
+		},
+	}
+	out, err := inflater.InflateHelmRelease(context.Background(), hr, "", "", "", nil, nil, "")
+	if err != nil {
+		t.Fatalf("InflateHelmRelease: %v", err)
+	}
+	rendered := string(out)
+	if !strings.Contains(rendered, `replicas: "5"`) {
+		t.Errorf("expected values-prod.yaml (replicas=5) to apply from a .tgz-packaged chart:\n%s", rendered)
+	}
+}
+
+// captureStderrHelm redirects os.Stderr during f and returns what was written.
+func captureStderrHelm(f func()) string {
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	f()
+	w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	return buf.String()
+}
+
+// writeTgzChart writes a .tgz chart archive at tgzPath. files maps chart-relative
+// paths (e.g. "Chart.yaml", "templates/cm.yaml") to content; they are placed
+// under a top-level "testchart/" directory, which helm's archive loader requires
+// and strips.
+func writeTgzChart(t *testing.T, tgzPath string, files map[string]string) {
+	t.Helper()
+	f, err := os.Create(tgzPath)
+	if err != nil {
+		t.Fatalf("create tgz: %v", err)
+	}
+	defer f.Close()
+	gz := gzip.NewWriter(f)
+	defer gz.Close()
+	tw := tar.NewWriter(gz)
+	defer tw.Close()
+	for name, content := range files {
+		data := []byte(content)
+		if err := tw.WriteHeader(&tar.Header{
+			Name: "testchart/" + name,
+			Mode: 0o644,
+			Size: int64(len(data)),
+		}); err != nil {
+			t.Fatalf("write header %s: %v", name, err)
+		}
+		if _, err := tw.Write(data); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
 }

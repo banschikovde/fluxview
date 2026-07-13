@@ -11,6 +11,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 	"helm.sh/helm/v4/pkg/action"
+	"helm.sh/helm/v4/pkg/chart"
 	"helm.sh/helm/v4/pkg/chart/common"
 	"helm.sh/helm/v4/pkg/chart/loader"
 	"helm.sh/helm/v4/pkg/cli"
@@ -138,6 +139,14 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 		return nil, fmt.Errorf("loading chart from %s: %w", chartPath, err)
 	}
 
+	// Accessor abstracts v2/v3 chart differences and works uniformly whether the
+	// chart was loaded from a directory or a .tgz archive — needed for resolving
+	// chart.spec.valuesFiles (the chart's extra values files).
+	chartAcc, err := chart.NewDefaultAccessor(chartObj)
+	if err != nil {
+		return nil, fmt.Errorf("accessing chart %s: %w", chartRef, err)
+	}
+
 	// Build the values map in Flux precedence order:
 	//   chart's values.yaml (applied by the SDK as base)
 	//   < chart.spec.valuesFiles   (extra values files inside the chart)
@@ -146,7 +155,7 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 	values := make(map[string]interface{})
 
 	for _, vf := range hr.Spec.Chart.Spec.ValuesFiles {
-		if err := mergeChartValuesFile(values, chartPath, vf); err != nil {
+		if err := mergeChartValuesFile(values, chartAcc, vf); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to read chart values file %q for %s/%s: %v\n",
 				vf, hr.Metadata.Namespace, hr.Metadata.Name, err)
 		}
@@ -201,29 +210,29 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 	return converted, nil
 }
 
-// mergeChartValuesFile reads a values file (path relative to the chart root)
-// and merges its top-level keys into dst with a shallow merge — the same
-// strategy used for valuesFrom/inline values. The path is constrained to stay
-// within the chart directory (valuesFiles come from HR spec, i.e. repo content,
-// so a path like ../../etc/passwd must not escape). Missing files are returned
-// as an error so the caller can warn; they don't abort the render.
-func mergeChartValuesFile(dst map[string]interface{}, chartPath, name string) error {
-	path := filepath.Join(chartPath, name)
-	if !kustomizepkg.IsPathWithinRoot(path, chartPath) {
-		return fmt.Errorf("values file %q escapes chart directory", name)
+// mergeChartValuesFile looks up a values file among the chart's miscellaneous
+// files (chartObj.Files, populated by the Helm SDK uniformly for directory and
+// .tgz-loaded charts) and merges its top-level keys into dst with a shallow
+// merge — the same strategy used for valuesFrom/inline values. Resolving from
+// the in-memory chart object (rather than re-reading from disk via chartPath)
+// is required because chartPath can be a .tgz archive, not a directory, for
+// HelmRepository-sourced charts. No filesystem access means no path-traversal
+// surface. Missing files return an error so the caller can warn (non-fatal).
+func mergeChartValuesFile(dst map[string]interface{}, acc chart.Accessor, name string) error {
+	want := strings.TrimPrefix(name, "./")
+	for _, f := range acc.Files() {
+		if strings.TrimPrefix(f.Name, "./") == want {
+			var parsed map[string]interface{}
+			if err := yaml.Unmarshal(f.Data, &parsed); err != nil {
+				return fmt.Errorf("parsing %s: %w", name, err)
+			}
+			for k, v := range parsed {
+				dst[k] = v
+			}
+			return nil
+		}
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	var parsed map[string]interface{}
-	if err := yaml.Unmarshal(data, &parsed); err != nil {
-		return fmt.Errorf("parsing %s: %w", name, err)
-	}
-	for k, v := range parsed {
-		dst[k] = v
-	}
-	return nil
+	return fmt.Errorf("values file %q not found in chart", name)
 }
 
 // FindHelmRepoURL finds the URL for a HelmRepository referenced by a HelmRelease.
