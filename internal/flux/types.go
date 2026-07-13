@@ -144,13 +144,25 @@ type HelmReleaseSpec struct {
 	// TargetNamespace overrides the release namespace.
 	TargetNamespace string `yaml:"targetNamespace,omitempty"`
 	// Install holds install-specific configuration.
-	Install any `yaml:"install,omitempty"`
+	Install *InstallSpec `yaml:"install,omitempty"`
 	// Upgrade holds upgrade-specific configuration.
-	Upgrade any `yaml:"upgrade,omitempty"`
+	Upgrade *UpgradeSpec `yaml:"upgrade,omitempty"`
 	// DependsOn lists dependencies.
 	DependsOn []DependsOnEntry `yaml:"dependsOn,omitempty"`
 	// PostRenderers lists post-renderers applied after helm template.
 	PostRenderers []PostRenderer `yaml:"postRenderers,omitempty"`
+}
+
+// InstallSpec holds install-specific configuration for a HelmRelease.
+// Only CRDs is relevant to rendering: "Skip" excludes the chart's CRDs from the
+// rendered output (Flux values: Skip/Create/CreateReplace).
+type InstallSpec struct {
+	CRDs string `yaml:"crds,omitempty"`
+}
+
+// UpgradeSpec holds upgrade-specific configuration. Only CRDs is parsed.
+type UpgradeSpec struct {
+	CRDs string `yaml:"crds,omitempty"`
 }
 
 // PostRenderer represents a single postRenderer entry.

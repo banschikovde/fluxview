@@ -56,7 +56,9 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 
 	install := action.NewInstall(actionConfig)
 	install.DryRunStrategy = action.DryRunClient
-	install.IncludeCRDs = true
+	// Include the chart's CRDs unless spec.install.crds is explicitly "Skip".
+	// Matches Flux behavior: default (no field) and Create/CreateReplace include CRDs.
+	install.IncludeCRDs = hr.Spec.Install == nil || hr.Spec.Install.CRDs != "Skip"
 	install.ReleaseName = hr.Metadata.Name
 
 	// Determine target namespace.
