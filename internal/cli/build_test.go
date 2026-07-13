@@ -1094,6 +1094,48 @@ func TestInflateHelmReleasesShared_BucketUnsupported(t *testing.T) {
 	}
 }
 
+// TestInflateHelmReleasesShared_LocalSourceChartNotADirectory verifies that
+// when chart.spec.chart points at a plain file (not a chart directory or .tgz),
+// a clear early warning is emitted instead of a cryptic loader error.
+func TestInflateHelmReleasesShared_LocalSourceChartNotADirectory(t *testing.T) {
+	repoRoot := t.TempDir()
+	// A plain YAML file where the chart should be.
+	writeHelper(t, repoRoot, "not-a-chart.yaml", "key: value\n")
+
+	hr := []flux.HelmRelease{{
+		Metadata: flux.ObjectMeta{Name: "app", Namespace: "apps"},
+		Spec: flux.HelmReleaseSpec{
+			Chart: flux.HelmReleaseChart{
+				Spec: flux.HelmReleaseChartSpec{
+					Chart: "./not-a-chart.yaml",
+					SourceRef: struct {
+						Kind      string `yaml:"kind"`
+						Name      string `yaml:"name"`
+						Namespace string `yaml:"namespace,omitempty"`
+					}{Kind: flux.KindGitRepository, Name: "flux-system"},
+				},
+			},
+		},
+	}}
+
+	inflater, err := helm.NewInflater()
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+
+	var outputs [][]byte
+	stderr := captureStderr(func() {
+		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, true, repoRoot)
+	})
+
+	if len(outputs) != 0 {
+		t.Errorf("expected 0 outputs when chart path is a plain file, got %d", len(outputs))
+	}
+	if !strings.Contains(stderr, "not a chart directory or .tgz archive") {
+		t.Errorf("expected clear 'not a chart directory or .tgz archive' warning, got:\n%s", stderr)
+	}
+}
+
 // TestInflateHelmReleasesShared_LocalSourceChartMissing verifies that when the
 // chart path of a GitRepository-sourced HelmRelease does not exist locally, a
 // warning is printed and the release is skipped.

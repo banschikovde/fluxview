@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/banschikovde/fluxview/internal/flux"
 	"github.com/banschikovde/fluxview/internal/helm"
@@ -144,8 +145,20 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 						hr.Spec.Chart.Spec.Chart, hr.Metadata.Namespace, hr.Metadata.Name, err)
 					continue
 				}
-				if _, err := os.Stat(resolved); err != nil {
+				info, err := os.Stat(resolved)
+				if err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: chart %q for HelmRelease %s/%s not found locally (%s source) — skipping\n",
+						hr.Spec.Chart.Spec.Chart, hr.Metadata.Namespace, hr.Metadata.Name, sourceKind)
+					continue
+				}
+				// A chart source is either a directory (Chart.yaml inside) or a
+				// packaged .tgz archive. Pointing at any other kind of file is
+				// almost certainly a mistake — fail early with a clear message
+				// rather than letting loader.Load emit a cryptic one.
+				lower := strings.ToLower(resolved)
+				isArchive := strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".tar.gz")
+				if !info.IsDir() && !isArchive {
+					fmt.Fprintf(os.Stderr, "Warning: chart path %q for HelmRelease %s/%s is not a chart directory or .tgz archive (%s source) — skipping\n",
 						hr.Spec.Chart.Spec.Chart, hr.Metadata.Namespace, hr.Metadata.Name, sourceKind)
 					continue
 				}
