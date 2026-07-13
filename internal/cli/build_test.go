@@ -991,8 +991,8 @@ func TestInflateHelmReleasesShared_WarnOnMissingSource(t *testing.T) {
 }
 
 // TestInflateHelmReleasesShared_LocalSourceChart verifies that a HelmRelease
-// whose chart is sourced from a GitRepository or Bucket (chart.spec.chart is a
-// path within the local checkout) renders from disk without any network access.
+// whose chart is sourced from a GitRepository (chart.spec.chart is a path within
+// the local checkout) renders from disk without any network access.
 func TestInflateHelmReleasesShared_LocalSourceChart(t *testing.T) {
 	repoRoot := t.TempDir()
 
@@ -1011,56 +1011,50 @@ spec:
   replicas: 1
 `)
 
-	mkHR := func(sourceKind string) []flux.HelmRelease {
-		return []flux.HelmRelease{{
-			Metadata: flux.ObjectMeta{Name: "app", Namespace: "apps"},
-			Spec: flux.HelmReleaseSpec{
-				Chart: flux.HelmReleaseChart{
-					Spec: flux.HelmReleaseChartSpec{
-						Chart: "./charts/my-chart",
-						SourceRef: struct {
-							Kind      string `yaml:"kind"`
-							Name      string `yaml:"name"`
-							Namespace string `yaml:"namespace,omitempty"`
-						}{
-							Kind: sourceKind,
-							Name: "flux-system",
-						},
+	hr := []flux.HelmRelease{{
+		Metadata: flux.ObjectMeta{Name: "app", Namespace: "apps"},
+		Spec: flux.HelmReleaseSpec{
+			Chart: flux.HelmReleaseChart{
+				Spec: flux.HelmReleaseChartSpec{
+					Chart: "./charts/my-chart",
+					SourceRef: struct {
+						Kind      string `yaml:"kind"`
+						Name      string `yaml:"name"`
+						Namespace string `yaml:"namespace,omitempty"`
+					}{
+						Kind: flux.KindGitRepository,
+						Name: "flux-system",
 					},
 				},
 			},
-		}}
-	}
+		},
+	}}
 
 	inflater, err := helm.NewInflater()
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
 
-	for _, sourceKind := range []string{flux.KindGitRepository, flux.KindBucket} {
-		t.Run(sourceKind, func(t *testing.T) {
-			var outputs [][]byte
-			stderr := captureStderr(func() {
-				outputs = inflateHelmReleasesShared(context.Background(), inflater, mkHR(sourceKind), nil, nil, nil, nil, false, true, repoRoot)
-			})
+	var outputs [][]byte
+	stderr := captureStderr(func() {
+		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, true, repoRoot)
+	})
 
-			if len(outputs) != 1 {
-				t.Fatalf("expected 1 rendered output for %s chart, got %d (stderr:\n%s)", sourceKind, len(outputs), stderr)
-			}
-			rendered := string(outputs[0])
-			if !strings.Contains(rendered, "from-local-chart") {
-				t.Errorf("expected local chart to render for %s source:\n%s", sourceKind, rendered)
-			}
-			if strings.Contains(stderr, "Warning:") {
-				t.Errorf("expected no warning for resolvable %s chart, got:\n%s", sourceKind, stderr)
-			}
-		})
+	if len(outputs) != 1 {
+		t.Fatalf("expected 1 rendered output for GitRepository chart, got %d (stderr:\n%s)", len(outputs), stderr)
+	}
+	rendered := string(outputs[0])
+	if !strings.Contains(rendered, "from-local-chart") {
+		t.Errorf("expected local chart to render for GitRepository source:\n%s", rendered)
+	}
+	if strings.Contains(stderr, "Warning:") {
+		t.Errorf("expected no warning for resolvable GitRepository chart, got:\n%s", stderr)
 	}
 }
 
 // TestInflateHelmReleasesShared_LocalSourceChartMissing verifies that when the
-// chart path of a GitRepository/Bucket-sourced HelmRelease does not exist
-// locally, a warning is printed and the release is skipped.
+// chart path of a GitRepository-sourced HelmRelease does not exist locally, a
+// warning is printed and the release is skipped.
 func TestInflateHelmReleasesShared_LocalSourceChartMissing(t *testing.T) {
 	repoRoot := t.TempDir()
 

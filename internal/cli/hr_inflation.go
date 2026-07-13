@@ -132,10 +132,12 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 					hr.Metadata.Namespace, hr.Metadata.Name)
 				continue
 			}
-			// Chart sourced from a GitRepository/Bucket: the chart already lives in
-			// the local checkout, so resolve it as a directory path (no network).
+			// Chart sourced from a GitRepository: the chart already lives in the
+			// local checkout, so resolve it as a directory path (no network).
 			// Mirrors how Kustomization.spec.path is resolved via securejoin.
-			if sourceKind := hr.Spec.Chart.Spec.SourceRef.Kind; sourceKind == flux.KindGitRepository || sourceKind == flux.KindBucket {
+			// (Bucket sources are not supported — their content lives in object
+			// storage, never in the git checkout; see README limitations.)
+			if sourceKind := hr.Spec.Chart.Spec.SourceRef.Kind; sourceKind == flux.KindGitRepository {
 				resolved, err := securejoin.SecureJoin(repoRoot, hr.Spec.Chart.Spec.Chart)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: cannot safely resolve chart path %s for HelmRelease %s/%s: %v, skipping\n",
