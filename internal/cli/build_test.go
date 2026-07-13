@@ -1781,3 +1781,51 @@ metadata:
 		t.Errorf("legitimate loose resource 'real-cm' missing from output:\n%s", combined)
 	}
 }
+
+// TestBuildSubdirectoriesAndLooseFiles_OrphanComponentNoLeak is the regression
+// test for the second loose-file path (buildSubdirectoriesAndLooseFiles in
+// diff.go), entered when a Flux Kustomization's spec.path is a directory WITHOUT
+// its own kustomization.yaml. The orphan Component skip must apply here too —
+// not only in buildKustomizeOverlays — so the Component doc and its resources
+// never leak via this code path.
+func TestBuildSubdirectoriesAndLooseFiles_OrphanComponentNoLeak(t *testing.T) {
+	// sourcePath has NO kustomization.yaml itself (case 3 of buildSourcePath).
+	sourcePath := t.TempDir()
+
+	// Orphan Component subdirectory.
+	compDir := filepath.Join(sourcePath, "components", "foo")
+	writeHelper(t, compDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - dep.yaml
+`)
+	writeHelper(t, compDir, "dep.yaml", `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: comp-app
+`)
+
+	// A legitimate loose resource directly under sourcePath — must remain.
+	writeHelper(t, sourcePath, "real.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: real-cm
+`)
+
+	builder := kustomize.NewBuilder(sourcePath)
+	output, err := buildSubdirectoriesAndLooseFiles(builder, sourcePath, make(buildCache))
+	if err != nil {
+		t.Fatalf("buildSubdirectoriesAndLooseFiles: %v", err)
+	}
+	combined := string(output)
+
+	if strings.Contains(combined, "kind: Component") {
+		t.Errorf("orphan Component doc leaked via buildSubdirectoriesAndLooseFiles:\n%s", combined)
+	}
+	if strings.Contains(combined, "comp-app") {
+		t.Errorf("orphan Component resource 'comp-app' leaked via buildSubdirectoriesAndLooseFiles:\n%s", combined)
+	}
+	if !strings.Contains(combined, "real-cm") {
+		t.Errorf("legitimate loose resource 'real-cm' missing from output:\n%s", combined)
+	}
+}
