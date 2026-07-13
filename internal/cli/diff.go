@@ -390,14 +390,6 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 				continue
 			}
 
-			// Apply postBuild variable substitution.
-			if flux.SubstituteNeeded(ks) {
-				vars := flux.ResolveSubstituteVars(ks, configMaps)
-				if len(vars) > 0 {
-					output = flux.ApplySubstitution(output, vars)
-				}
-			}
-
 			// Apply Kustomization.spec.patches (JSON6902).
 			if len(ks.Spec.Patches) > 0 {
 				patched, err := kustomize.ApplyPatches(output, ks.Spec.Patches, sourcePath)
@@ -406,19 +398,6 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 						ks.Metadata.Namespace, ks.Metadata.Name, err)
 				} else {
 					output = patched
-				}
-			}
-
-			// Apply Kustomization.spec.targetNamespace — sets metadata.namespace
-			// on all namespaced resources (Flux controller behavior). Applied
-			// after patches so patch targets resolve against original namespaces.
-			if ks.Spec.TargetNamespace != "" {
-				namespaced, err := kustomize.ApplyTargetNamespace(output, ks.Spec.TargetNamespace)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to apply targetNamespace %q for %s/%s: %v\n",
-						ks.Spec.TargetNamespace, ks.Metadata.Namespace, ks.Metadata.Name, err)
-				} else {
-					output = namespaced
 				}
 			}
 
@@ -431,6 +410,28 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 						ks.Metadata.Namespace, ks.Metadata.Name, err)
 				} else {
 					output = rewritten
+				}
+			}
+
+			// Apply Kustomization.spec.targetNamespace — sets metadata.namespace
+			// on all namespaced resources (Flux controller behavior).
+			if ks.Spec.TargetNamespace != "" {
+				namespaced, err := kustomize.ApplyTargetNamespace(output, ks.Spec.TargetNamespace)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to apply targetNamespace %q for %s/%s: %v\n",
+						ks.Spec.TargetNamespace, ks.Metadata.Namespace, ks.Metadata.Name, err)
+				} else {
+					output = namespaced
+				}
+			}
+
+			// Apply postBuild variable substitution LAST, as in real Flux — right
+			// before apply. This lets ${VAR} references inside the content added by
+			// patches/images/targetNamespace be resolved too.
+			if flux.SubstituteNeeded(ks) {
+				vars := flux.ResolveSubstituteVars(ks, configMaps)
+				if len(vars) > 0 {
+					output = flux.ApplySubstitution(output, vars)
 				}
 			}
 

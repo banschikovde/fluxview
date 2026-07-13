@@ -623,6 +623,97 @@ spec:
 	}
 }
 
+// TestBuildAllKustomizations_SubstituteAfterPatches verifies the post-build
+// transformation order matches Flux: postBuild.substitute runs LAST, after
+// patches, so ${VAR} references inside a patch's content are resolved. This
+// guards the bug where substitution ran before patches, leaving ${VAR} literal.
+func TestBuildAllKustomizations_SubstituteAfterPatches(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	overlayDir := filepath.Join(repoRoot, "apps", "base")
+	writeHelper(t, overlayDir, "deployment.yaml", `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  replicas: 1
+`)
+	writeHelper(t, overlayDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - deployment.yaml
+`)
+
+	// Flux Kustomization: a patch that injects ${REPLICAS}, plus postBuild
+	// substitution providing REPLICAS=5.
+	clusterPath := filepath.Join(repoRoot, "clusters", "test")
+	writeHelper(t, clusterPath, "ks.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: app
+  namespace: flux-system
+spec:
+  path: ../../apps/base
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  patches:
+    - target:
+        kind: Deployment
+        name: app
+      patch: |-
+        - op: replace
+          path: /spec/replicas
+          value: ${REPLICAS}
+  postBuild:
+    substitute:
+      REPLICAS: "5"
+`)
+
+	ctx := context.Background()
+	kustomizations, err := flux.NewParser(clusterPath).ParseKustomizations(ctx)
+	if err != nil {
+		t.Fatalf("ParseKustomizations: %v", err)
+	}
+
+	builder := kustomize.NewBuilder(repoRoot)
+	buildCache := make(buildCache)
+	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, true, buildCache)
+	if err != nil {
+		t.Fatalf("buildAllKustomizations: %v", err)
+	}
+
+	out := string(output)
+	// Extract just the Deployment document: the combined output also includes the
+	// Flux Kustomization manifest (prepended as-is), whose spec.patches definition
+	// legitimately still contains the literal ${REPLICAS} — that is the KS source,
+	// not a build artifact, and substitution must not touch it.
+	var deployDoc string
+	for _, doc := range flux.SplitYAMLText([]byte(out)) {
+		var m struct {
+			Kind     string `yaml:"kind"`
+			Metadata struct {
+				Name string `yaml:"name"`
+			} `yaml:"metadata"`
+		}
+		if yaml.Unmarshal([]byte(doc), &m) == nil && m.Kind == "Deployment" && m.Metadata.Name == "app" {
+			deployDoc = doc
+			break
+		}
+	}
+	if deployDoc == "" {
+		t.Fatalf("Deployment app not found in output:\n%s", out)
+	}
+	// The variable injected by the patch must be resolved by the (now final)
+	// substitution step — it must NOT remain literal in the rendered resource.
+	if strings.Contains(deployDoc, "${REPLICAS}") {
+		t.Errorf("expected ${REPLICAS} to be substituted in the Deployment, but it remained literal:\n%s", deployDoc)
+	}
+	if !strings.Contains(deployDoc, "replicas: 5") {
+		t.Errorf("expected 'replicas: 5' in the Deployment after substitution of the patched value:\n%s", deployDoc)
+	}
+}
+
 // Test: Two Flux Kustomizations referencing the same shared base — the
 // HelmRelease appears in the build output (possibly twice), dedup is handled
 // internally by buildHRInflation.
