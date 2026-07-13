@@ -194,7 +194,13 @@ fluxview:diff:
 
 Apache-2.0
 
+## Limitations
+
+These are intentional non-goals (not planned unless requested). In all cases the affected HelmReleases are skipped with a warning rather than rendered incorrectly.
+
+- **Bucket-sourced Helm charts are not supported** — `HelmRelease.spec.chart.spec.sourceRef.kind: Bucket` is not resolved (unlike `GitRepository`, which works since the chart already lives in the local checkout). Bucket content lives in S3-compatible object storage and would require fetching it separately (endpoint/credentials from `spec.secretRef`) — out of scope for now.
+- **`HelmRelease.spec.chartRef.kind: HelmChart` is not supported** — only `chartRef.kind: OCIRepository` is resolved. Referencing a standalone `HelmChart` resource (used to share one chart artifact across multiple HelmReleases) is a rare, advanced pattern — HelmReleases using it are skipped with a warning ("has no chart name").
+
 ## TODO
 
 - **Security: Docker image runs as root** — add non-root user to the runtime stage. Requires fixed UID/GID and `--user` documentation for bind-mount compatibility (see #4 in code review).
-- **Bucket-sourced Helm charts are not supported** — `HelmRelease.spec.chart.spec.sourceRef.kind: Bucket` is not resolved (unlike `GitRepository`, which works since the chart already lives in the local checkout). Bucket content lives in S3-compatible object storage and would require fetching it separately (endpoint/credentials from `spec.secretRef`) — out of scope for now. HelmReleases with a Bucket-sourced chart are skipped with a warning.
