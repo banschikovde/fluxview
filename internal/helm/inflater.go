@@ -38,7 +38,9 @@ func NewInflater() (*Inflater, error) {
 	cacheDir := filepath.Join(os.TempDir(), "fluxview-helm-cache")
 	settings.RepositoryCache = filepath.Join(cacheDir, "repository")
 	settings.RepositoryConfig = filepath.Join(cacheDir, "repositories.yaml")
-	_ = os.MkdirAll(settings.RepositoryCache, 0755)
+	if err := os.MkdirAll(settings.RepositoryCache, 0755); err != nil {
+		return nil, fmt.Errorf("creating helm cache dir %s: %w", settings.RepositoryCache, err)
+	}
 
 	return &Inflater{settings: settings}, nil
 }

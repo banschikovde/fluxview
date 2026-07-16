@@ -7,6 +7,7 @@ package validate
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -167,6 +168,12 @@ func (v *Validator) loadCRDFile(path string) {
 	for {
 		var crd apiextv1.CustomResourceDefinition
 		if err := decoder.Decode(&crd); err != nil {
+			if err != io.EOF {
+				// A non-EOF decode error means a malformed/truncated CRD
+				// document: warn so missing schemas don't disappear silently,
+				// then stop reading this file.
+				fmt.Fprintf(os.Stderr, "Warning: could not decode a CRD document in %s: %v\n", path, err)
+			}
 			break
 		}
 		if crd.Kind != "CustomResourceDefinition" {
