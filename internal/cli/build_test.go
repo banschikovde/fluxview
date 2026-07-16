@@ -2109,3 +2109,109 @@ metadata:
 		t.Errorf("legitimate loose resource 'real-cm' missing from output:\n%s", combined)
 	}
 }
+
+// makeUnreadable sets path to mode 0 so reads fail (EACCES) for a non-root
+// caller, and restores the mode on cleanup so TempDir teardown works.
+func makeUnreadable(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatalf("chmod %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+}
+
+// skipIfReadable aborts the test as skipped when the file is still readable
+// after makeUnreadable (running as root, or a platform that ignores mode 0) —
+// the warning-under-test can never fire in that case.
+func skipIfReadable(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.ReadFile(path); err == nil {
+		t.Skipf("cannot make %s unreadable in this environment (root or unsupported platform)", path)
+	}
+}
+
+// TestBuildSubdirectoriesAndLooseFiles_UnreadableFileWarns verifies that an
+// unreadable loose YAML file is reported via stderr (not silently skipped)
+// while readable loose resources in the same tree are still collected.
+func TestBuildSubdirectoriesAndLooseFiles_UnreadableFileWarns(t *testing.T) {
+	repoRoot := t.TempDir()
+	sourcePath := filepath.Join(repoRoot, "loose")
+
+	// Legitimate loose k8s resource (must still be collected).
+	writeHelper(t, sourcePath, "real.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: real-cm
+`)
+
+	// Unreadable loose YAML file.
+	bad := filepath.Join(sourcePath, "broken.yaml")
+	writeHelper(t, sourcePath, "broken.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bad-cm
+`)
+	makeUnreadable(t, bad)
+	skipIfReadable(t, bad)
+
+	builder := kustomize.NewBuilder(repoRoot)
+	var output []byte
+	stderr := captureStderr(func() {
+		var err error
+		output, err = buildSubdirectoriesAndLooseFiles(builder, sourcePath, make(buildCache))
+		if err != nil {
+			t.Fatalf("buildSubdirectoriesAndLooseFiles: %v", err)
+		}
+	})
+
+	if !strings.Contains(stderr, "Warning: could not read") || !strings.Contains(stderr, bad) {
+		t.Errorf("expected an unreadable-file warning mentioning %s, got:\n%s", bad, stderr)
+	}
+	if !strings.Contains(string(output), "real-cm") {
+		t.Errorf("expected the readable resource to still be collected, got:\n%s", output)
+	}
+}
+
+// TestBuildKustomizeOverlays_UnreadableFileWarns mirrors the above for the
+// build-time loose-file walker inside buildKustomizeOverlays.
+func TestBuildKustomizeOverlays_UnreadableFileWarns(t *testing.T) {
+	repoRoot := t.TempDir()
+	clusterPath := filepath.Join(repoRoot, "cluster")
+
+	writeHelper(t, clusterPath, "real.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: real-cm
+`)
+
+	bad := filepath.Join(clusterPath, "broken.yaml")
+	writeHelper(t, clusterPath, "broken.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bad-cm
+`)
+	makeUnreadable(t, bad)
+	skipIfReadable(t, bad)
+
+	var outputs [][]byte
+	stderr := captureStderr(func() {
+		outputs = buildKustomizeOverlays(clusterPath, repoRoot, nil, make(buildCache))
+	})
+
+	if !strings.Contains(stderr, "Warning: could not read") || !strings.Contains(stderr, bad) {
+		t.Errorf("expected an unreadable-file warning mentioning %s, got:\n%s", bad, stderr)
+	}
+	combined := strings.Join(bytesSliceToStrings(outputs), "")
+	if !strings.Contains(combined, "real-cm") {
+		t.Errorf("expected the readable resource to still be collected, got:\n%s", combined)
+	}
+}
+
+// bytesSliceToStrings joins a [][]byte into a single string for substring checks.
+func bytesSliceToStrings(in [][]byte) []string {
+	out := make([]string, len(in))
+	for i, b := range in {
+		out[i] = string(b)
+	}
+	return out
+}

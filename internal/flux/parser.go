@@ -166,6 +166,7 @@ func (p *Parser) ParseConfigMaps(ctx context.Context) ([]ConfigMap, error) {
 	err := walkYAMLFiles(ctx, p.RootPath, func(path string) error {
 		data, err := os.ReadFile(path)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not read %s: %v\n", path, err)
 			return nil
 		}
 
@@ -177,6 +178,7 @@ func (p *Parser) ParseConfigMaps(ctx context.Context) ([]ConfigMap, error) {
 			}
 			cm, err := parseConfigMapDoc([]byte(trimmed))
 			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMap document in %s: %v\n", path, err)
 				continue
 			}
 			if cm != nil {
@@ -200,6 +202,7 @@ func (p *Parser) ParseSecrets(ctx context.Context) ([]Secret, error) {
 	err := walkYAMLFiles(ctx, p.RootPath, func(path string) error {
 		data, err := os.ReadFile(path)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not read %s: %v\n", path, err)
 			return nil
 		}
 
@@ -211,6 +214,7 @@ func (p *Parser) ParseSecrets(ctx context.Context) ([]Secret, error) {
 			}
 			secret, err := parseSecretDoc([]byte(trimmed))
 			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: could not parse Secret document in %s: %v\n", path, err)
 				continue
 			}
 			if secret != nil {

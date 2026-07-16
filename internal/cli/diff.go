@@ -642,6 +642,7 @@ func buildSubdirectoriesAndLooseFiles(builder *kustomize.Builder, sourcePath str
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not read %s: %v\n", path, err)
 			return nil
 		}
 		results = append(results, string(data))

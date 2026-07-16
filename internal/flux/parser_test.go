@@ -1,6 +1,7 @@
 package flux
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -551,5 +552,107 @@ func TestWalkYAMLFiles_SkipsChartSubtree(t *testing.T) {
 		if !seen {
 			t.Errorf("expected walker to visit %q, it did not (visited: %v)", p, visited)
 		}
+	}
+}
+
+// captureStderr temporarily redirects os.Stderr, runs f, and returns what was
+// written. Mirrors the helper in internal/cli/build_test.go (separate package).
+func captureStderr(f func()) string {
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	f()
+	w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	return buf.String()
+}
+
+// makeUnreadable sets path to mode 0 so subsequent reads fail (EACCES) for a
+// non-root caller, and restores the mode on cleanup so TempDir teardown works.
+func makeUnreadable(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatalf("chmod %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+}
+
+// skipIfReadable is called right after makeUnreadable: if the file is still
+// readable (root, or a platform that ignores mode 0), the warning-under-test
+// can never fire, so the test is skipped instead of failing.
+func skipIfReadable(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.ReadFile(path); err == nil {
+		t.Skipf("cannot make %s unreadable in this environment (root or unsupported platform)", path)
+	}
+}
+
+// TestParseConfigMaps_UnreadableFileWarns verifies that an unreadable YAML file
+// is reported via stderr (not silently skipped) while legitimate ConfigMaps in
+// the same directory are still discovered — the walk continues.
+func TestParseConfigMaps_UnreadableFileWarns(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "configmap.yaml"),
+		[]byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n"), 0o644); err != nil {
+		t.Fatalf("write configmap.yaml: %v", err)
+	}
+
+	bad := filepath.Join(tmpDir, "broken.yaml")
+	if err := os.WriteFile(bad,
+		[]byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: bad\n"), 0o644); err != nil {
+		t.Fatalf("write broken.yaml: %v", err)
+	}
+	makeUnreadable(t, bad)
+	skipIfReadable(t, bad)
+
+	parser := NewParser(tmpDir)
+	stderr := captureStderr(func() {
+		cms, err := parser.ParseConfigMaps(context.Background())
+		if err != nil {
+			t.Fatalf("ParseConfigMaps: %v", err)
+		}
+		if len(cms) != 1 {
+			t.Errorf("expected the readable ConfigMap to still be found, got %d", len(cms))
+		}
+	})
+
+	if !strings.Contains(stderr, "Warning: could not read") || !strings.Contains(stderr, bad) {
+		t.Errorf("expected an unreadable-file warning mentioning %s, got:\n%s", bad, stderr)
+	}
+}
+
+// TestParseSecrets_UnreadableFileWarns mirrors the ConfigMap case for Secrets.
+func TestParseSecrets_UnreadableFileWarns(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "secret.yaml"),
+		[]byte("apiVersion: v1\nkind: Secret\nmetadata:\n  name: sec\ndata:\n  k: dj0=\n"), 0o644); err != nil {
+		t.Fatalf("write secret.yaml: %v", err)
+	}
+
+	bad := filepath.Join(tmpDir, "broken.yaml")
+	if err := os.WriteFile(bad,
+		[]byte("apiVersion: v1\nkind: Secret\nmetadata:\n  name: bad\n"), 0o644); err != nil {
+		t.Fatalf("write broken.yaml: %v", err)
+	}
+	makeUnreadable(t, bad)
+	skipIfReadable(t, bad)
+
+	parser := NewParser(tmpDir)
+	stderr := captureStderr(func() {
+		secrets, err := parser.ParseSecrets(context.Background())
+		if err != nil {
+			t.Fatalf("ParseSecrets: %v", err)
+		}
+		if len(secrets) != 1 {
+			t.Errorf("expected the readable Secret to still be found, got %d", len(secrets))
+		}
+	})
+
+	if !strings.Contains(stderr, "Warning: could not read") || !strings.Contains(stderr, bad) {
+		t.Errorf("expected an unreadable-file warning mentioning %s, got:\n%s", bad, stderr)
 	}
 }

@@ -344,6 +344,7 @@ func buildKustomizeOverlays(clusterPath, repoRoot string, excludePaths map[strin
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not read %s: %v\n", path, err)
 			return nil
 		}
 		// Only include documents that look like k8s resources.
@@ -421,6 +422,7 @@ func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomi
 		}
 		cms, err := flux.ParseConfigMapsFromBytes(output)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMaps from build output for %s: %v\n", dir, err)
 			continue
 		}
 		builtCMs = append(builtCMs, cms...)
