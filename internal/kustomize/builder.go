@@ -83,7 +83,25 @@ func newRestrictedFs(rootDir string) filesys.FileSystem {
 
 // isWithinRoot checks if path stays within rootDir after resolution.
 func (fs *restrictedFs) isWithinRoot(path string) bool {
-	return IsPathWithinRoot(path, fs.rootDir)
+	// fs.rootDir is already absolute + symlink-resolved at construction (see
+	// newRestrictedFs), so don't re-resolve it on every file access — only
+	// the path is resolved here (the actual security check).
+	return isWithinResolvedRoot(path, fs.rootDir)
+}
+
+// isWithinResolvedRoot reports whether path resolves to within resolvedRoot,
+// which must already be absolute and symlink-resolved. Only path is resolved.
+func isWithinResolvedRoot(path, resolvedRoot string) bool {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		resolved = abs
+	}
+	return resolved == resolvedRoot ||
+		strings.HasPrefix(resolved+string(filepath.Separator), resolvedRoot+string(filepath.Separator))
 }
 
 // IsPathWithinRoot checks if path resolves to within root (after symlink
@@ -96,16 +114,7 @@ func IsPathWithinRoot(path, root string) bool {
 	if resolved, err := filepath.EvalSymlinks(absRoot); err == nil {
 		absRoot = resolved
 	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return false
-	}
-	resolved, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		resolved = abs
-	}
-	return resolved == absRoot ||
-		strings.HasPrefix(resolved+string(filepath.Separator), absRoot+string(filepath.Separator))
+	return isWithinResolvedRoot(path, absRoot)
 }
 
 func (fs *restrictedFs) ReadFile(path string) ([]byte, error) {

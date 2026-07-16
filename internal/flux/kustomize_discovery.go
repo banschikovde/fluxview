@@ -16,16 +16,23 @@ type nativeKustomization struct {
 	Kind       string `yaml:"kind"`
 }
 
-// DiscoverKustomizeDirs scans subdirectories under rootPath for native kustomize
-// overlays (kustomization.yaml/yml/Kustomization with apiVersion kustomize.config.k8s.io).
-// It excludes:
+// DiscoverKustomizeDirsAndFiles walks rootPath once and returns both:
+//   - buildDirs: native kustomize overlays to build, with the same selection
+//     and dedup as DiscoverKustomizeDirs.
+//   - fileDirs: every directory containing a kustomization file of any kind
+//     (same set as DiscoverKustomizationFileDirs).
+//
+// Combining the two in a single walk avoids walking the tree and re-reading
+// each kustomization.yaml twice at call sites that need both (the loose-file
+// walkers in internal/cli).
+//
+// buildDirs excludes:
 //   - the rootPath itself
 //   - directories that contain Flux Kustomization resources
 //   - subdirectories of already discovered kustomize dirs
 //   - directories referenced as resources by another discovered kustomization
 //     (e.g. sibling base/ referenced via resources: [../base])
-func DiscoverKustomizeDirs(rootPath string) ([]string, error) {
-	// First pass: discover ALL kustomize dirs without dedup.
+func DiscoverKustomizeDirsAndFiles(rootPath string) (buildDirs, fileDirs []string, err error) {
 	type kustEntry struct {
 		path      string
 		absPath   string
@@ -39,7 +46,7 @@ func DiscoverKustomizeDirs(rootPath string) ([]string, error) {
 		absRootResolved = real
 	}
 
-	err := filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || !d.IsDir() {
 			return nil
 		}
@@ -56,6 +63,10 @@ func DiscoverKustomizeDirs(rootPath string) ([]string, error) {
 		if kustData == nil {
 			return nil
 		}
+		// Any directory with a kustomization file is a "file dir" — used to
+		// keep the loose-file walker out of kustomize inputs (Component,
+		// Flux Kustomization, native overlays alike).
+		fileDirs = append(fileDirs, path)
 
 		var kust nativeKustomization
 		if err := yaml.Unmarshal(kustData, &kust); err != nil {
@@ -65,18 +76,15 @@ func DiscoverKustomizeDirs(rootPath string) ([]string, error) {
 			return nil
 		}
 
-		// Parse resources to track base/overlay references.
-		resources := parseResourcePaths(kustData, path)
-
 		entries = append(entries, kustEntry{
 			path:      path,
 			absPath:   absPath,
-			resources: resources,
+			resources: parseResourcePaths(kustData, path),
 		})
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Build set of all referenced paths (bases referenced by overlays).
@@ -87,9 +95,8 @@ func DiscoverKustomizeDirs(rootPath string) ([]string, error) {
 		}
 	}
 
-	// Second pass: filter — keep only dirs that are NOT referenced by another
-	// kustomization (they'll be built as part of that kustomization).
-	var dirs []string
+	// Filter — keep only dirs that are NOT referenced by another kustomization
+	// (they'll be built as part of that kustomization).
 	discovered := make(map[string]bool)
 	for _, e := range entries {
 		// Skip if referenced by another kustomization via resources: field
@@ -113,32 +120,21 @@ func DiscoverKustomizeDirs(rootPath string) ([]string, error) {
 			continue
 		}
 
-		dirs = append(dirs, e.path)
+		buildDirs = append(buildDirs, e.path)
 		discovered[e.absPath] = true
 	}
 
-	return dirs, nil
+	return buildDirs, fileDirs, nil
 }
 
-// DiscoverKustomizationFileDirs returns all directories under rootPath that
-// contain a kustomization file (kustomization.yaml/yml/Kustomization),
-// regardless of the declared kind. The loose-file walker uses this to skip any
-// such directory's files so they don't leak as raw, untransformed resources —
-// this notably covers orphan kind: Component directories (not referenced by any
-// Kustomization) whose kustomization.yaml and resource inputs would otherwise
-// appear in the output. Only kind: Kustomization directories are actually built.
-func DiscoverKustomizationFileDirs(rootPath string) ([]string, error) {
-	var dirs []string
-	err := filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || !d.IsDir() {
-			return nil
-		}
-		if readKustomizationFile(path) != nil {
-			dirs = append(dirs, path)
-		}
-		return nil
-	})
-	return dirs, err
+// DiscoverKustomizeDirs scans subdirectories under rootPath for native kustomize
+// overlays (kustomization.yaml/yml/Kustomization with apiVersion kustomize.config.k8s.io)
+// and returns the buildable directories (with dedup). See DiscoverKustomizeDirsAndFiles
+// for the selection rules. Callers that also need every kustomization-file directory
+// should call DiscoverKustomizeDirsAndFiles once instead of this plus DiscoverKustomizationFileDirs.
+func DiscoverKustomizeDirs(rootPath string) ([]string, error) {
+	buildDirs, _, err := DiscoverKustomizeDirsAndFiles(rootPath)
+	return buildDirs, err
 }
 
 // readKustomizationFile reads the first found kustomization file in dir.

@@ -465,13 +465,7 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 		return nil, nil
 	}
 
-	combined := ""
-	for i, r := range results {
-		if i > 0 {
-			combined += "\n---\n"
-		}
-		combined += r
-	}
+	combined := strings.Join(results, "\n---\n")
 
 	// Deduplicate resources by kind/namespace/name — prevents duplicate
 	// output when the same directory is built by both buildAllKustomizations
@@ -602,7 +596,10 @@ func buildSourcePath(builder *kustomize.Builder, sourcePath, repoRoot string, ca
 // sourcePath, builds each one via kustomize (applying namespace/transformers),
 // then reads any loose YAML files not covered by a kustomization.
 func buildSubdirectoriesAndLooseFiles(builder *kustomize.Builder, sourcePath, repoRoot string, cache buildCache) ([]byte, error) {
-	kustomizeDirs, err := flux.DiscoverKustomizeDirs(sourcePath)
+	// Single tree walk returns both the native overlays to build and every
+	// kustomization-file directory (any kind) to keep the loose-file walker
+	// out of.
+	kustomizeDirs, allKustFileDirs, err := flux.DiscoverKustomizeDirsAndFiles(sourcePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: kustomize directory discovery failed for %s: %v\n", sourcePath, err)
 		return readYAMLFilesRecursive(sourcePath, repoRoot)
@@ -620,7 +617,7 @@ func buildSubdirectoriesAndLooseFiles(builder *kustomize.Builder, sourcePath, re
 			results = append(results, string(output))
 		}
 	}
-	for _, dir := range mustDiscoverKustomizationFileDirs(sourcePath) {
+	for _, dir := range allKustFileDirs {
 		kustDirs[dir] = true
 	}
 

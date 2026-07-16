@@ -36,25 +36,6 @@ spec:
 			wantName: "apps",
 		},
 		{
-			name: "HelmRelease resource",
-			yaml: `apiVersion: helm.toolkit.fluxcd.io/v2beta1
-kind: HelmRelease
-metadata:
-  name: podinfo
-  namespace: flux-system
-spec:
-  chart:
-    spec:
-      chart: podinfo
-      version: 6.0.0
-      sourceRef:
-        kind: HelmRepository
-        name: podinfo
-`,
-			wantKind: KindHelmRelease,
-			wantName: "podinfo",
-		},
-		{
 			name: "HelmRepository resource",
 			yaml: `apiVersion: source.toolkit.fluxcd.io/v1beta2
 kind: HelmRepository
@@ -102,9 +83,6 @@ metadata:
 			var gotName, gotKind string
 			switch v := result.(type) {
 			case Kustomization:
-				gotName = v.Metadata.Name
-				gotKind = v.Kind
-			case HelmRelease:
 				gotName = v.Metadata.Name
 				gotKind = v.Kind
 			case HelmRepository:

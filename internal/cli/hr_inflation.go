@@ -37,6 +37,10 @@ func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespac
 	// Extract + dedup HelmReleases from the build output.
 	allHRs, _ := flux.ParseHelmReleasesFromBytes(output)
 	seen := make(map[string]bool)
+	// In-place dedup reusing allHRs's backing array (allHRs[:0] aliases the
+	// same storage). Safe because we only append values already read from
+	// allHRs and never read past len(helmReleases); the source range loop
+	// iterates the original allHRs by value.
 	helmReleases := allHRs[:0]
 	for _, hr := range allHRs {
 		key := hr.Metadata.Namespace + "/" + hr.Metadata.Name

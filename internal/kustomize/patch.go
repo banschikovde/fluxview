@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/banschikovde/fluxview/internal/yamlutil"
 	"github.com/cyphar/filepath-securejoin"
 	"gopkg.in/yaml.v3"
 	"sigs.k8s.io/kustomize/api/krusty"
@@ -151,7 +152,7 @@ func runInMemoryBuild(resources []byte, kust types.Kustomization) ([]byte, error
 	// Split multi-doc YAML into separate files — kustomize works best with
 	// individual resource files rather than a single multi-doc file.
 	var resourceFiles []string
-	for i, doc := range splitYAMLDocs(resources) {
+	for i, doc := range yamlutil.SplitYAMLText(resources) {
 		doc = strings.TrimSpace(doc)
 		if doc == "" {
 			continue
@@ -192,7 +193,7 @@ func dedupInputDocs(data []byte) []byte {
 	seen := make(map[key]int)
 	var result []string
 
-	for _, doc := range splitYAMLDocs(data) {
+	for _, doc := range yamlutil.SplitYAMLText(data) {
 		var meta struct {
 			APIVersion string `yaml:"apiVersion"`
 			Kind       string `yaml:"kind"`
@@ -219,36 +220,4 @@ func dedupInputDocs(data []byte) []byte {
 	}
 
 	return []byte(strings.Join(result, "\n---\n"))
-}
-
-// splitYAMLDocs splits multi-doc YAML on document separators.
-// A separator is a line that is exactly "---" at column 0 (no indentation),
-// matching the same logic as flux.SplitYAMLText to avoid false splits on
-// content like -----BEGIN CERTIFICATE----- inside block scalars.
-func splitYAMLDocs(data []byte) []string {
-	lines := strings.Split(string(data), "\n")
-	var docs []string
-	var current []string
-
-	flush := func() {
-		if len(current) == 0 {
-			return
-		}
-		doc := strings.TrimSpace(strings.Join(current, "\n"))
-		if doc != "" {
-			docs = append(docs, doc)
-		}
-		current = nil
-	}
-
-	for _, line := range lines {
-		if strings.TrimRight(line, " \t") == "---" {
-			flush()
-			continue
-		}
-		current = append(current, line)
-	}
-	flush()
-
-	return docs
 }

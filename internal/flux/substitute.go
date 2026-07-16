@@ -74,6 +74,9 @@ func ResolveSubstituteVars(ks Kustomization, configMaps []ConfigMap) map[string]
 // varPattern matches ${VAR}, ${VAR:=default}, ${VAR:-default}.
 var varPattern = regexp.MustCompile(`\$\{([^}]+)\}`)
 
+// parenVarPattern matches $(VAR).
+var parenVarPattern = regexp.MustCompile(`\$\(([^)]+)\)`)
+
 // ApplySubstitution replaces ${VAR}, ${VAR:=default}, ${VAR:-default},
 // and $(VAR) patterns in YAML content with resolved values.
 // Unresolved variables without a default are replaced with empty string,
@@ -107,10 +110,17 @@ func ApplySubstitution(data []byte, vars map[string]string) []byte {
 		return ""
 	})
 
-	// Handle $(VAR) syntax.
-	for key, value := range vars {
-		result = strings.ReplaceAll(result, "$("+key+")", value)
-	}
+	// Handle $(VAR) syntax in a single pass. Unresolved $(VAR) are left as-is:
+	// unlike ${VAR} (which Flux replaces with empty string), the previous
+	// strings.ReplaceAll loop only substituted variables that were actually
+	// present in vars, so this preserves that behavior.
+	result = parenVarPattern.ReplaceAllStringFunc(result, func(match string) string {
+		key := match[2 : len(match)-1] // strip $( and )
+		if val, ok := vars[key]; ok {
+			return val
+		}
+		return match
+	})
 
 	return []byte(result)
 }

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/banschikovde/fluxview/internal/yamlutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -196,7 +197,7 @@ spec:
 // document matching the given kind/name, plus whether it was found.
 func namespaceOf(t *testing.T, data []byte, kind, name string) (string, bool) {
 	t.Helper()
-	for _, doc := range splitYAMLDocs(data) {
+	for _, doc := range yamlutil.SplitYAMLText(data) {
 		var m struct {
 			Kind     string `yaml:"kind"`
 			Metadata struct {
@@ -315,7 +316,7 @@ metadata:
 // workload-like document, parsed out of multi-doc YAML.
 func firstContainerImage(t *testing.T, data []byte) string {
 	t.Helper()
-	for _, doc := range splitYAMLDocs(data) {
+	for _, doc := range yamlutil.SplitYAMLText(data) {
 		var m struct {
 			Spec struct {
 				Template struct {

@@ -290,7 +290,10 @@ func collectKustomizationPaths(repoRoot string, kustomizations []flux.Kustomizat
 }
 
 func buildKustomizeOverlays(clusterPath, repoRoot string, excludePaths map[string]bool, cache buildCache) [][]byte {
-	kustomizeDirs, err := flux.DiscoverKustomizeDirs(clusterPath)
+	// Single tree walk returns both the native overlays to build and every
+	// kustomization-file directory (any kind) to keep the loose-file walker
+	// out of.
+	kustomizeDirs, allKustFileDirs, err := flux.DiscoverKustomizeDirsAndFiles(clusterPath)
 	builder := kustomize.NewBuilder(repoRoot)
 	var outputs [][]byte
 
@@ -310,13 +313,11 @@ func buildKustomizeOverlays(clusterPath, repoRoot string, excludePaths map[strin
 				outputs = append(outputs, output)
 			}
 		}
-	}
-	// Also skip ANY directory containing a kustomization file (any kind),
-	// including orphan kind: Component dirs not returned by DiscoverKustomizeDirs.
-	// Their files are kustomize inputs, not standalone resources — the loose-file
-	// walker must not emit them raw (neither the Component doc nor its resources).
-	for _, dir := range mustDiscoverKustomizationFileDirs(clusterPath) {
-		kustDirs[dir] = true
+		// Also skip ANY directory containing a kustomization file (any kind),
+		// including orphan kind: Component dirs not selected for building.
+		for _, dir := range allKustFileDirs {
+			kustDirs[dir] = true
+		}
 	}
 
 	// Open the repository root as a root-scoped FS so loose-file reads reject
@@ -424,23 +425,14 @@ func isExcludedDir(dir string, excludePaths map[string]bool) bool {
 	return false
 }
 
-// mustDiscoverKustomizationFileDirs returns directories under root that contain
-// a kustomization file of any kind (Kustomization or Component). Errors are
-// treated as "no dirs" — discovery failure must not abort the loose-file walker.
-func mustDiscoverKustomizationFileDirs(root string) []string {
-	dirs, _ := flux.DiscoverKustomizationFileDirs(root)
-	return dirs
-}
-
 // --- ConfigMaps ---
 
 func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomize.Builder, cache buildCache) []flux.ConfigMap {
 	parser := flux.NewParser(clusterPath)
 
-	rawCMs, err := parser.ParseConfigMaps(ctx)
-	if err != nil {
-		rawCMs = nil
-	}
+	// Raw ConfigMaps scanned directly from clusterPath. Errors here are
+	// non-fatal: we fall back to an empty set and still merge built ones below.
+	rawCMs, _ := parser.ParseConfigMaps(ctx)
 
 	kustomizeDirs, err := flux.DiscoverKustomizeDirs(clusterPath)
 	if err != nil {

@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/banschikovde/fluxview/internal/yamlutil"
 )
 
 // Parser discovers and parses Flux resources from the local filesystem.
@@ -232,38 +234,43 @@ func (p *Parser) ParseSecrets(ctx context.Context) ([]Secret, error) {
 }
 
 // parseConfigMapDoc parses a single YAML document as a ConfigMap.
+// The document is parsed into a yaml.Node once; apiVersion/kind are read from
+// the node to dispatch, then the same node is decoded into the target — this
+// avoids a second byte-for-byte parse of the document.
 func parseConfigMapDoc(data []byte) (*ConfigMap, error) {
-	var meta struct {
-		APIVersion string `yaml:"apiVersion"`
-		Kind       string `yaml:"kind"`
-	}
-	if err := yaml.Unmarshal(data, &meta); err != nil {
+	var node yaml.Node
+	if err := yaml.Unmarshal(data, &node); err != nil {
 		return nil, err
 	}
-	if meta.APIVersion != "v1" || meta.Kind != "ConfigMap" {
+	mapping := mappingFor(&node)
+	if mapping == nil {
+		return nil, nil
+	}
+	if mapScalar(mapping, "apiVersion") != "v1" || mapScalar(mapping, "kind") != "ConfigMap" {
 		return nil, nil
 	}
 	var cm ConfigMap
-	if err := yaml.Unmarshal(data, &cm); err != nil {
+	if err := node.Decode(&cm); err != nil {
 		return nil, err
 	}
 	return &cm, nil
 }
 
-// parseSecretDoc parses a single YAML document as a Secret.
+// parseSecretDoc parses a single YAML document as a Secret (single-parse, see parseConfigMapDoc).
 func parseSecretDoc(data []byte) (*Secret, error) {
-	var meta struct {
-		APIVersion string `yaml:"apiVersion"`
-		Kind       string `yaml:"kind"`
-	}
-	if err := yaml.Unmarshal(data, &meta); err != nil {
+	var node yaml.Node
+	if err := yaml.Unmarshal(data, &node); err != nil {
 		return nil, err
 	}
-	if meta.APIVersion != "v1" || meta.Kind != "Secret" {
+	mapping := mappingFor(&node)
+	if mapping == nil {
+		return nil, nil
+	}
+	if mapScalar(mapping, "apiVersion") != "v1" || mapScalar(mapping, "kind") != "Secret" {
 		return nil, nil
 	}
 	var secret Secret
-	if err := yaml.Unmarshal(data, &secret); err != nil {
+	if err := node.Decode(&secret); err != nil {
 		return nil, err
 	}
 	return &secret, nil
@@ -307,74 +314,75 @@ func parseYAMLDocuments(data []byte) ([]interface{}, error) {
 }
 
 // parseSingleDocument parses a single YAML document into the appropriate Flux type.
+// The document is parsed into a yaml.Node once; apiVersion/kind are read from the
+// node to dispatch, then the same node is decoded into the target type — this
+// avoids a second byte-for-byte parse of the document.
 func parseSingleDocument(data []byte) (interface{}, error) {
-	// First, extract apiVersion and kind to determine the type.
-	var meta struct {
-		APIVersion string `yaml:"apiVersion"`
-		Kind       string `yaml:"kind"`
-	}
-
-	if err := yaml.Unmarshal(data, &meta); err != nil {
+	var node yaml.Node
+	if err := yaml.Unmarshal(data, &node); err != nil {
 		return nil, fmt.Errorf("unmarshaling metadata: %w", err)
 	}
-
-	if meta.APIVersion == "" || meta.Kind == "" {
+	mapping := mappingFor(&node)
+	if mapping == nil {
+		return nil, nil
+	}
+	apiVersion := mapScalar(mapping, "apiVersion")
+	kind := mapScalar(mapping, "kind")
+	if apiVersion == "" || kind == "" {
 		return nil, nil
 	}
 
-	// Determine the resource type and parse accordingly.
-	switch meta.Kind {
+	// Determine the resource type and decode the same node into it.
+	switch kind {
 	case KindKustomization:
-		if isKustomizeAPI(meta.APIVersion) {
+		if isKustomizeAPI(apiVersion) {
 			var ks Kustomization
-			if err := yaml.Unmarshal(data, &ks); err != nil {
+			if err := node.Decode(&ks); err != nil {
 				return nil, fmt.Errorf("unmarshaling Kustomization: %w", err)
 			}
 			return ks, nil
 		}
-	case KindHelmRelease:
-		if isHelmAPI(meta.APIVersion) {
-			var hr HelmRelease
-			if err := yaml.Unmarshal(data, &hr); err != nil {
-				return nil, fmt.Errorf("unmarshaling HelmRelease: %w", err)
-			}
-			return hr, nil
-		}
 	case KindHelmRepository:
-		if isSourceAPI(meta.APIVersion) {
+		if isSourceAPI(apiVersion) {
 			var repo HelmRepository
-			if err := yaml.Unmarshal(data, &repo); err != nil {
+			if err := node.Decode(&repo); err != nil {
 				return nil, fmt.Errorf("unmarshaling HelmRepository: %w", err)
 			}
 			return repo, nil
 		}
 	case KindOCIRepository:
-		if isSourceAPI(meta.APIVersion) {
+		if isSourceAPI(apiVersion) {
 			var repo OCIRepository
-			if err := yaml.Unmarshal(data, &repo); err != nil {
+			if err := node.Decode(&repo); err != nil {
 				return nil, fmt.Errorf("unmarshaling OCIRepository: %w", err)
 			}
 			return repo, nil
 		}
-	case "ConfigMap":
-		if meta.APIVersion == "v1" {
-			var cm ConfigMap
-			if err := yaml.Unmarshal(data, &cm); err != nil {
-				return nil, fmt.Errorf("unmarshaling ConfigMap: %w", err)
-			}
-			return cm, nil
-		}
-	case "Secret":
-		if meta.APIVersion == "v1" {
-			var secret Secret
-			if err := yaml.Unmarshal(data, &secret); err != nil {
-				return nil, fmt.Errorf("unmarshaling Secret: %w", err)
-			}
-			return secret, nil
-		}
 	}
 
 	return nil, nil
+}
+
+// mappingFor returns the top-level mapping node of a parsed YAML document, or
+// nil if the document is empty or not a mapping.
+func mappingFor(node *yaml.Node) *yaml.Node {
+	if node == nil || node.Kind != yaml.DocumentNode || len(node.Content) == 0 {
+		return nil
+	}
+	if node.Content[0].Kind != yaml.MappingNode {
+		return nil
+	}
+	return node.Content[0]
+}
+
+// mapScalar returns the string value of a scalar mapping key, or "" if the key
+// is absent or holds a non-scalar value.
+func mapScalar(mapping *yaml.Node, key string) string {
+	v := getMapValue(mapping, key)
+	if v == nil {
+		return ""
+	}
+	return v.Value
 }
 
 // SplitYAMLDocuments splits a multi-document YAML into individual documents.
@@ -404,47 +412,11 @@ func SplitYAMLDocuments(data []byte) []string {
 }
 
 // SplitYAMLText splits multi-doc YAML into individual documents.
-// A document separator is a line that is exactly "---" at column 0
-// (no indentation). This correctly avoids splitting on "---" that appears:
-//   - Inside block scalars (| or >) — content is always indented
-//   - Inside PEM headers like "-----BEGIN CERTIFICATE-----"
-//   - As part of a longer string value
-//
-// Unparseable documents are preserved (conservative behavior) so that
-// downstream functions like RedactSecrets can process all documents.
+// See internal/yamlutil.SplitYAMLText for the implementation; this is a
+// thin wrapper kept so existing callers in the flux package and its users
+// don't depend on yamlutil directly.
 func SplitYAMLText(data []byte) []string {
-	normalized := strings.ReplaceAll(string(data), "\r\n", "\n")
-	lines := strings.Split(normalized, "\n")
-
-	var docs []string
-	var currentLines []string
-
-	flush := func() {
-		if len(currentLines) == 0 {
-			return
-		}
-		doc := strings.TrimSpace(strings.Join(currentLines, "\n"))
-		doc = strings.TrimPrefix(doc, "---")
-		doc = strings.TrimSpace(doc)
-		if doc != "" {
-			docs = append(docs, doc)
-		}
-		currentLines = nil
-	}
-
-	for _, line := range lines {
-		// A document separator is "---" at column 0, optionally with
-		// trailing whitespace. Indented "---" (inside block scalars) or
-		// longer strings like "-----BEGIN" are NOT separators.
-		if strings.TrimRight(line, " \t") == "---" {
-			flush()
-			continue
-		}
-		currentLines = append(currentLines, line)
-	}
-	flush()
-
-	return docs
+	return yamlutil.SplitYAMLText(data)
 }
 
 // isKustomizeAPI checks if the apiVersion belongs to kustomize.toolkit.fluxcd.io.

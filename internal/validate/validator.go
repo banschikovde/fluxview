@@ -70,7 +70,7 @@ func New(schemaDir string) *Validator {
 	defs := loadDefinitions(schemaDir)
 
 	// Recursively load all schema files.
-	filepath.Walk(schemaDir, func(path string, info os.FileInfo, err error) error {
+	if err := filepath.Walk(schemaDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
@@ -83,7 +83,12 @@ func New(schemaDir string) *Validator {
 			v.loadCRDFile(path)
 		}
 		return nil
-	})
+	}); err != nil {
+		// A walk failure (e.g. permission on a subdir) silently yields a
+		// partially-loaded validator, which then masks invalid resources as
+		// "no schema". Warn so the gap is visible.
+		fmt.Fprintf(os.Stderr, "Warning: walking schema dir %s: %v\n", schemaDir, err)
+	}
 
 	return v
 }
