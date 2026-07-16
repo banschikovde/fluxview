@@ -175,59 +175,12 @@ data:
 	}
 }
 
-func TestParseHelmReleases(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	yamlContent := `apiVersion: helm.toolkit.fluxcd.io/v2beta1
-kind: HelmRelease
-metadata:
-  name: podinfo
-  namespace: flux-system
-spec:
-  chart:
-    spec:
-      chart: podinfo
-      version: 6.0.0
-      sourceRef:
-        kind: HelmRepository
-        name: podinfo
-        namespace: flux-system
-  values:
-    replicaCount: 2
-`
-	err := os.WriteFile(filepath.Join(tmpDir, "helmrelease.yaml"), []byte(yamlContent), 0644)
-	if err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-
-	parser := NewParser(tmpDir)
-	results, err := parser.ParseHelmReleases(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(results) != 1 {
-		t.Fatalf("expected 1 HelmRelease, got %d", len(results))
-	}
-
-	if results[0].Metadata.Name != "podinfo" {
-		t.Errorf("name = %q, want %q", results[0].Metadata.Name, "podinfo")
-	}
-	if results[0].Spec.Chart.Spec.Chart != "podinfo" {
-		t.Errorf("chart = %q, want %q", results[0].Spec.Chart.Spec.Chart, "podinfo")
-	}
-	if results[0].Spec.Values["replicaCount"] != nil {
-		val := results[0].Spec.Values["replicaCount"]
-		if val != 2 {
-			t.Errorf("replicaCount = %v, want 2", val)
-		}
-	}
-}
-
 func TestParseMultiDocumentYAML(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Write a multi-document YAML file.
+	// Write a multi-document YAML file: a HelmRepository plus a HelmRelease
+	// in the same stream. ParseHelmRepositories must pick its doc and skip
+	// the rest without choking on the multi-doc input.
 	multiDoc := `apiVersion: source.toolkit.fluxcd.io/v1beta2
 kind: HelmRepository
 metadata:
@@ -263,14 +216,6 @@ spec:
 	}
 	if len(repos) != 1 {
 		t.Errorf("expected 1 HelmRepository, got %d", len(repos))
-	}
-
-	releases, err := parser.ParseHelmReleases(context.Background())
-	if err != nil {
-		t.Fatalf("parsing HelmReleases: %v", err)
-	}
-	if len(releases) != 1 {
-		t.Errorf("expected 1 HelmRelease, got %d", len(releases))
 	}
 }
 
@@ -370,46 +315,6 @@ func TestIsYAMLFile(t *testing.T) {
 				t.Errorf("IsYAMLFile(%q) = %v, want %v", tt.path, got, tt.want)
 			}
 		})
-	}
-}
-
-func TestParsePartialHelmRelease(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Partial HelmRelease: cluster-specific overlay with only values, no chart spec.
-	yamlContent := `apiVersion: helm.toolkit.fluxcd.io/v2
-kind: HelmRelease
-metadata:
-  name: infra-ingress-nginx
-  namespace: flux-system
-spec:
-  values:
-    controller:
-      config:
-        proxy-buffer-size: 32k
-`
-	err := os.WriteFile(filepath.Join(tmpDir, "overlay.yaml"), []byte(yamlContent), 0644)
-	if err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-
-	parser := NewParser(tmpDir)
-	results, err := parser.ParseHelmReleases(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(results) != 1 {
-		t.Fatalf("expected 1 HelmRelease, got %d", len(results))
-	}
-
-	hr := results[0]
-	if hr.Metadata.Name != "infra-ingress-nginx" {
-		t.Errorf("name = %q, want %q", hr.Metadata.Name, "infra-ingress-nginx")
-	}
-	// Chart spec should be empty (partial overlay).
-	if hr.Spec.Chart.Spec.Chart != "" {
-		t.Errorf("expected empty chart name for partial HelmRelease, got %q", hr.Spec.Chart.Spec.Chart)
 	}
 }
 

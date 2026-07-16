@@ -116,22 +116,3 @@ func getMapValue(mapping *yaml.Node, key string) *yaml.Node {
 	}
 	return nil
 }
-
-// CountSecrets returns the number of Secret resources in the multi-document YAML.
-// Documents are split by text first, so a broken document does not prevent
-// counting secrets in subsequent ones.
-func CountSecrets(data []byte) int {
-	count := 0
-	for _, doc := range SplitYAMLText(data) {
-		var meta struct {
-			Kind string `yaml:"kind"`
-		}
-		if yaml.Unmarshal([]byte(doc), &meta) != nil {
-			continue
-		}
-		if strings.EqualFold(meta.Kind, "secret") {
-			count++
-		}
-	}
-	return count
-}

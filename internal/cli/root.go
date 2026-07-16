@@ -49,11 +49,6 @@ func ExitCodeFromError(err error) int {
 //	-ldflags "-X github.com/banschikovde/fluxview/internal/cli.version=v1.0.0"
 var version = "dev"
 
-// Version returns the current build version.
-func Version() string {
-	return version
-}
-
 // NewRootCmd creates the root command for fluxview.
 func NewRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{

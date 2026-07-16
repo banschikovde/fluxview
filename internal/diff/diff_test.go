@@ -6,7 +6,7 @@ import (
 )
 
 func TestComputeNoDiff(t *testing.T) {
-	result := Compute("hello\nworld\n", "hello\nworld\n")
+	result := ComputeCtx("hello\nworld\n", "hello\nworld\n", DefaultContext)
 	if result.HasDiff {
 		t.Error("expected no diff, but differences were found")
 	}
@@ -16,7 +16,7 @@ func TestComputeNoDiff(t *testing.T) {
 }
 
 func TestComputeWithDiff(t *testing.T) {
-	result := Compute("line1\nline2\nline3\n", "line1\nline2a\nline3\n")
+	result := ComputeCtx("line1\nline2\nline3\n", "line1\nline2a\nline3\n", DefaultContext)
 	if !result.HasDiff {
 		t.Error("expected diff to be found")
 	}
@@ -34,7 +34,7 @@ func TestComputeWithDiff(t *testing.T) {
 }
 
 func TestComputeAddLines(t *testing.T) {
-	result := Compute("line1\nline3\n", "line1\nline2\nline3\n")
+	result := ComputeCtx("line1\nline3\n", "line1\nline2\nline3\n", DefaultContext)
 	if !result.HasDiff {
 		t.Error("expected diff to be found")
 	}
@@ -44,7 +44,7 @@ func TestComputeAddLines(t *testing.T) {
 }
 
 func TestComputeRemoveLines(t *testing.T) {
-	result := Compute("line1\nline2\nline3\n", "line1\nline3\n")
+	result := ComputeCtx("line1\nline2\nline3\n", "line1\nline3\n", DefaultContext)
 	if !result.HasDiff {
 		t.Error("expected diff to be found")
 	}
@@ -54,14 +54,14 @@ func TestComputeRemoveLines(t *testing.T) {
 }
 
 func TestComputeEmptyStrings(t *testing.T) {
-	result := Compute("", "")
+	result := ComputeCtx("", "", DefaultContext)
 	if result.HasDiff {
 		t.Error("expected no diff for empty strings")
 	}
 }
 
 func TestComputeOneEmpty(t *testing.T) {
-	result := Compute("", "line1\n")
+	result := ComputeCtx("", "line1\n", DefaultContext)
 	if !result.HasDiff {
 		t.Error("expected diff when one string is empty")
 	}
@@ -126,7 +126,7 @@ func TestSplitLines(t *testing.T) {
 }
 
 func TestComputeDiffFormat(t *testing.T) {
-	result := Compute("line1\nline2\nline3\n", "line1\nline2a\nline3\n")
+	result := ComputeCtx("line1\nline2\nline3\n", "line1\nline2a\nline3\n", DefaultContext)
 	if !result.HasDiff {
 		t.Fatal("expected diff")
 	}
@@ -164,7 +164,7 @@ func TestComputeLargeFileDiff(t *testing.T) {
 		}
 	}
 
-	result := Compute(original.String(), modified.String())
+	result := ComputeCtx(original.String(), modified.String(), DefaultContext)
 	if !result.HasDiff {
 		t.Error("expected diff for large files")
 	}
@@ -178,7 +178,7 @@ func TestComputeLargeFileDiff(t *testing.T) {
 
 func TestMyers_DuplicateLines(t *testing.T) {
 	// Multiple duplicate lines — common source of diff bugs.
-	result := Compute("a\nb\na\nb\nc\n", "a\nb\na\nb\nX\n")
+	result := ComputeCtx("a\nb\na\nb\nc\n", "a\nb\na\nb\nX\n", DefaultContext)
 	if !result.HasDiff {
 		t.Fatal("expected diff")
 	}
@@ -191,7 +191,7 @@ func TestMyers_DuplicateLines(t *testing.T) {
 }
 
 func TestMyers_AllDifferent(t *testing.T) {
-	result := Compute("a\nb\nc\n", "x\ny\nz\n")
+	result := ComputeCtx("a\nb\nc\n", "x\ny\nz\n", DefaultContext)
 	if !result.HasDiff {
 		t.Fatal("expected diff")
 	}
@@ -203,7 +203,7 @@ func TestMyers_AllDifferent(t *testing.T) {
 }
 
 func TestMyers_InsertInMiddle(t *testing.T) {
-	result := Compute("line1\nline2\nline3\n", "line1\nINSERTED\nline2\nline3\n")
+	result := ComputeCtx("line1\nline2\nline3\n", "line1\nINSERTED\nline2\nline3\n", DefaultContext)
 	if !result.HasDiff {
 		t.Fatal("expected diff")
 	}
@@ -213,7 +213,7 @@ func TestMyers_InsertInMiddle(t *testing.T) {
 }
 
 func TestMyers_MultipleNonAdjacent(t *testing.T) {
-	result := Compute("a\nb\nc\nd\ne\n", "X\nb\nc\nY\ne\n")
+	result := ComputeCtx("a\nb\nc\nd\ne\n", "X\nb\nc\nY\ne\n", DefaultContext)
 	if !result.HasDiff {
 		t.Fatal("expected diff")
 	}
@@ -250,7 +250,7 @@ func TestGreedyDiff_LargeInput(t *testing.T) {
 	original := strings.Join(origLines, "\n")
 	modified := strings.Join(modLines, "\n")
 
-	result := Compute(original, modified)
+	result := ComputeCtx(original, modified, DefaultContext)
 	if !result.HasDiff {
 		t.Fatal("expected diff for large input")
 	}

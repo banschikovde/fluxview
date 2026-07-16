@@ -46,11 +46,6 @@ type Result struct {
 // DefaultContext is the default number of context lines around changes.
 const DefaultContext = 3
 
-// Compute computes a diff between two strings with default context lines.
-func Compute(original, modified string) *Result {
-	return ComputeCtx(original, modified, DefaultContext)
-}
-
 // ComputeCtx computes a diff with the specified number of context lines.
 func ComputeCtx(original, modified string, ctxLines int) *Result {
 	if ctxLines < 0 {

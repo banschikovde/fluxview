@@ -107,32 +107,6 @@ func (p *Parser) ParseKustomizations(ctx context.Context) ([]Kustomization, erro
 	return result, nil
 }
 
-// ParseHelmReleases discovers all Flux HelmRelease resources under the root path.
-func (p *Parser) ParseHelmReleases(ctx context.Context) ([]HelmRelease, error) {
-	var result []HelmRelease
-
-	err := walkYAMLFiles(ctx, p.RootPath, func(path string) error {
-		docs, err := p.parseFile(path)
-		if err != nil {
-			return fmt.Errorf("parsing file %s: %w", path, err)
-		}
-
-		for _, doc := range docs {
-			hr, ok := doc.(HelmRelease)
-			if ok {
-				result = append(result, hr)
-			}
-		}
-		return nil
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("walking directory %s: %w", p.RootPath, err)
-	}
-
-	return result, nil
-}
-
 // ParseHelmRepositories discovers all Flux HelmRepository resources under the root path.
 func (p *Parser) ParseHelmRepositories(ctx context.Context) ([]HelmRepository, error) {
 	var result []HelmRepository
