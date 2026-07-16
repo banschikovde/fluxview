@@ -2,6 +2,7 @@ package flux
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -506,5 +507,144 @@ data:
 	}
 	if !strings.Contains(string(redacted), SecretRedactedValue) {
 		t.Error("expected redacted placeholder in output")
+	}
+}
+
+// TestParseSkipsHelmChartRoot is a regression test for raw parsers descending
+// into an in-repo Helm chart's templates/ directory.
+//
+// Files under templates/ are Go-template text (not standalone YAML), so
+// SplitYAMLDocuments cannot decode them and emits spurious "YAML parse error"
+// warnings to stderr. The parser must skip the whole chart subtree (any
+// directory containing a Chart.yaml) while still discovering legitimate
+// resources that live outside the chart.
+func TestParseSkipsHelmChartRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Legitimate ConfigMap at the repository root (must still be found).
+	cmContent := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-settings
+data:
+  cluster: prod
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "configmap.yaml"), []byte(cmContent), 0644); err != nil {
+		t.Fatalf("write configmap: %v", err)
+	}
+
+	// A Helm chart living inside the repository.
+	chartDir := filepath.Join(tmpDir, "charts", "demo")
+	tmplDir := filepath.Join(chartDir, "templates")
+	if err := os.MkdirAll(tmplDir, 0755); err != nil {
+		t.Fatalf("mkdir chart: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(chartDir, "Chart.yaml"), []byte("apiVersion: v2\nname: demo\nversion: 0.1.0\n"), 0644); err != nil {
+		t.Fatalf("write Chart.yaml: %v", err)
+	}
+	// A Go-template file that is NOT valid standalone YAML.
+	chartTemplate := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}
+  annotations:
+    helm.sh/hook: {{ .Values.hook | default "post-install" }}
+data:
+  {{- range $k, $v := .Values.config }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}
+`
+	if err := os.WriteFile(filepath.Join(tmplDir, "configmap.yaml"), []byte(chartTemplate), 0644); err != nil {
+		t.Fatalf("write template: %v", err)
+	}
+
+	// Capture stderr: SplitYAMLDocuments writes warnings directly to os.Stderr.
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+
+	parser := NewParser(tmpDir)
+	cms, parseErr := parser.ParseConfigMaps(context.Background())
+
+	if cErr := w.Close(); cErr != nil {
+		t.Fatalf("close pipe writer: %v", cErr)
+	}
+	os.Stderr = oldStderr
+	stderrBytes, _ := io.ReadAll(r)
+
+	if parseErr != nil {
+		t.Fatalf("unexpected error: %v", parseErr)
+	}
+	if strings.Contains(string(stderrBytes), "YAML parse error") {
+		t.Errorf("expected no YAML parse warnings from chart templates, but stderr contained:\n%s", stderrBytes)
+	}
+	if len(cms) != 1 {
+		t.Errorf("expected exactly 1 ConfigMap (the one outside the chart), got %d", len(cms))
+	} else if cms[0].Metadata.Name != "cluster-settings" {
+		t.Errorf("ConfigMap name = %q, want %q", cms[0].Metadata.Name, "cluster-settings")
+	}
+}
+
+// TestWalkYAMLFiles_SkipsChartSubtree verifies the shared walker skips the
+// subtree of a directory that contains a Chart.yaml, even when the chart is
+// nested several levels deep, while still visiting YAML files elsewhere.
+func TestWalkYAMLFiles_SkipsChartSubtree(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Top-level YAML file (visited).
+	if err := os.WriteFile(filepath.Join(tmpDir, "top.yaml"), []byte("a: 1\n"), 0644); err != nil {
+		t.Fatalf("write top.yaml: %v", err)
+	}
+	// Nested chart with templates that should be skipped entirely.
+	tmplDir := filepath.Join(tmpDir, "apps", "mychart", "templates")
+	if err := os.MkdirAll(tmplDir, 0755); err != nil {
+		t.Fatalf("mkdir chart: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "apps", "mychart", "Chart.yaml"), []byte("apiVersion: v2\n"), 0644); err != nil {
+		t.Fatalf("write Chart.yaml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmplDir, "deployment.yaml"), []byte("skipped\n"), 0644); err != nil {
+		t.Fatalf("write template: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "apps", "mychart", "values.yaml"), []byte("skipped\n"), 0644); err != nil {
+		t.Fatalf("write values.yaml: %v", err)
+	}
+	// A sibling YAML file outside the chart (visited).
+	if err := os.MkdirAll(filepath.Join(tmpDir, "flux"), 0755); err != nil {
+		t.Fatalf("mkdir flux: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "flux", "kustomization.yaml"), []byte("b: 2\n"), 0644); err != nil {
+		t.Fatalf("write kustomization.yaml: %v", err)
+	}
+
+	var visited []string
+	err := walkYAMLFiles(context.Background(), tmpDir, func(path string) error {
+		rel, _ := filepath.Rel(tmpDir, path)
+		visited = append(visited, rel)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walkYAMLFiles: %v", err)
+	}
+
+	for _, p := range visited {
+		if strings.HasPrefix(p, filepath.Join("apps", "mychart")) {
+			t.Errorf("walker descended into chart subtree: visited %q", p)
+		}
+	}
+
+	want := map[string]bool{"top.yaml": false, filepath.Join("flux", "kustomization.yaml"): false}
+	for _, p := range visited {
+		if _, ok := want[p]; ok {
+			want[p] = true
+		}
+	}
+	for p, seen := range want {
+		if !seen {
+			t.Errorf("expected walker to visit %q, it did not (visited: %v)", p, visited)
+		}
 	}
 }

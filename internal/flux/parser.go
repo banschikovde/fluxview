@@ -24,23 +24,57 @@ func NewParser(rootPath string) *Parser {
 	return &Parser{RootPath: rootPath}
 }
 
-// ParseKustomizations discovers all Flux Kustomization resources under the root path.
-func (p *Parser) ParseKustomizations(ctx context.Context) ([]Kustomization, error) {
-	var result []Kustomization
-	var yamlFiles int
-	var parseErrors []string
+// isChartRoot reports whether dir is the root of a Helm chart.
+//
+// A Helm chart root is identified by the presence of a Chart.yaml file next
+// to it. Chart subtrees contain Go-template text under templates/ (and other
+// chart-only files such as values.yaml) that is not standalone YAML and must
+// not be scanned by raw resource parsers: SplitYAMLDocuments cannot render
+// Go templates and would emit spurious "YAML parse error" warnings for them.
+func isChartRoot(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, "Chart.yaml"))
+	if err != nil || info.IsDir() {
+		return false
+	}
+	return true
+}
 
-	err := filepath.WalkDir(p.RootPath, func(path string, d fs.DirEntry, err error) error {
+// walkYAMLFiles walks rootPath, skipping the entire subtree of any directory
+// that is a Helm chart root, and invokes fn for every YAML file found.
+//
+// Skipping chart roots (via filepath.SkipDir) prevents the parser from
+// descending into templates/ and trying to decode Go-template files as YAML.
+// fn receives the file path and may return an error to abort the walk
+// (filepath.SkipDir skips just the current file). The walk honors ctx
+// cancellation.
+func walkYAMLFiles(ctx context.Context, rootPath string, fn func(path string) error) error {
+	return filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if d.IsDir() || !IsYAMLFile(path) {
+		if d.IsDir() {
+			if isChartRoot(path) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
+		if !IsYAMLFile(path) {
+			return nil
+		}
+		return fn(path)
+	})
+}
 
+// ParseKustomizations discovers all Flux Kustomization resources under the root path.
+func (p *Parser) ParseKustomizations(ctx context.Context) ([]Kustomization, error) {
+	var result []Kustomization
+	var yamlFiles int
+	var parseErrors []string
+
+	err := walkYAMLFiles(ctx, p.RootPath, func(path string) error {
 		yamlFiles++
 
 		docs, err := p.parseFile(path)
@@ -77,17 +111,7 @@ func (p *Parser) ParseKustomizations(ctx context.Context) ([]Kustomization, erro
 func (p *Parser) ParseHelmReleases(ctx context.Context) ([]HelmRelease, error) {
 	var result []HelmRelease
 
-	err := filepath.WalkDir(p.RootPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if d.IsDir() || !IsYAMLFile(path) {
-			return nil
-		}
-
+	err := walkYAMLFiles(ctx, p.RootPath, func(path string) error {
 		docs, err := p.parseFile(path)
 		if err != nil {
 			return fmt.Errorf("parsing file %s: %w", path, err)
@@ -113,17 +137,7 @@ func (p *Parser) ParseHelmReleases(ctx context.Context) ([]HelmRelease, error) {
 func (p *Parser) ParseHelmRepositories(ctx context.Context) ([]HelmRepository, error) {
 	var result []HelmRepository
 
-	err := filepath.WalkDir(p.RootPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if d.IsDir() || !IsYAMLFile(path) {
-			return nil
-		}
-
+	err := walkYAMLFiles(ctx, p.RootPath, func(path string) error {
 		docs, err := p.parseFile(path)
 		if err != nil {
 			return fmt.Errorf("parsing file %s: %w", path, err)
@@ -149,17 +163,7 @@ func (p *Parser) ParseHelmRepositories(ctx context.Context) ([]HelmRepository, e
 func (p *Parser) ParseOCIRepositories(ctx context.Context) ([]OCIRepository, error) {
 	var result []OCIRepository
 
-	err := filepath.WalkDir(p.RootPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if d.IsDir() || !IsYAMLFile(path) {
-			return nil
-		}
-
+	err := walkYAMLFiles(ctx, p.RootPath, func(path string) error {
 		docs, err := p.parseFile(path)
 		if err != nil {
 			return fmt.Errorf("parsing file %s: %w", path, err)
@@ -185,17 +189,7 @@ func (p *Parser) ParseOCIRepositories(ctx context.Context) ([]OCIRepository, err
 func (p *Parser) ParseConfigMaps(ctx context.Context) ([]ConfigMap, error) {
 	var result []ConfigMap
 
-	err := filepath.WalkDir(p.RootPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if d.IsDir() || !IsYAMLFile(path) {
-			return nil
-		}
-
+	err := walkYAMLFiles(ctx, p.RootPath, func(path string) error {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return nil
@@ -229,17 +223,7 @@ func (p *Parser) ParseConfigMaps(ctx context.Context) ([]ConfigMap, error) {
 func (p *Parser) ParseSecrets(ctx context.Context) ([]Secret, error) {
 	var result []Secret
 
-	err := filepath.WalkDir(p.RootPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if d.IsDir() || !IsYAMLFile(path) {
-			return nil
-		}
-
+	err := walkYAMLFiles(ctx, p.RootPath, func(path string) error {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return nil
