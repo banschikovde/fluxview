@@ -216,7 +216,7 @@ func buildKSOutputWithCache(ctx context.Context, clusterPath, repoRoot, name str
 	if name != "" {
 		kustomizations = filterKustomizations(kustomizations, name)
 		if len(kustomizations) == 0 {
-			return nil, fmt.Errorf("Kustomization %q not found", name)
+			return nil, fmt.Errorf("kustomization %q not found", name)
 		}
 	}
 

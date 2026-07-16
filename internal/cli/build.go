@@ -126,7 +126,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	if name != "" || flags.Namespace != "" {
 		kustomizations = filterKustomizations(kustomizations, name)
 		if len(kustomizations) == 0 {
-			return NewExitError(fmt.Errorf("Kustomization %q not found", name), ExitCodeError)
+			return NewExitError(fmt.Errorf("kustomization %q not found", name), ExitCodeError)
 		}
 	}
 
@@ -321,7 +321,7 @@ func buildKustomizeOverlays(clusterPath, repoRoot string, excludePaths map[strin
 	// Read loose YAML files from directories WITHOUT kustomization.yaml
 	// that are not excluded and not inside any kustomize directory.
 	// Only include files that look like k8s resources (have apiVersion + kind).
-	filepath.Walk(clusterPath, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(clusterPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
@@ -354,6 +354,9 @@ func buildKustomizeOverlays(clusterPath, repoRoot string, excludePaths map[strin
 		}
 		return nil
 	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: walking %s: %v\n", clusterPath, err)
+	}
 
 	return outputs
 }

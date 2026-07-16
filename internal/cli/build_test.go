@@ -339,7 +339,7 @@ func TestResolveOCIRepoURL_WithRef(t *testing.T) {
 
 	// Semver only.
 	hr.Spec.ChartRef.Name = "chart-semver"
-	ref, ver = resolveOCIRepoURL(hr, ociRepos)
+	_, ver = resolveOCIRepoURL(hr, ociRepos)
 	if ver != "^1.0.0" {
 		t.Errorf("semver: version = %q, want ^1.0.0", ver)
 	}
