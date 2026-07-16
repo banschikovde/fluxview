@@ -1383,7 +1383,7 @@ spec:
 `)
 
 	builder := kustomize.NewBuilder(repoRoot)
-	output, err := buildSourcePath(builder, sourcePath, make(buildCache))
+	output, err := buildSourcePath(builder, sourcePath, repoRoot, make(buildCache))
 	if err != nil {
 		t.Fatalf("buildSourcePath: %v", err)
 	}
@@ -1432,7 +1432,7 @@ metadata:
 `)
 
 	builder := kustomize.NewBuilder(repoRoot)
-	output, err := buildSourcePath(builder, sourcePath, make(buildCache))
+	output, err := buildSourcePath(builder, sourcePath, repoRoot, make(buildCache))
 	if err != nil {
 		t.Fatalf("buildSourcePath: %v", err)
 	}
@@ -1686,7 +1686,7 @@ resources:
 	builder := kustomize.NewBuilder(repoRoot)
 	cache := make(buildCache)
 
-	_, err := buildSourcePath(builder, failDir, cache)
+	_, err := buildSourcePath(builder, failDir, repoRoot, cache)
 	if err == nil {
 		t.Fatal("expected error for broken kustomization")
 	}
@@ -1695,7 +1695,7 @@ resources:
 	}
 
 	// Second call should NOT re-build or re-warn (cached failure).
-	_, err = buildSourcePath(builder, failDir, cache)
+	_, err = buildSourcePath(builder, failDir, repoRoot, cache)
 	if !errors.Is(err, errAlreadyWarned) {
 		t.Errorf("second call should also return errAlreadyWarned (cached), got: %v", err)
 	}
@@ -2093,7 +2093,7 @@ metadata:
 `)
 
 	builder := kustomize.NewBuilder(sourcePath)
-	output, err := buildSubdirectoriesAndLooseFiles(builder, sourcePath, make(buildCache))
+	output, err := buildSubdirectoriesAndLooseFiles(builder, sourcePath, sourcePath, make(buildCache))
 	if err != nil {
 		t.Fatalf("buildSubdirectoriesAndLooseFiles: %v", err)
 	}
@@ -2158,7 +2158,7 @@ metadata:
 	var output []byte
 	stderr := captureStderr(func() {
 		var err error
-		output, err = buildSubdirectoriesAndLooseFiles(builder, sourcePath, make(buildCache))
+		output, err = buildSubdirectoriesAndLooseFiles(builder, sourcePath, repoRoot, make(buildCache))
 		if err != nil {
 			t.Fatalf("buildSubdirectoriesAndLooseFiles: %v", err)
 		}
@@ -2214,4 +2214,60 @@ func bytesSliceToStrings(in [][]byte) []string {
 		out[i] = string(b)
 	}
 	return out
+}
+
+// TestBuildSubdirectoriesAndLooseFiles_SymlinkEscapeRejected verifies that a
+// loose YAML file which is a symlink pointing OUTSIDE repoRoot is rejected by
+// the root-scoped read (os.Root), so the target's content cannot leak into the
+// build output — the CWE-367 / symlink-traversal hardening. A legitimate file
+// in the same directory is still collected, and the rejected symlink is warned.
+func TestBuildSubdirectoriesAndLooseFiles_SymlinkEscapeRejected(t *testing.T) {
+	repoRoot := t.TempDir()
+	sourcePath := filepath.Join(repoRoot, "loose")
+	writeHelper(t, sourcePath, "real.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: real-cm
+`)
+
+	// A "secret" file OUTSIDE repoRoot — its content must never be read.
+	outside := t.TempDir()
+	const secretMarker = "SUPER-SECRET-SHOULD-NEVER-LEAK"
+	if err := os.WriteFile(filepath.Join(outside, "secret.yaml"),
+		[]byte("data: "+secretMarker+"\n"), 0o644); err != nil {
+		t.Fatalf("write outside secret: %v", err)
+	}
+
+	// Symlink inside sourcePath pointing at the outside file.
+	link := filepath.Join(sourcePath, "leak.yaml")
+	if err := os.Symlink(filepath.Join(outside, "secret.yaml"), link); err != nil {
+		if os.IsPermission(err) {
+			t.Skipf("cannot create symlinks in this environment: %v", err)
+		}
+		t.Fatalf("symlink: %v", err)
+	}
+
+	builder := kustomize.NewBuilder(repoRoot)
+	var output []byte
+	stderr := captureStderr(func() {
+		var err error
+		output, err = buildSubdirectoriesAndLooseFiles(builder, sourcePath, repoRoot, make(buildCache))
+		if err != nil {
+			t.Fatalf("buildSubdirectoriesAndLooseFiles: %v", err)
+		}
+	})
+
+	combined := string(output)
+	// Legit resource still collected.
+	if !strings.Contains(combined, "real-cm") {
+		t.Errorf("expected legit resource 'real-cm' to be collected, got:\n%s", combined)
+	}
+	// The escaped-symlink target content must NOT leak.
+	if strings.Contains(combined, secretMarker) {
+		t.Errorf("symlink-escape: outside content leaked into build output:\n%s", combined)
+	}
+	// The rejected symlink should be reported.
+	if !strings.Contains(stderr, "Warning: could not read") || !strings.Contains(stderr, "leak.yaml") {
+		t.Errorf("expected a warning about the rejected symlink, got:\n%s", stderr)
+	}
 }

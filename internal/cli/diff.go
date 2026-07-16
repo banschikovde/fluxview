@@ -378,7 +378,7 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 					ks.Metadata.Namespace, ks.Metadata.Name)
 			}
 
-			output, err := buildSourcePath(builder, sourcePath, cache)
+			output, err := buildSourcePath(builder, sourcePath, repoRoot, cache)
 			if err != nil {
 				if !errors.Is(err, errAlreadyWarned) {
 					fmt.Fprintf(os.Stderr, "Warning: build failed for %s/%s: %v\n",
@@ -573,7 +573,7 @@ func discoverResourcesFromOutput(data []byte, seen map[string]bool) []flux.Kusto
 //  3. If path is a directory without kustomization.yaml → discover and build
 //     subdirectories that have their own kustomization.yaml (applies namespace
 //     and other transformers), then read any remaining loose YAML files
-func buildSourcePath(builder *kustomize.Builder, sourcePath string, cache buildCache) ([]byte, error) {
+func buildSourcePath(builder *kustomize.Builder, sourcePath, repoRoot string, cache buildCache) ([]byte, error) {
 	info, err := os.Stat(sourcePath)
 	if err != nil {
 		return nil, fmt.Errorf("source path %s: %w", sourcePath, err)
@@ -595,17 +595,17 @@ func buildSourcePath(builder *kustomize.Builder, sourcePath string, cache buildC
 	}
 
 	// Case 3: Directory without kustomization.yaml — discover subdirectories
-	return buildSubdirectoriesAndLooseFiles(builder, sourcePath, cache)
+	return buildSubdirectoriesAndLooseFiles(builder, sourcePath, repoRoot, cache)
 }
 
 // buildSubdirectoriesAndLooseFiles discovers native kustomize directories under
 // sourcePath, builds each one via kustomize (applying namespace/transformers),
 // then reads any loose YAML files not covered by a kustomization.
-func buildSubdirectoriesAndLooseFiles(builder *kustomize.Builder, sourcePath string, cache buildCache) ([]byte, error) {
+func buildSubdirectoriesAndLooseFiles(builder *kustomize.Builder, sourcePath, repoRoot string, cache buildCache) ([]byte, error) {
 	kustomizeDirs, err := flux.DiscoverKustomizeDirs(sourcePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: kustomize directory discovery failed for %s: %v\n", sourcePath, err)
-		return readYAMLFilesRecursive(sourcePath)
+		return readYAMLFilesRecursive(sourcePath, repoRoot)
 	}
 
 	// Track ALL directories that have a kustomization.yaml (attempted build),
@@ -624,6 +624,15 @@ func buildSubdirectoriesAndLooseFiles(builder *kustomize.Builder, sourcePath str
 		kustDirs[dir] = true
 	}
 
+	// Open repoRoot as a root-scoped FS so loose-file reads reject any symlink
+	// resolving outside the repository (CWE-367). Scoped to repoRoot to keep
+	// legitimate intra-repo symlinks working, matching kustomize's restrictedFs.
+	root, rootErr := os.OpenRoot(repoRoot)
+	if rootErr != nil {
+		return nil, fmt.Errorf("opening repo root %s: %w", repoRoot, rootErr)
+	}
+	defer root.Close()
+
 	// Read loose YAML files not inside any kustomize directory.
 	err = filepath.Walk(sourcePath, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
@@ -640,7 +649,7 @@ func buildSubdirectoriesAndLooseFiles(builder *kustomize.Builder, sourcePath str
 				return nil
 			}
 		}
-		data, err := os.ReadFile(path)
+		data, err := scopedRootReadFile(root, repoRoot, path)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not read %s: %v\n", path, err)
 			return nil
@@ -660,11 +669,18 @@ func buildSubdirectoriesAndLooseFiles(builder *kustomize.Builder, sourcePath str
 }
 
 // readYAMLFilesRecursive reads all .yaml/.yml files in a directory recursively
-// and combines them into a single multi-document YAML output.
-func readYAMLFilesRecursive(dir string) ([]byte, error) {
+// and combines them into a single multi-document YAML output. Reads are scoped
+// to repoRoot via os.Root so a symlink escaping the repository is rejected.
+func readYAMLFilesRecursive(dir, repoRoot string) ([]byte, error) {
+	root, err := os.OpenRoot(repoRoot)
+	if err != nil {
+		return nil, fmt.Errorf("opening repo root %s: %w", repoRoot, err)
+	}
+	defer root.Close()
+
 	var buf bytes.Buffer
 
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -675,7 +691,7 @@ func readYAMLFilesRecursive(dir string) ([]byte, error) {
 		if ext != ".yaml" && ext != ".yml" {
 			return nil
 		}
-		data, err := os.ReadFile(path)
+		data, err := scopedRootReadFile(root, repoRoot, path)
 		if err != nil {
 			return err
 		}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -318,6 +319,17 @@ func buildKustomizeOverlays(clusterPath, repoRoot string, excludePaths map[strin
 		kustDirs[dir] = true
 	}
 
+	// Open the repository root as a root-scoped FS so loose-file reads reject
+	// any symlink that resolves outside the repository (CWE-367). Scoped to
+	// repoRoot — not clusterPath — to keep legitimate intra-repo symlinks
+	// working, matching the restrictedFs boundary used by kustomize builds.
+	root, rootErr := os.OpenRoot(repoRoot)
+	if rootErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not open repo root %s for scoped reads: %v\n", repoRoot, rootErr)
+		return outputs
+	}
+	defer root.Close()
+
 	// Read loose YAML files from directories WITHOUT kustomization.yaml
 	// that are not excluded and not inside any kustomize directory.
 	// Only include files that look like k8s resources (have apiVersion + kind).
@@ -342,7 +354,7 @@ func buildKustomizeOverlays(clusterPath, repoRoot string, excludePaths map[strin
 		if isExcludedDir(dir, excludePaths) {
 			return nil
 		}
-		data, err := os.ReadFile(path)
+		data, err := scopedRootReadFile(root, repoRoot, path)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not read %s: %v\n", path, err)
 			return nil
@@ -380,6 +392,24 @@ func filterK8sResources(data []byte) []byte {
 		return nil
 	}
 	return []byte(strings.Join(result, "\n---\n"))
+}
+
+// scopedRootReadFile reads absPath by opening it relative to root, so a symlink
+// (or symlink chain) that resolves outside rootPath is rejected instead of
+// followed. This closes the TOCTOU / symlink-escape gap (CWE-367) that a bare
+// os.ReadFile has inside a filepath.Walk callback. root must have been created
+// by os.OpenRoot(rootPath).
+func scopedRootReadFile(root *os.Root, rootPath, absPath string) ([]byte, error) {
+	rel, err := filepath.Rel(rootPath, absPath)
+	if err != nil {
+		return nil, err
+	}
+	f, err := root.Open(rel)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
 }
 
 func isExcludedDir(dir string, excludePaths map[string]bool) bool {
