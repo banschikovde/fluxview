@@ -1,6 +1,7 @@
 package flux
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -69,7 +70,7 @@ resources:
 	}
 
 	// Run discovery
-	dirs, err := DiscoverKustomizeDirs(fluxDir)
+	dirs, err := DiscoverKustomizeDirs(context.Background(), fluxDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -119,7 +120,7 @@ resources:
 		t.Fatal(err)
 	}
 
-	dirs, err := DiscoverKustomizeDirs(tmpDir)
+	dirs, err := DiscoverKustomizeDirs(context.Background(), tmpDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -150,7 +151,7 @@ metadata:
 		t.Fatal(err)
 	}
 
-	dirs, err := DiscoverKustomizeDirs(tmpDir)
+	dirs, err := DiscoverKustomizeDirs(context.Background(), tmpDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -168,7 +169,7 @@ func TestDiscoverKustomizeDirs_NoKustomizeDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dirs, err := DiscoverKustomizeDirs(tmpDir)
+	dirs, err := DiscoverKustomizeDirs(context.Background(), tmpDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -352,4 +353,131 @@ data:
 	if result != expected {
 		t.Errorf("substitution result = %q, want %q", result, expected)
 	}
+}
+
+// writeFile writes content to path, creating parent directories.
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile %s: %v", path, err)
+	}
+}
+
+// TestDiscoverKustomizeDirsAndFiles directly exercises the combined discovery:
+// the fileDirs return (any kustomization-file kind, including orphan
+// kind: Component that is NOT in buildDirs) and the buildDirs return (native
+// overlays only), plus the error contract (both nil on walk error).
+func TestDiscoverKustomizeDirsAndFiles(t *testing.T) {
+	t.Run("fileDirs covers any kind; buildDirs only native overlays", func(t *testing.T) {
+		root := t.TempDir()
+
+		// Native kustomize overlay — in BOTH buildDirs and fileDirs.
+		overlayDir := filepath.Join(root, "overlay")
+		writeFile(t, filepath.Join(overlayDir, "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cm.yaml
+`)
+		writeFile(t, filepath.Join(overlayDir, "cm.yaml"), `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: overlay-cm
+`)
+
+		// Orphan kind: Component dir — in fileDirs only, NOT in buildDirs.
+		compDir := filepath.Join(root, "components", "foo")
+		writeFile(t, filepath.Join(compDir, "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - dep.yaml
+`)
+		writeFile(t, filepath.Join(compDir, "dep.yaml"), `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: comp-app
+`)
+
+		// Plain directory with no kustomization file — in neither.
+		plainDir := filepath.Join(root, "plain")
+		writeFile(t, filepath.Join(plainDir, "cm.yaml"), `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: plain-cm
+`)
+
+		buildDirs, fileDirs, err := DiscoverKustomizeDirsAndFiles(context.Background(), root)
+		if err != nil {
+			t.Fatalf("DiscoverKustomizeDirsAndFiles: %v", err)
+		}
+
+		assertDir := func(set []string, dir, label string) {
+			t.Helper()
+			for _, d := range set {
+				if d == dir {
+					return
+				}
+			}
+			t.Errorf("expected %q in %s, got %v", dir, label, set)
+		}
+		assertNotDir := func(set []string, dir, label string) {
+			t.Helper()
+			for _, d := range set {
+				if d == dir {
+					t.Errorf("did not expect %q in %s, got %v", dir, label, set)
+					return
+				}
+			}
+		}
+
+		// buildDirs: native overlay only (Component is not a buildable overlay).
+		assertDir(buildDirs, overlayDir, "buildDirs")
+		assertNotDir(buildDirs, compDir, "buildDirs")
+		assertNotDir(buildDirs, plainDir, "buildDirs")
+
+		// fileDirs: overlay + Component (any kustomization file kind), not plain.
+		assertDir(fileDirs, overlayDir, "fileDirs")
+		assertDir(fileDirs, compDir, "fileDirs")
+		assertNotDir(fileDirs, plainDir, "fileDirs")
+	})
+
+	t.Run("walk error returns nil sets", func(t *testing.T) {
+		// Non-existent root: WalkDir fails on the initial Lstat.
+		buildDirs, fileDirs, err := DiscoverKustomizeDirsAndFiles(
+			context.Background(), filepath.Join(t.TempDir(), "does-not-exist"))
+		if err == nil {
+			t.Fatal("expected error for non-existent root, got nil")
+		}
+		if buildDirs != nil {
+			t.Errorf("expected nil buildDirs on error, got %v", buildDirs)
+		}
+		if fileDirs != nil {
+			t.Errorf("expected nil fileDirs on error, got %v", fileDirs)
+		}
+	})
+
+	t.Run("honors cancelled context", func(t *testing.T) {
+		root := t.TempDir()
+		writeFile(t, filepath.Join(root, "overlay", "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+`)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // already cancelled before the walk starts
+
+		buildDirs, fileDirs, err := DiscoverKustomizeDirsAndFiles(ctx, root)
+		// A cancelled context aborts the walk at the first directory and
+		// propagates ctx.Err(); neither set is populated.
+		if err == nil {
+			t.Fatal("expected cancellation error, got nil")
+		}
+		if buildDirs != nil {
+			t.Errorf("expected nil buildDirs on cancelled context, got %v", buildDirs)
+		}
+		if fileDirs != nil {
+			t.Errorf("expected nil fileDirs on cancelled context, got %v", fileDirs)
+		}
+	})
 }

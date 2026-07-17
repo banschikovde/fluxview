@@ -35,7 +35,10 @@ func NewOperations(repoRoot string) (*Operations, error) {
 }
 
 // DefaultBranch returns the default branch name (main or master).
-func (g *Operations) DefaultBranch(_ context.Context) (string, error) {
+func (g *Operations) DefaultBranch(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	// Try to determine from refs/remotes/origin/HEAD symbolic ref.
 	ref, err := g.repo.Reference(plumbing.ReferenceName("refs/remotes/origin/HEAD"), false)
 	if err == nil {
@@ -61,7 +64,10 @@ func (g *Operations) DefaultBranch(_ context.Context) (string, error) {
 }
 
 // ResolveRevision resolves a revision string to a commit hash.
-func (g *Operations) ResolveRevision(_ context.Context, revision string) (string, error) {
+func (g *Operations) ResolveRevision(ctx context.Context, revision string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	hash, err := g.repo.ResolveRevision(plumbing.Revision(revision))
 	if err != nil {
 		return "", fmt.Errorf("resolving revision %s: %w", revision, err)
@@ -71,7 +77,10 @@ func (g *Operations) ResolveRevision(_ context.Context, revision string) (string
 
 // CloneToDir checks out all files at a specific revision into a temp directory.
 // Returns the temp directory path (caller should clean up).
-func (g *Operations) CloneToDir(_ context.Context, revision string) (string, error) {
+func (g *Operations) CloneToDir(ctx context.Context, revision string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	hash, err := g.repo.ResolveRevision(plumbing.Revision(revision))
 	if err != nil {
 		return "", fmt.Errorf("resolving revision %s: %w", revision, err)
@@ -94,6 +103,11 @@ func (g *Operations) CloneToDir(_ context.Context, revision string) (string, err
 
 	// Write all files from the tree into the temp directory.
 	err = tree.Files().ForEach(func(f *object.File) error {
+		// Honor context cancellation mid-checkout (large repos can write many
+		// thousands of files).
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		filePath := filepath.Join(tmpDir, f.Name)
 		if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 			return fmt.Errorf("creating directory %s: %w", filepath.Dir(filePath), err)
@@ -158,6 +172,9 @@ func (g *Operations) CloneToDir(_ context.Context, revision string) (string, err
 }
 
 // RemoveWorktree removes a previously created worktree/checkout directory.
+// ctx is intentionally ignored: this is cleanup (typically deferred) that must
+// run even when the context is already cancelled, otherwise the temp checkout
+// leaks on disk.
 func (g *Operations) RemoveWorktree(_ context.Context, worktreePath string) error {
 	return os.RemoveAll(worktreePath)
 }

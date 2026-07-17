@@ -1,6 +1,7 @@
 package kustomize
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,7 +50,7 @@ data:
 		"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - "+relOutside+"\n")
 
 	builder := NewBuilder(rootDir)
-	_, err = builder.Build(overlayDir)
+	_, err = builder.Build(context.Background(), overlayDir)
 	if err == nil {
 		t.Fatal("expected error for path traversal, got nil — restrictedFs is not blocking external reads")
 	}
@@ -88,7 +89,7 @@ resources:
 `)
 
 	builder := NewBuilder(rootDir)
-	output, err := builder.Build(overlayDir)
+	output, err := builder.Build(context.Background(), overlayDir)
 	if err != nil {
 		t.Fatalf("intra-repo reference should work, got error: %v", err)
 	}

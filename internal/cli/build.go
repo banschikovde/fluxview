@@ -246,11 +246,11 @@ type buildCache map[string]buildResult
 // lifetime. On failure it prints the warning exactly once and caches the
 // error, so any later caller — across resolveConfigMaps, buildKustomizeOverlays,
 // buildSubdirectoriesAndLooseFiles — silently skips instead of retrying.
-func buildDirCached(builder *kustomize.Builder, dir string, cache buildCache) ([]byte, bool) {
+func buildDirCached(ctx context.Context, builder *kustomize.Builder, dir string, cache buildCache) ([]byte, bool) {
 	if res, seen := cache[dir]; seen {
 		return res.output, res.err == nil
 	}
-	output, err := builder.Build(dir)
+	output, err := builder.Build(ctx, dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: kustomize build %s failed: %v\n", dir, err)
 	}
@@ -289,11 +289,11 @@ func collectKustomizationPaths(repoRoot string, kustomizations []flux.Kustomizat
 	return paths
 }
 
-func buildKustomizeOverlays(clusterPath, repoRoot string, excludePaths map[string]bool, cache buildCache) [][]byte {
+func buildKustomizeOverlays(ctx context.Context, clusterPath, repoRoot string, excludePaths map[string]bool, cache buildCache) [][]byte {
 	// Single tree walk returns both the native overlays to build and every
 	// kustomization-file directory (any kind) to keep the loose-file walker
 	// out of.
-	kustomizeDirs, allKustFileDirs, err := flux.DiscoverKustomizeDirsAndFiles(clusterPath)
+	kustomizeDirs, allKustFileDirs, err := flux.DiscoverKustomizeDirsAndFiles(ctx, clusterPath)
 	builder := kustomize.NewBuilder(repoRoot)
 	var outputs [][]byte
 
@@ -309,7 +309,7 @@ func buildKustomizeOverlays(clusterPath, repoRoot string, excludePaths map[strin
 			if isExcludedDir(dir, excludePaths) {
 				continue
 			}
-			if output, ok := buildDirCached(builder, dir, cache); ok {
+			if output, ok := buildDirCached(ctx, builder, dir, cache); ok {
 				outputs = append(outputs, output)
 			}
 		}
@@ -434,14 +434,14 @@ func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomi
 	// non-fatal: we fall back to an empty set and still merge built ones below.
 	rawCMs, _ := parser.ParseConfigMaps(ctx)
 
-	kustomizeDirs, err := flux.DiscoverKustomizeDirs(clusterPath)
+	kustomizeDirs, err := flux.DiscoverKustomizeDirs(ctx, clusterPath)
 	if err != nil {
 		return rawCMs
 	}
 
 	var builtCMs []flux.ConfigMap
 	for _, dir := range kustomizeDirs {
-		output, ok := buildDirCached(builder, dir, cache)
+		output, ok := buildDirCached(ctx, builder, dir, cache)
 		if !ok {
 			continue
 		}

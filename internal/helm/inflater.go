@@ -129,8 +129,13 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 		}
 	}
 
-	// Locate the chart (downloads from repo if necessary).
-	chartPath, err := install.ChartPathOptions.LocateChart(chartRef, in.settings)
+	// Locate the chart (downloads from repo if necessary). The Helm SDK's
+	// LocateChart and its downloaders do not accept a context, so a cancelled
+	// context can't truly abort an in-flight download — locateChartCancelable
+	// stops waiting and returns ctx.Err(), letting the caller exit while the
+	// download finishes in a goroutine (the process terminates on Ctrl-C, so
+	// the brief lingering download is acceptable for this CLI).
+	chartPath, err := locateChartCancelable(ctx, &install.ChartPathOptions, chartRef, in.settings)
 	if err != nil {
 		return nil, fmt.Errorf("locating chart %s: %w", chartRef, err)
 	}
@@ -327,5 +332,35 @@ func RemoveNilValues(in interface{}) interface{} {
 		return v
 	default:
 		return in
+	}
+}
+
+// locateChartCancelable runs the (non-context-aware) ChartPathOptions.LocateChart
+// while honoring ctx.
+//
+// The Helm SDK's LocateChart and its underlying chart downloaders do not accept
+// a context, so a cancellation cannot interrupt an in-flight network download.
+// Instead this stops waiting on ctx.Done() and returns ctx.Err(); the download
+// keeps running in a goroutine that sends to a buffered channel (so it never
+// blocks and terminates once the download returns). For a CLI the process is
+// about to exit on Ctrl-C, so the brief lingering download is acceptable.
+func locateChartCancelable(ctx context.Context, cpo *action.ChartPathOptions, name string, settings *cli.EnvSettings) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	type result struct {
+		chartPath string
+		err       error
+	}
+	ch := make(chan result, 1) // buffered: the goroutine always sends, never blocks
+	go func() {
+		cp, err := cpo.LocateChart(name, settings)
+		ch <- result{cp, err}
+	}()
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case r := <-ch:
+		return r.chartPath, r.err
 	}
 }

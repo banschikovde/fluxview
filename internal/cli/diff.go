@@ -297,7 +297,7 @@ func buildKSContent(ctx context.Context, builder *kustomize.Builder, kustomizati
 	// Skip overlays when no KS are selected (name filter returned empty).
 	if len(kustomizations) > 0 {
 		ksPaths := collectKustomizationPaths(repoRoot, kustomizations)
-		overlayOutputs := buildKustomizeOverlays(clusterPath, repoRoot, ksPaths, cache)
+		overlayOutputs := buildKustomizeOverlays(ctx, clusterPath, repoRoot, ksPaths, cache)
 		for _, overlay := range overlayOutputs {
 			if len(output) > 0 {
 				output = append(output, []byte("\n---\n")...)
@@ -378,7 +378,7 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 					ks.Metadata.Namespace, ks.Metadata.Name)
 			}
 
-			output, err := buildSourcePath(builder, sourcePath, repoRoot, cache)
+			output, err := buildSourcePath(ctx, builder, sourcePath, repoRoot, cache)
 			if err != nil {
 				if !errors.Is(err, errAlreadyWarned) {
 					fmt.Fprintf(os.Stderr, "Warning: build failed for %s/%s: %v\n",
@@ -567,7 +567,7 @@ func discoverResourcesFromOutput(data []byte, seen map[string]bool) []flux.Kusto
 //  3. If path is a directory without kustomization.yaml → discover and build
 //     subdirectories that have their own kustomization.yaml (applies namespace
 //     and other transformers), then read any remaining loose YAML files
-func buildSourcePath(builder *kustomize.Builder, sourcePath, repoRoot string, cache buildCache) ([]byte, error) {
+func buildSourcePath(ctx context.Context, builder *kustomize.Builder, sourcePath, repoRoot string, cache buildCache) ([]byte, error) {
 	info, err := os.Stat(sourcePath)
 	if err != nil {
 		return nil, fmt.Errorf("source path %s: %w", sourcePath, err)
@@ -581,7 +581,7 @@ func buildSourcePath(builder *kustomize.Builder, sourcePath, repoRoot string, ca
 	// Case 2: Directory with kustomization.yaml — run kustomize build.
 	for _, name := range []string{"kustomization.yaml", "kustomization.yml", "Kustomization"} {
 		if _, err := os.Stat(filepath.Join(sourcePath, name)); err == nil {
-			if output, ok := buildDirCached(builder, sourcePath, cache); ok {
+			if output, ok := buildDirCached(ctx, builder, sourcePath, cache); ok {
 				return output, nil
 			}
 			return nil, errAlreadyWarned
@@ -589,20 +589,20 @@ func buildSourcePath(builder *kustomize.Builder, sourcePath, repoRoot string, ca
 	}
 
 	// Case 3: Directory without kustomization.yaml — discover subdirectories
-	return buildSubdirectoriesAndLooseFiles(builder, sourcePath, repoRoot, cache)
+	return buildSubdirectoriesAndLooseFiles(ctx, builder, sourcePath, repoRoot, cache)
 }
 
 // buildSubdirectoriesAndLooseFiles discovers native kustomize directories under
 // sourcePath, builds each one via kustomize (applying namespace/transformers),
 // then reads any loose YAML files not covered by a kustomization.
-func buildSubdirectoriesAndLooseFiles(builder *kustomize.Builder, sourcePath, repoRoot string, cache buildCache) ([]byte, error) {
+func buildSubdirectoriesAndLooseFiles(ctx context.Context, builder *kustomize.Builder, sourcePath, repoRoot string, cache buildCache) ([]byte, error) {
 	// Single tree walk returns both the native overlays to build and every
 	// kustomization-file directory (any kind) to keep the loose-file walker
 	// out of.
-	kustomizeDirs, allKustFileDirs, err := flux.DiscoverKustomizeDirsAndFiles(sourcePath)
+	kustomizeDirs, allKustFileDirs, err := flux.DiscoverKustomizeDirsAndFiles(ctx, sourcePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: kustomize directory discovery failed for %s: %v\n", sourcePath, err)
-		return readYAMLFilesRecursive(sourcePath, repoRoot)
+		return readYAMLFilesRecursive(ctx, sourcePath, repoRoot)
 	}
 
 	// Track ALL directories that have a kustomization.yaml (attempted build),
@@ -613,7 +613,7 @@ func buildSubdirectoriesAndLooseFiles(builder *kustomize.Builder, sourcePath, re
 	var results []string
 	for _, dir := range kustomizeDirs {
 		kustDirs[dir] = true
-		if output, ok := buildDirCached(builder, dir, cache); ok {
+		if output, ok := buildDirCached(ctx, builder, dir, cache); ok {
 			results = append(results, string(output))
 		}
 	}
@@ -668,7 +668,7 @@ func buildSubdirectoriesAndLooseFiles(builder *kustomize.Builder, sourcePath, re
 // readYAMLFilesRecursive reads all .yaml/.yml files in a directory recursively
 // and combines them into a single multi-document YAML output. Reads are scoped
 // to repoRoot via os.Root so a symlink escaping the repository is rejected.
-func readYAMLFilesRecursive(dir, repoRoot string) ([]byte, error) {
+func readYAMLFilesRecursive(ctx context.Context, dir, repoRoot string) ([]byte, error) {
 	root, err := os.OpenRoot(repoRoot)
 	if err != nil {
 		return nil, fmt.Errorf("opening repo root %s: %w", repoRoot, err)
@@ -679,6 +679,9 @@ func readYAMLFilesRecursive(dir, repoRoot string) ([]byte, error) {
 
 	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if info.IsDir() {

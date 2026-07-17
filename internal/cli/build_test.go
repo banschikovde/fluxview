@@ -1383,7 +1383,7 @@ spec:
 `)
 
 	builder := kustomize.NewBuilder(repoRoot)
-	output, err := buildSourcePath(builder, sourcePath, repoRoot, make(buildCache))
+	output, err := buildSourcePath(context.Background(), builder, sourcePath, repoRoot, make(buildCache))
 	if err != nil {
 		t.Fatalf("buildSourcePath: %v", err)
 	}
@@ -1432,7 +1432,7 @@ metadata:
 `)
 
 	builder := kustomize.NewBuilder(repoRoot)
-	output, err := buildSourcePath(builder, sourcePath, repoRoot, make(buildCache))
+	output, err := buildSourcePath(context.Background(), builder, sourcePath, repoRoot, make(buildCache))
 	if err != nil {
 		t.Fatalf("buildSourcePath: %v", err)
 	}
@@ -1509,7 +1509,7 @@ metadata:
   name: standalone-cm
 `)
 
-	dirs, err := flux.DiscoverKustomizeDirs(root)
+	dirs, err := flux.DiscoverKustomizeDirs(context.Background(), root)
 	if err != nil {
 		t.Fatalf("DiscoverKustomizeDirs: %v", err)
 	}
@@ -1564,7 +1564,7 @@ metadata:
   name: overlay-cm
 `)
 
-	dirs, err := flux.DiscoverKustomizeDirs(root)
+	dirs, err := flux.DiscoverKustomizeDirs(context.Background(), root)
 	if err != nil {
 		t.Fatalf("DiscoverKustomizeDirs: %v", err)
 	}
@@ -1609,7 +1609,7 @@ metadata:
   name: noext-cm
 `)
 
-	dirs, err := flux.DiscoverKustomizeDirs(root)
+	dirs, err := flux.DiscoverKustomizeDirs(context.Background(), root)
 	if err != nil {
 		t.Fatalf("DiscoverKustomizeDirs: %v", err)
 	}
@@ -1686,7 +1686,7 @@ resources:
 	builder := kustomize.NewBuilder(repoRoot)
 	cache := make(buildCache)
 
-	_, err := buildSourcePath(builder, failDir, repoRoot, cache)
+	_, err := buildSourcePath(context.Background(), builder, failDir, repoRoot, cache)
 	if err == nil {
 		t.Fatal("expected error for broken kustomization")
 	}
@@ -1695,7 +1695,7 @@ resources:
 	}
 
 	// Second call should NOT re-build or re-warn (cached failure).
-	_, err = buildSourcePath(builder, failDir, repoRoot, cache)
+	_, err = buildSourcePath(context.Background(), builder, failDir, repoRoot, cache)
 	if !errors.Is(err, errAlreadyWarned) {
 		t.Errorf("second call should also return errAlreadyWarned (cached), got: %v", err)
 	}
@@ -1780,7 +1780,7 @@ data:
   CLUSTER_NAME: test
 `)
 
-	outputs := buildKustomizeOverlays(clusterPath, clusterPath, map[string]bool{}, make(buildCache))
+	outputs := buildKustomizeOverlays(context.Background(), clusterPath, clusterPath, map[string]bool{}, make(buildCache))
 	combined := ""
 	for _, o := range outputs {
 		if len(combined) > 0 {
@@ -1821,7 +1821,7 @@ data:
   CLUSTER_NAME: test
 `)
 
-	outputs := buildKustomizeOverlays(clusterPath, clusterPath, map[string]bool{}, make(buildCache))
+	outputs := buildKustomizeOverlays(context.Background(), clusterPath, clusterPath, map[string]bool{}, make(buildCache))
 	combined := ""
 	for _, o := range outputs {
 		if len(combined) > 0 {
@@ -1861,7 +1861,7 @@ title: Not a k8s document
 description: Should be filtered out
 `)
 
-	outputs := buildKustomizeOverlays(clusterPath, clusterPath, map[string]bool{}, make(buildCache))
+	outputs := buildKustomizeOverlays(context.Background(), clusterPath, clusterPath, map[string]bool{}, make(buildCache))
 	combined := ""
 	for _, o := range outputs {
 		combined += string(o)
@@ -2039,7 +2039,7 @@ metadata:
   name: real-cm
 `)
 
-	outputs := buildKustomizeOverlays(clusterPath, clusterPath, map[string]bool{}, make(buildCache))
+	outputs := buildKustomizeOverlays(context.Background(), clusterPath, clusterPath, map[string]bool{}, make(buildCache))
 	combined := ""
 	for _, o := range outputs {
 		if len(combined) > 0 {
@@ -2093,7 +2093,7 @@ metadata:
 `)
 
 	builder := kustomize.NewBuilder(sourcePath)
-	output, err := buildSubdirectoriesAndLooseFiles(builder, sourcePath, sourcePath, make(buildCache))
+	output, err := buildSubdirectoriesAndLooseFiles(context.Background(), builder, sourcePath, sourcePath, make(buildCache))
 	if err != nil {
 		t.Fatalf("buildSubdirectoriesAndLooseFiles: %v", err)
 	}
@@ -2158,7 +2158,7 @@ metadata:
 	var output []byte
 	stderr := captureStderr(func() {
 		var err error
-		output, err = buildSubdirectoriesAndLooseFiles(builder, sourcePath, repoRoot, make(buildCache))
+		output, err = buildSubdirectoriesAndLooseFiles(context.Background(), builder, sourcePath, repoRoot, make(buildCache))
 		if err != nil {
 			t.Fatalf("buildSubdirectoriesAndLooseFiles: %v", err)
 		}
@@ -2195,7 +2195,7 @@ metadata:
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs = buildKustomizeOverlays(clusterPath, repoRoot, nil, make(buildCache))
+		outputs = buildKustomizeOverlays(context.Background(), clusterPath, repoRoot, nil, make(buildCache))
 	})
 
 	if !strings.Contains(stderr, "Warning: could not read") || !strings.Contains(stderr, bad) {
@@ -2251,7 +2251,7 @@ metadata:
 	var output []byte
 	stderr := captureStderr(func() {
 		var err error
-		output, err = buildSubdirectoriesAndLooseFiles(builder, sourcePath, repoRoot, make(buildCache))
+		output, err = buildSubdirectoriesAndLooseFiles(context.Background(), builder, sourcePath, repoRoot, make(buildCache))
 		if err != nil {
 			t.Fatalf("buildSubdirectoriesAndLooseFiles: %v", err)
 		}

@@ -1,6 +1,7 @@
 package flux
 
 import (
+	"context"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -32,7 +33,7 @@ type nativeKustomization struct {
 //   - subdirectories of already discovered kustomize dirs
 //   - directories referenced as resources by another discovered kustomization
 //     (e.g. sibling base/ referenced via resources: [../base])
-func DiscoverKustomizeDirsAndFiles(rootPath string) (buildDirs, fileDirs []string, err error) {
+func DiscoverKustomizeDirsAndFiles(ctx context.Context, rootPath string) (buildDirs, fileDirs []string, err error) {
 	type kustEntry struct {
 		path      string
 		absPath   string
@@ -47,7 +48,14 @@ func DiscoverKustomizeDirsAndFiles(rootPath string) (buildDirs, fileDirs []strin
 	}
 
 	err = filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || !d.IsDir() {
+		if err != nil {
+			return err
+		}
+		// Honor context cancellation during what can be a long tree walk.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !d.IsDir() {
 			return nil
 		}
 
@@ -132,8 +140,8 @@ func DiscoverKustomizeDirsAndFiles(rootPath string) (buildDirs, fileDirs []strin
 // and returns the buildable directories (with dedup). See DiscoverKustomizeDirsAndFiles
 // for the selection rules. Callers that also need every kustomization-file directory
 // should call DiscoverKustomizeDirsAndFiles once instead of this plus DiscoverKustomizationFileDirs.
-func DiscoverKustomizeDirs(rootPath string) ([]string, error) {
-	buildDirs, _, err := DiscoverKustomizeDirsAndFiles(rootPath)
+func DiscoverKustomizeDirs(ctx context.Context, rootPath string) ([]string, error) {
+	buildDirs, _, err := DiscoverKustomizeDirsAndFiles(ctx, rootPath)
 	return buildDirs, err
 }
 

@@ -2,6 +2,7 @@
 package kustomize
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,7 +36,14 @@ func NewBuilder(rootDir string) *Builder {
 // Build runs kustomize build in the given directory and returns YAML output.
 // File access is restricted to the builder's rootDir to prevent path traversal
 // attacks via malicious kustomization.yaml files.
-func (b *Builder) Build(dir string) ([]byte, error) {
+//
+// ctx is checked before the build starts; the kustomize library itself does
+// not expose mid-build cancellation points, so a build already in flight runs
+// to completion even if ctx is cancelled.
+func (b *Builder) Build(ctx context.Context, dir string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	kustFile := findKustomizationFile(dir)
 	if kustFile == "" {
 		return nil, fmt.Errorf("no kustomization file found in %s", dir)
