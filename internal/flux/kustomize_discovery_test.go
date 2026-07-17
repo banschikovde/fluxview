@@ -443,18 +443,86 @@ metadata:
 		assertNotDir(fileDirs, plainDir, "fileDirs")
 	})
 
-	t.Run("walk error returns nil sets", func(t *testing.T) {
-		// Non-existent root: WalkDir fails on the initial Lstat.
+	t.Run("non-existent root returns empty sets, no error", func(t *testing.T) {
+		// Best-effort: a root that can't be read at all yields nothing without
+		// an error. The only condition DiscoverKustomizeDirsAndFiles returns an
+		// error for is context cancellation (covered below). In production the
+		// path is already validated upstream before this is called.
 		buildDirs, fileDirs, err := DiscoverKustomizeDirsAndFiles(
 			context.Background(), filepath.Join(t.TempDir(), "does-not-exist"))
-		if err == nil {
-			t.Fatal("expected error for non-existent root, got nil")
+		if err != nil {
+			t.Fatalf("expected no error for non-existent root, got %v", err)
 		}
 		if buildDirs != nil {
-			t.Errorf("expected nil buildDirs on error, got %v", buildDirs)
+			t.Errorf("expected nil buildDirs, got %v", buildDirs)
 		}
 		if fileDirs != nil {
-			t.Errorf("expected nil fileDirs on error, got %v", fileDirs)
+			t.Errorf("expected nil fileDirs, got %v", fileDirs)
+		}
+	})
+
+	t.Run("unreadable subdir mid-tree is skipped, walk continues", func(t *testing.T) {
+		// Regression guard: a read error on a single entry (permission denied
+		// on a subdir, broken symlink) must be skipped best-effort — the walk
+		// continues over the rest of the tree, the bad entry is recorded
+		// nowhere, and no error is returned. (An earlier version aborted the
+		// whole walk here, silently dropping every overlay via the callers.)
+		root := t.TempDir()
+
+		// Native overlay — should still be discovered despite a bad sibling.
+		overlayDir := filepath.Join(root, "overlay")
+		writeFile(t, filepath.Join(overlayDir, "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cm.yaml
+`)
+		writeFile(t, filepath.Join(overlayDir, "cm.yaml"), `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: overlay-cm
+`)
+
+		// Unreadable subdir that would be discovered if readable — must be skipped.
+		blockedDir := filepath.Join(root, "blocked")
+		writeFile(t, filepath.Join(blockedDir, "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+`)
+		if err := os.Chmod(blockedDir, 0); err != nil {
+			t.Fatalf("chmod blocked: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(blockedDir, 0o755) })
+		// Skip where chmod 0 can't enforce unreadability (root, or a platform
+		// that ignores mode bits) — otherwise the skip behavior can't be tested.
+		if _, err := os.ReadDir(blockedDir); err == nil {
+			t.Skip("cannot make directory unreadable in this environment (root)")
+		}
+
+		buildDirs, fileDirs, err := DiscoverKustomizeDirsAndFiles(context.Background(), root)
+		if err != nil {
+			t.Fatalf("expected no error (best-effort walk), got %v", err)
+		}
+
+		contains := func(set []string, dir string) bool {
+			for _, d := range set {
+				if d == dir {
+					return true
+				}
+			}
+			return false
+		}
+		// Good overlay still discovered...
+		if !contains(buildDirs, overlayDir) {
+			t.Errorf("expected overlay in buildDirs despite unreadable sibling, got %v", buildDirs)
+		}
+		if !contains(fileDirs, overlayDir) {
+			t.Errorf("expected overlay in fileDirs despite unreadable sibling, got %v", fileDirs)
+		}
+		// ...and the unreadable dir appears nowhere.
+		if contains(buildDirs, blockedDir) {
+			t.Errorf("unreadable dir must not be in buildDirs, got %v", buildDirs)
+		}
+		if contains(fileDirs, blockedDir) {
+			t.Errorf("unreadable dir must not be in fileDirs, got %v", fileDirs)
 		}
 	})
 

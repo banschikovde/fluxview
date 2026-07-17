@@ -48,10 +48,16 @@ func DiscoverKustomizeDirsAndFiles(ctx context.Context, rootPath string) (buildD
 	}
 
 	err = filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
+		// A read error on a single entry (permission denied on a subdir, broken
+		// symlink, etc.) is skipped best-effort: the walk continues over the rest
+		// of the tree. Returning err here would abort the whole discovery and,
+		// via the callers, silently drop every overlay or fall back to a flat
+		// read — strictly worse than skipping the one bad entry.
 		if err != nil {
-			return err
+			return nil
 		}
-		// Honor context cancellation during what can be a long tree walk.
+		// Honor context cancellation during what can be a long tree walk — this
+		// is the only case that intentionally aborts with an error.
 		if err := ctx.Err(); err != nil {
 			return err
 		}
