@@ -1,0 +1,23 @@
+# Binaries
+bin/
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Agent
+.agent/
+
+# Docs
+docs/
+
+# Go
+vendor/
+
+# Codegraph mcp
+.codegraph

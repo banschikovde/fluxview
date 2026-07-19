@@ -1,0 +1,151 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/spf13/cobra"
+
+	"github.com/banschikovde/fluxview/internal/flux"
+	"github.com/banschikovde/fluxview/internal/git"
+	"github.com/banschikovde/fluxview/internal/kustomize"
+	"github.com/banschikovde/fluxview/internal/validate"
+)
+
+// ValidateFlags holds flags for the validate command.
+type ValidateFlags struct {
+	Path      string
+	Namespace string
+	SchemaDir string
+}
+
+func newValidateCmd() *cobra.Command {
+	flags := &ValidateFlags{}
+
+	cmd := &cobra.Command{
+		Use:   "validate [flags]",
+		Short: "Validate Flux resources against CRD schemas",
+		Long: `Validate built Flux resources against bundled CRD schemas.
+
+Resources without a matching CRD schema are silently skipped.
+Schemas are loaded from --schema-dir (default: ./crds/).
+
+Examples:
+  fluxview validate --path clusters/prod/
+  fluxview validate --path clusters/prod/ --schema-dir /crds`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runValidate(cmd.Context(), flags)
+		},
+	}
+
+	cmd.Flags().StringVarP(&flags.Path, "path", "p", "", "Path to the cluster directory in the repository")
+	cmd.Flags().StringVarP(&flags.Namespace, "namespace", "n", "", "Filter output resources by namespace")
+	cmd.Flags().StringVar(&flags.SchemaDir, "schema-dir", "", "Directory with CRD schema files (default: ./crds/)")
+
+	return cmd
+}
+
+func runValidate(ctx context.Context, flags *ValidateFlags) error {
+	clusterPath := flags.Path
+	if clusterPath == "" {
+		clusterPath = "."
+	}
+
+	absClusterPath, err := filepath.Abs(clusterPath)
+	if err != nil {
+		return NewExitError(fmt.Errorf("resolving path %s: %w", clusterPath, err), ExitCodeError)
+	}
+
+	if _, err := os.Stat(absClusterPath); os.IsNotExist(err) {
+		return NewExitError(fmt.Errorf("path %s does not exist", clusterPath), ExitCodeError)
+	}
+
+	// Check that the path contains Kustomization files directly (not just in subdirectories)
+	hasDirectKS, err := hasDirectKustomizations(absClusterPath)
+	if err != nil {
+		return NewExitError(fmt.Errorf("checking for Kustomization files: %w", err), ExitCodeError)
+	}
+	if !hasDirectKS {
+		return NewExitError(fmt.Errorf("no Kustomization files found in %s", clusterPath), ExitCodeError)
+	}
+
+	repoRoot, err := git.FindRepoRoot(absClusterPath)
+	if err != nil {
+		return NewExitError(fmt.Errorf("finding git repo root: %w", err), ExitCodeError)
+	}
+
+	// Resolve schema directory.
+	schemaDir := flags.SchemaDir
+	if schemaDir == "" {
+		schemaDir = defaultSchemaDir()
+	}
+
+	validator := validate.New(schemaDir)
+
+	fmt.Fprintf(os.Stderr, "Loaded %d CRD schemas from %s\n", validator.SchemaCount(), schemaDir)
+
+	parser := flux.NewParser(absClusterPath)
+	kustomizations, err := parser.ParseKustomizations(ctx)
+	if err != nil {
+		return NewExitError(fmt.Errorf("parsing Kustomization resources: %w", err), ExitCodeError)
+	}
+
+	builder := kustomize.NewBuilder(repoRoot)
+	buildCache := make(buildCache)
+	configMaps := resolveConfigMaps(ctx, absClusterPath, builder, buildCache)
+
+	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, absClusterPath, configMaps, false, buildCache)
+	if err != nil {
+		return NewExitError(err, ExitCodeError)
+	}
+
+	if output == nil {
+		fmt.Fprintln(os.Stderr, "No resources to validate.")
+		return nil
+	}
+
+	// Check for interruption before validation
+	if err := CheckInterrupted(ctx); err != nil {
+		return err
+	}
+
+	// CRDs are schema definitions, not resources to validate — always skip.
+	output = filterCRDDocs(output)
+
+	if flags.Namespace != "" {
+		output = filterByNamespace(output, flags.Namespace)
+		if len(output) == 0 {
+			fmt.Fprintf(os.Stderr, "No resources found in namespace %q\n", flags.Namespace)
+			return nil
+		}
+	}
+
+	results := validator.Validate(output)
+	if len(results) == 0 {
+		fmt.Fprintln(os.Stderr, "All resources valid.")
+		return nil
+	}
+
+	for _, r := range results {
+		fmt.Fprintf(os.Stderr, "✗ %s\n", r.Resource)
+		for _, e := range r.Errors {
+			fmt.Fprintf(os.Stderr, "  %s\n", e)
+		}
+	}
+
+	return NewExitError(fmt.Errorf("%d resource(s) failed validation", len(results)), ExitValidationFailed)
+}
+
+// defaultSchemaDir returns the default CRD schema directory.
+// Checks common locations: /crds/ (Docker), ./crds/ (local).
+func defaultSchemaDir() string {
+	for _, dir := range []string{"/crds", "crds"} {
+		if _, err := os.Stat(dir); err == nil {
+			return dir
+		}
+	}
+	return "crds"
+}

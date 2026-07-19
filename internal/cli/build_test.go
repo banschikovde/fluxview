@@ -1,0 +1,2488 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/banschikovde/fluxview/internal/flux"
+	"github.com/banschikovde/fluxview/internal/helm"
+	"github.com/banschikovde/fluxview/internal/kustomize"
+	"gopkg.in/yaml.v3"
+)
+
+func TestReorderYAMLFields(t *testing.T) {
+	input := []byte(`spec:
+  replicas: 1
+metadata:
+  name: test
+apiVersion: v1
+kind: ConfigMap
+`)
+	result := reorderYAMLFields(input)
+	resultStr := string(result)
+
+	// apiVersion, kind, metadata should come before spec.
+	apiIdx := indexOf(resultStr, "apiVersion:")
+	kindIdx := indexOf(resultStr, "kind:")
+	metaIdx := indexOf(resultStr, "metadata:")
+	specIdx := indexOf(resultStr, "spec:")
+
+	if apiIdx < 0 || kindIdx < 0 || metaIdx < 0 || specIdx < 0 {
+		t.Fatalf("missing expected fields in output: %s", resultStr)
+	}
+	if !(apiIdx < kindIdx && kindIdx < metaIdx && metaIdx < specIdx) {
+		t.Errorf("expected apiVersion < kind < metadata < spec, got positions: %d %d %d %d", apiIdx, kindIdx, metaIdx, specIdx)
+	}
+}
+
+func TestReorderYAMLFields_MultiDoc(t *testing.T) {
+	input := []byte(`spec:
+  a: 1
+metadata:
+  name: doc1
+apiVersion: v1
+kind: ConfigMap
+---
+spec:
+  b: 2
+metadata:
+  name: doc2
+apiVersion: v1
+kind: ConfigMap
+`)
+	result := reorderYAMLFields(input)
+	resultStr := string(result)
+
+	// Both documents should be reordered.
+	if indexOf(resultStr, "apiVersion:") > indexOf(resultStr, "spec:") {
+		t.Error("expected apiVersion before spec in multi-doc output")
+	}
+}
+
+// TestReorderYAMLFields_BlockScalarWithSeparator verifies that a literal "---"
+// inside a block scalar (|) does NOT split the document during reordering.
+func TestReorderYAMLFields_BlockScalarWithSeparator(t *testing.T) {
+	input := []byte(`kind: Secret
+metadata:
+  name: cert
+apiVersion: v1
+data:
+  tls.crt: |
+    -----BEGIN CERTIFICATE-----
+    --- not a separator
+    MIIB...
+    -----END CERTIFICATE-----
+---
+kind: ConfigMap
+metadata:
+  name: config
+apiVersion: v1
+`)
+	result := reorderYAMLFields(input)
+	resultStr := string(result)
+
+	// First document must be intact — certificate content must NOT be split off.
+	if !strings.Contains(resultStr, "BEGIN CERTIFICATE") {
+		t.Error("certificate content lost — block scalar --- was treated as separator")
+	}
+	if !strings.Contains(resultStr, "not a separator") {
+		t.Error("block scalar line with --- lost during reorder")
+	}
+
+	// Second document must still be present after the real separator.
+	if !strings.Contains(resultStr, "ConfigMap") {
+		t.Error("second document (ConfigMap) missing after real separator")
+	}
+
+	// Must have exactly 2 documents (1 real separator).
+	sepCount := strings.Count(resultStr, "\n---\n")
+	if sepCount != 1 {
+		t.Errorf("expected 1 document separator in output, got %d", sepCount)
+	}
+}
+
+func TestProcessYAMLDoc_StripsSOPS(t *testing.T) {
+	input := []byte(`apiVersion: v1
+kind: Secret
+metadata:
+  name: test
+data:
+  password: cGFzcw==
+sops:
+  mac: ENC[AES256]
+  version: 3.8.1
+`)
+	result := processYAMLDoc(input)
+	resultStr := string(result)
+
+	if indexOf(resultStr, "sops:") >= 0 {
+		t.Error("expected sops section to be stripped")
+	}
+	if indexOf(resultStr, "mac:") >= 0 {
+		t.Error("expected sops.mac to be stripped")
+	}
+	if indexOf(resultStr, "password:") < 0 {
+		t.Error("expected data.password to be preserved")
+	}
+}
+
+func TestProcessYAMLDoc_NoSOPS(t *testing.T) {
+	input := []byte(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test
+data:
+  key: value
+`)
+	result := processYAMLDoc(input)
+	resultStr := string(result)
+
+	// Substring checks (not exact equality) — yaml.Node round-trip
+	// may change formatting details like quoting or spacing.
+	if indexOf(resultStr, "ConfigMap") < 0 {
+		t.Error("expected kind to be preserved")
+	}
+	if indexOf(resultStr, "key: value") < 0 {
+		t.Error("expected data.key to be preserved")
+	}
+	if indexOf(resultStr, "sops:") >= 0 {
+		t.Error("did not expect sops section in output")
+	}
+}
+
+func TestProcessYAMLDoc_ListItem(t *testing.T) {
+	// A YAML list at top level should be preserved (no reorder applied).
+	input := []byte("- name: item1\n- name: item2\n")
+	result := processYAMLDoc(input)
+	resultStr := string(result)
+
+	if indexOf(resultStr, "item1") < 0 || indexOf(resultStr, "item2") < 0 {
+		t.Errorf("expected list items to be preserved, got: %s", resultStr)
+	}
+}
+
+func TestFilterKustomizations_ByName(t *testing.T) {
+	ks := []flux.Kustomization{
+		{Metadata: flux.ObjectMeta{Name: "base", Namespace: "flux-system"}},
+		{Metadata: flux.ObjectMeta{Name: "crds", Namespace: "flux-system"}},
+		{Metadata: flux.ObjectMeta{Name: "system", Namespace: "flux-system"}},
+	}
+
+	tests := []struct {
+		name      string
+		args      []flux.Kustomization
+		filter    string
+		wantCount int
+		wantName  string
+	}{
+		{"no filter returns all", ks, "", 3, ""},
+		{"filter by name", ks, "base", 1, "base"},
+		{"filter nonexistent", ks, "nonexistent", 0, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := filterKustomizations(tt.args, tt.filter)
+			if len(result) != tt.wantCount {
+				t.Errorf("got %d, want %d", len(result), tt.wantCount)
+			}
+			if tt.wantName != "" && len(result) > 0 && result[0].Metadata.Name != tt.wantName {
+				t.Errorf("got name %q, want %q", result[0].Metadata.Name, tt.wantName)
+			}
+		})
+	}
+}
+
+func TestFilterHelmReleases_ByName(t *testing.T) {
+	hr := []flux.HelmRelease{
+		{Metadata: flux.ObjectMeta{Name: "podinfo", Namespace: "default"}},
+		{Metadata: flux.ObjectMeta{Name: "metallb", Namespace: "metallb-system"}},
+	}
+
+	tests := []struct {
+		name      string
+		args      []flux.HelmRelease
+		filter    string
+		wantCount int
+	}{
+		{"no filter returns all", hr, "", 2},
+		{"filter by name", hr, "podinfo", 1},
+		{"filter nonexistent", hr, "xyz", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := filterHelmReleases(tt.args, tt.filter)
+			if len(result) != tt.wantCount {
+				t.Errorf("got %d, want %d", len(result), tt.wantCount)
+			}
+		})
+	}
+}
+
+func TestResolveOCIRepoURL(t *testing.T) {
+	ociRepos := []flux.OCIRepository{
+		{Metadata: flux.ObjectMeta{Name: "chart-a", Namespace: "ns1"}, Spec: flux.OCIRepositorySpec{URL: "oci://registry.io/chart-a"}},
+		{Metadata: flux.ObjectMeta{Name: "chart-b", Namespace: "ns2"}, Spec: flux.OCIRepositorySpec{URL: "oci://registry.io/chart-b"}},
+	}
+
+	tests := []struct {
+		name    string
+		hr      flux.HelmRelease
+		wantURL string
+		wantVer string
+	}{
+		{
+			"found same namespace",
+			flux.HelmRelease{
+				Metadata: flux.ObjectMeta{Name: "hr1", Namespace: "ns1"},
+				Spec:     flux.HelmReleaseSpec{ChartRef: &flux.ChartRef{Kind: "OCIRepository", Name: "chart-a"}},
+			},
+			"oci://registry.io/chart-a", "",
+		},
+		{
+			"found cross-namespace",
+			flux.HelmRelease{
+				Metadata: flux.ObjectMeta{Name: "hr2", Namespace: "ns1"},
+				Spec:     flux.HelmReleaseSpec{ChartRef: &flux.ChartRef{Kind: "OCIRepository", Name: "chart-b", Namespace: "ns2"}},
+			},
+			"oci://registry.io/chart-b", "",
+		},
+		{
+			"not found wrong namespace",
+			flux.HelmRelease{
+				Metadata: flux.ObjectMeta{Name: "hr3", Namespace: "ns1"},
+				Spec:     flux.HelmReleaseSpec{ChartRef: &flux.ChartRef{Kind: "OCIRepository", Name: "chart-b"}},
+			},
+			"", "",
+		},
+		{
+			"not found wrong name",
+			flux.HelmRelease{
+				Metadata: flux.ObjectMeta{Name: "hr4", Namespace: "ns1"},
+				Spec:     flux.HelmReleaseSpec{ChartRef: &flux.ChartRef{Kind: "OCIRepository", Name: "chart-x"}},
+			},
+			"", "",
+		},
+		{
+			"nil chartRef",
+			flux.HelmRelease{Metadata: flux.ObjectMeta{Name: "hr5", Namespace: "ns1"}},
+			"", "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url, ver := resolveOCIRepoURL(tt.hr, ociRepos)
+			if url != tt.wantURL {
+				t.Errorf("url = %q, want %q", url, tt.wantURL)
+			}
+			if ver != tt.wantVer {
+				t.Errorf("version = %q, want %q", ver, tt.wantVer)
+			}
+		})
+	}
+}
+
+func TestResolveOCIRepoURL_WithRef(t *testing.T) {
+	ociRepos := []flux.OCIRepository{
+		{
+			Metadata: flux.ObjectMeta{Name: "chart-tagged", Namespace: "ns1"},
+			Spec: flux.OCIRepositorySpec{
+				URL: "oci://registry.io/chart",
+				Ref: &flux.OCIRepositoryRef{Tag: "v1.2.3"},
+			},
+		},
+		{
+			Metadata: flux.ObjectMeta{Name: "chart-semver", Namespace: "ns1"},
+			Spec: flux.OCIRepositorySpec{
+				URL: "oci://registry.io/chart",
+				Ref: &flux.OCIRepositoryRef{Semver: "^1.0.0"},
+			},
+		},
+		{
+			Metadata: flux.ObjectMeta{Name: "chart-digest", Namespace: "ns1"},
+			Spec: flux.OCIRepositorySpec{
+				URL: "oci://registry.io/chart",
+				Ref: &flux.OCIRepositoryRef{Digest: "sha256:abc123"},
+			},
+		},
+		{
+			Metadata: flux.ObjectMeta{Name: "chart-both", Namespace: "ns1"},
+			Spec: flux.OCIRepositorySpec{
+				URL: "oci://registry.io/chart",
+				Ref: &flux.OCIRepositoryRef{Tag: "v1.0.0", Semver: "^2.0.0"},
+			},
+		},
+	}
+
+	// Tag only.
+	hr := flux.HelmRelease{
+		Metadata: flux.ObjectMeta{Name: "hr", Namespace: "ns1"},
+		Spec:     flux.HelmReleaseSpec{ChartRef: &flux.ChartRef{Kind: "OCIRepository", Name: "chart-tagged"}},
+	}
+	ref, ver := resolveOCIRepoURL(hr, ociRepos)
+	if ref != "oci://registry.io/chart" {
+		t.Errorf("tag: ref = %q, want oci://registry.io/chart", ref)
+	}
+	if ver != "v1.2.3" {
+		t.Errorf("tag: version = %q, want v1.2.3", ver)
+	}
+
+	// Semver only.
+	hr.Spec.ChartRef.Name = "chart-semver"
+	_, ver = resolveOCIRepoURL(hr, ociRepos)
+	if ver != "^1.0.0" {
+		t.Errorf("semver: version = %q, want ^1.0.0", ver)
+	}
+
+	// Both tag+semver → semver wins (higher priority).
+	hr.Spec.ChartRef.Name = "chart-both"
+	_, ver = resolveOCIRepoURL(hr, ociRepos)
+	if ver != "^2.0.0" {
+		t.Errorf("tag+semver: version = %q, want ^2.0.0 (semver > tag)", ver)
+	}
+
+	// Digest → URL gets @digest appended, version empty.
+	hr.Spec.ChartRef.Name = "chart-digest"
+	ref, ver = resolveOCIRepoURL(hr, ociRepos)
+	if !strings.Contains(ref, "@sha256:abc123") {
+		t.Errorf("digest: ref = %q, want URL with @sha256:abc123", ref)
+	}
+	if ver != "" {
+		t.Errorf("digest: version = %q, want empty", ver)
+	}
+}
+
+// --- Tests for unified HelmRelease discovery (Steps 1-5) ---
+
+// writeHelper writes a file under dir, creating the directory if needed.
+func writeHelper(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile %s: %v", name, err)
+	}
+}
+
+// captureStderr temporarily redirects os.Stderr, runs f, and returns what was written.
+func captureStderr(f func()) string {
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	f()
+	w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	return buf.String()
+}
+
+// captureStdout temporarily redirects os.Stdout, runs f, and returns what was written.
+func captureStdout(f func()) string {
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	f()
+	w.Close()
+	os.Stdout = old
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	return buf.String()
+}
+
+// Test 1+2: A HelmRelease in a shared base outside clusterPath, pulled in
+// via Flux Kustomization.spec.path, is discovered through buildAllKustomizations.
+// Covers both build ks (extracts HR from output) and build hr (primary path).
+func TestBuildAllKustomizations_HelmReleaseInSharedBase(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	// Shared base outside clusterPath.
+	baseDir := filepath.Join(repoRoot, "apps", "base")
+	writeHelper(t, baseDir, "helmrelease.yaml", `apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: podinfo
+  namespace: apps
+spec:
+  chart:
+    spec:
+      chart: podinfo
+      version: "6.0.0"
+      sourceRef:
+        kind: HelmRepository
+        name: podinfo
+        namespace: apps
+`)
+	writeHelper(t, baseDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - helmrelease.yaml
+`)
+
+	// Flux Kustomization in clusterPath pointing to the shared base.
+	clusterPath := filepath.Join(repoRoot, "clusters", "test")
+	writeHelper(t, clusterPath, "base.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: base
+  namespace: flux-system
+spec:
+  path: ../../apps/base
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+`)
+
+	ctx := context.Background()
+	kustomizations, err := flux.NewParser(clusterPath).ParseKustomizations(ctx)
+	if err != nil {
+		t.Fatalf("ParseKustomizations: %v", err)
+	}
+
+	builder := kustomize.NewBuilder(repoRoot)
+	buildCache := make(buildCache)
+	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, nil, true, buildCache)
+	if err != nil {
+		t.Fatalf("buildKSContent: %v", err)
+	}
+
+	helmReleases, _ := flux.ParseHelmReleasesFromBytes(output)
+	if len(helmReleases) != 1 {
+		t.Fatalf("expected 1 HelmRelease from shared base, got %d: %+v", len(helmReleases), helmReleases)
+	}
+	if helmReleases[0].Metadata.Name != "podinfo" {
+		t.Errorf("name = %q, want %q", helmReleases[0].Metadata.Name, "podinfo")
+	}
+	if helmReleases[0].Metadata.Namespace != "apps" {
+		t.Errorf("namespace = %q, want %q", helmReleases[0].Metadata.Namespace, "apps")
+	}
+}
+
+// Test: Kustomization.spec.targetNamespace rewrites metadata.namespace on all
+// namespaced resources in the build output, while leaving cluster-scoped
+// resources untouched.
+func TestBuildAllKustomizations_TargetNamespace(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	// Overlay with a namespaced + a cluster-scoped resource.
+	overlayDir := filepath.Join(repoRoot, "apps", "base")
+	writeHelper(t, overlayDir, "deployment.yaml", `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: default
+spec:
+  replicas: 1
+`)
+	writeHelper(t, overlayDir, "clusterrole.yaml", `apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: app-role
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get"]
+`)
+	writeHelper(t, overlayDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - deployment.yaml
+  - clusterrole.yaml
+`)
+
+	// Flux Kustomization with targetNamespace set.
+	clusterPath := filepath.Join(repoRoot, "clusters", "test")
+	writeHelper(t, clusterPath, "ks.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: app
+  namespace: flux-system
+spec:
+  path: ../../apps/base
+  targetNamespace: team-a
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+`)
+
+	ctx := context.Background()
+	kustomizations, err := flux.NewParser(clusterPath).ParseKustomizations(ctx)
+	if err != nil {
+		t.Fatalf("ParseKustomizations: %v", err)
+	}
+
+	builder := kustomize.NewBuilder(repoRoot)
+	buildCache := make(buildCache)
+	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, true, buildCache)
+	if err != nil {
+		t.Fatalf("buildAllKustomizations: %v", err)
+	}
+
+	deployNS := namespaceOfBuildTest(t, output, "Deployment", "app")
+	if deployNS != "team-a" {
+		t.Errorf("Deployment namespace = %q, want %q (targetNamespace override)", deployNS, "team-a")
+	}
+	crNS := namespaceOfBuildTest(t, output, "ClusterRole", "app-role")
+	if crNS != "" {
+		t.Errorf("ClusterRole namespace = %q, want empty (cluster-scoped must be skipped)", crNS)
+	}
+}
+
+// namespaceOfBuildTest parses multi-doc YAML and returns the metadata.namespace
+// of the document matching the given kind/name.
+func namespaceOfBuildTest(t *testing.T, data []byte, kind, name string) string {
+	t.Helper()
+	for _, doc := range flux.SplitYAMLText(data) {
+		var m struct {
+			Kind     string `yaml:"kind"`
+			Metadata struct {
+				Name      string `yaml:"name"`
+				Namespace string `yaml:"namespace"`
+			} `yaml:"metadata"`
+		}
+		if yaml.Unmarshal([]byte(doc), &m) != nil {
+			continue
+		}
+		if m.Kind == kind && m.Metadata.Name == name {
+			return m.Metadata.Namespace
+		}
+	}
+	t.Fatalf("resource %s/%s not found in output:\n%s", kind, name, string(data))
+	return ""
+}
+
+// Test: Kustomization.spec.images rewrites container image references via the
+// kustomize image transformer.
+func TestBuildAllKustomizations_Images(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	overlayDir := filepath.Join(repoRoot, "apps", "base")
+	writeHelper(t, overlayDir, "deployment.yaml", `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          image: podinfo:5.0.0
+`)
+	writeHelper(t, overlayDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - deployment.yaml
+`)
+
+	clusterPath := filepath.Join(repoRoot, "clusters", "test")
+	writeHelper(t, clusterPath, "ks.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: app
+  namespace: flux-system
+spec:
+  path: ../../apps/base
+  images:
+    - name: podinfo
+      newName: ghcr.io/stefanprodan/podinfo
+      newTag: 6.0.0
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+`)
+
+	ctx := context.Background()
+	kustomizations, err := flux.NewParser(clusterPath).ParseKustomizations(ctx)
+	if err != nil {
+		t.Fatalf("ParseKustomizations: %v", err)
+	}
+
+	builder := kustomize.NewBuilder(repoRoot)
+	buildCache := make(buildCache)
+	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, true, buildCache)
+	if err != nil {
+		t.Fatalf("buildAllKustomizations: %v", err)
+	}
+
+	if !strings.Contains(string(output), "ghcr.io/stefanprodan/podinfo:6.0.0") {
+		t.Errorf("expected rewritten image in output:\n%s", string(output))
+	}
+	if strings.Contains(string(output), "podinfo:5.0.0") {
+		t.Errorf("original image podinfo:5.0.0 should have been replaced:\n%s", string(output))
+	}
+}
+
+// TestBuildAllKustomizations_SubstituteAfterPatches verifies the post-build
+// transformation order matches Flux: postBuild.substitute runs LAST, after
+// patches, so ${VAR} references inside a patch's content are resolved. This
+// guards the bug where substitution ran before patches, leaving ${VAR} literal.
+func TestBuildAllKustomizations_SubstituteAfterPatches(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	overlayDir := filepath.Join(repoRoot, "apps", "base")
+	writeHelper(t, overlayDir, "deployment.yaml", `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  replicas: 1
+`)
+	writeHelper(t, overlayDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - deployment.yaml
+`)
+
+	// Flux Kustomization: a patch that injects ${REPLICAS}, plus postBuild
+	// substitution providing REPLICAS=5.
+	clusterPath := filepath.Join(repoRoot, "clusters", "test")
+	writeHelper(t, clusterPath, "ks.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: app
+  namespace: flux-system
+spec:
+  path: ../../apps/base
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  patches:
+    - target:
+        kind: Deployment
+        name: app
+      patch: |-
+        - op: replace
+          path: /spec/replicas
+          value: ${REPLICAS}
+  postBuild:
+    substitute:
+      REPLICAS: "5"
+`)
+
+	ctx := context.Background()
+	kustomizations, err := flux.NewParser(clusterPath).ParseKustomizations(ctx)
+	if err != nil {
+		t.Fatalf("ParseKustomizations: %v", err)
+	}
+
+	builder := kustomize.NewBuilder(repoRoot)
+	buildCache := make(buildCache)
+	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, true, buildCache)
+	if err != nil {
+		t.Fatalf("buildAllKustomizations: %v", err)
+	}
+
+	out := string(output)
+	// Extract just the Deployment document: the combined output also includes the
+	// Flux Kustomization manifest (prepended as-is), whose spec.patches definition
+	// legitimately still contains the literal ${REPLICAS} — that is the KS source,
+	// not a build artifact, and substitution must not touch it.
+	var deployDoc string
+	for _, doc := range flux.SplitYAMLText([]byte(out)) {
+		var m struct {
+			Kind     string `yaml:"kind"`
+			Metadata struct {
+				Name string `yaml:"name"`
+			} `yaml:"metadata"`
+		}
+		if yaml.Unmarshal([]byte(doc), &m) == nil && m.Kind == "Deployment" && m.Metadata.Name == "app" {
+			deployDoc = doc
+			break
+		}
+	}
+	if deployDoc == "" {
+		t.Fatalf("Deployment app not found in output:\n%s", out)
+	}
+	// The variable injected by the patch must be resolved by the (now final)
+	// substitution step — it must NOT remain literal in the rendered resource.
+	if strings.Contains(deployDoc, "${REPLICAS}") {
+		t.Errorf("expected ${REPLICAS} to be substituted in the Deployment, but it remained literal:\n%s", deployDoc)
+	}
+	if !strings.Contains(deployDoc, "replicas: 5") {
+		t.Errorf("expected 'replicas: 5' in the Deployment after substitution of the patched value:\n%s", deployDoc)
+	}
+}
+
+// Test: Two Flux Kustomizations referencing the same shared base — the
+// HelmRelease appears in the build output (possibly twice), dedup is handled
+// internally by buildHRInflation.
+func TestBuildKSContent_SharedBaseReferencedTwice(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	baseDir := filepath.Join(repoRoot, "apps", "base")
+	writeHelper(t, baseDir, "helmrelease.yaml", `apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: podinfo
+  namespace: apps
+spec:
+  chart:
+    spec:
+      chart: podinfo
+`)
+	writeHelper(t, baseDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - helmrelease.yaml
+`)
+
+	// Two Flux Kustomizations pointing to the same shared base.
+	clusterPath := filepath.Join(repoRoot, "clusters", "test")
+	writeHelper(t, clusterPath, "base-a.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: base-a
+  namespace: flux-system
+spec:
+  path: ../../apps/base
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+`)
+	writeHelper(t, clusterPath, "base-b.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: base-b
+  namespace: flux-system
+spec:
+  path: ../../apps/base
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+`)
+
+	ctx := context.Background()
+	kustomizations, err := flux.NewParser(clusterPath).ParseKustomizations(ctx)
+	if err != nil {
+		t.Fatalf("ParseKustomizations: %v", err)
+	}
+
+	builder := kustomize.NewBuilder(repoRoot)
+	buildCache := make(buildCache)
+	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, nil, true, buildCache)
+	if err != nil {
+		t.Fatalf("buildKSContent: %v", err)
+	}
+
+	// The HR should be present in the build output.
+	helmReleases, _ := flux.ParseHelmReleasesFromBytes(output)
+	if len(helmReleases) == 0 {
+		t.Fatal("expected at least 1 HelmRelease from shared base, got 0")
+	}
+
+	// Dedup by namespace/name (same logic as buildHRInflation).
+	seen := make(map[string]bool)
+	for _, hr := range helmReleases {
+		key := hr.Metadata.Namespace + "/" + hr.Metadata.Name
+		seen[key] = true
+	}
+	if len(seen) != 1 {
+		t.Errorf("expected 1 unique HelmRelease after dedup, got %d: %v", len(seen), seen)
+	}
+}
+
+func TestConvertJSONInYAMLToYAML_MultiDoc(t *testing.T) {
+	input := []byte(`apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa1
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa2
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm1
+`)
+	result, err := helm.ConvertJSONInYAMLToYAML(input)
+	if err != nil {
+		t.Fatalf("helm.ConvertJSONInYAMLToYAML: %v", err)
+	}
+	resultStr := string(result)
+
+	// All three documents must be present.
+	if !strings.Contains(resultStr, "sa1") {
+		t.Error("first document (sa1) was dropped")
+	}
+	if !strings.Contains(resultStr, "sa2") {
+		t.Error("second document (sa2) was dropped")
+	}
+	if !strings.Contains(resultStr, "cm1") {
+		t.Error("third document (cm1) was dropped")
+	}
+
+	// Must have document separators.
+	if strings.Count(resultStr, "\n---\n") < 2 {
+		t.Errorf("expected at least 2 document separators, got %d in:\n%s", strings.Count(resultStr, "\n---\n"), resultStr)
+	}
+}
+
+// Test: helm.ConvertJSONInYAMLToYAML returns nil for empty/nil input (no "null" output).
+func TestConvertJSONInYAMLToYAML_Empty(t *testing.T) {
+	result, err := helm.ConvertJSONInYAMLToYAML(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != nil {
+		t.Errorf("expected nil for empty input, got %q", string(result))
+	}
+}
+
+// Test: helm.ConvertJSONInYAMLToYAML terminates (doesn't infinite-loop) on
+// malformed YAML input, and preserves subsequent valid documents.
+func TestConvertJSONInYAMLToYAML_MalformedTerminates(t *testing.T) {
+	// Broken document followed by a valid one.
+	input := []byte(`::: broken yaml :::
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: survives
+`)
+
+	done := make(chan struct{})
+	var result []byte
+	go func() {
+		result, _ = helm.ConvertJSONInYAMLToYAML(input)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ConvertJSONInYAMLToYAML hung on malformed input — infinite loop")
+	}
+
+	// The valid document after the broken one must be preserved.
+	resultStr := string(result)
+	if !strings.Contains(resultStr, "survives") {
+		t.Errorf("valid document after broken one was dropped:\n%s", resultStr)
+	}
+}
+
+// Test: helm.ConvertJSONInYAMLToYAML strips nil values (annotations: null, labels: null, etc.)
+// produced by Helm templates with empty optional fields.
+func TestConvertJSONInYAMLToYAML_StripsNilValues(t *testing.T) {
+	input := []byte(`apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations: null
+  labels:
+    app: test
+  name: sa1
+  namespace: default
+spec: null
+`)
+	result, err := helm.ConvertJSONInYAMLToYAML(input)
+	if err != nil {
+		t.Fatalf("helm.ConvertJSONInYAMLToYAML: %v", err)
+	}
+	resultStr := string(result)
+
+	// Nil values must be removed.
+	if strings.Contains(resultStr, "annotations: null") {
+		t.Errorf("expected 'annotations: null' to be stripped:\n%s", resultStr)
+	}
+	if strings.Contains(resultStr, "spec: null") {
+		t.Errorf("expected 'spec: null' to be stripped:\n%s", resultStr)
+	}
+
+	// Non-nil values must be preserved.
+	if !strings.Contains(resultStr, "labels:") {
+		t.Errorf("expected 'labels' to be preserved:\n%s", resultStr)
+	}
+	if !strings.Contains(resultStr, "app: test") {
+		t.Errorf("expected 'app: test' to be preserved:\n%s", resultStr)
+	}
+}
+
+// Test: helm.RemoveNilValues recursively removes nil map entries at any nesting depth.
+func TestRemoveNilValues(t *testing.T) {
+	input := map[string]interface{}{
+		"keep": "value",
+		"drop": nil,
+		"nested": map[string]interface{}{
+			"keep2": 42,
+			"drop2": nil,
+			"deep": map[string]interface{}{
+				"keep3": "deep",
+				"drop3": nil,
+			},
+		},
+		"list": []interface{}{"a", nil, "b"},
+	}
+
+	result := helm.RemoveNilValues(input)
+	m := result.(map[string]interface{})
+
+	if _, exists := m["drop"]; exists {
+		t.Error("expected top-level nil key to be removed")
+	}
+	if m["keep"] != "value" {
+		t.Error("expected non-nil value to be preserved")
+	}
+
+	nested := m["nested"].(map[string]interface{})
+	if _, exists := nested["drop2"]; exists {
+		t.Error("expected nested nil key to be removed")
+	}
+	if nested["keep2"] != 42 {
+		t.Error("expected nested non-nil value to be preserved")
+	}
+
+	deep := nested["deep"].(map[string]interface{})
+	if _, exists := deep["drop3"]; exists {
+		t.Error("expected deep nil key to be removed")
+	}
+	if deep["keep3"] != "deep" {
+		t.Error("expected deep non-nil value to be preserved")
+	}
+}
+
+// Test: hasDirectKustomizations — build hr requires Flux Kustomization files
+// directly in the path (same contract as build ks).
+func TestHasDirectKustomizations(t *testing.T) {
+	// Path with a Flux Kustomization file.
+	withKS := t.TempDir()
+	writeHelper(t, withKS, "base.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: base
+  namespace: flux-system
+spec:
+  path: ./base
+`)
+	has, err := hasDirectKustomizations(withKS)
+	if err != nil {
+		t.Fatalf("hasDirectKustomizations: %v", err)
+	}
+	if !has {
+		t.Error("expected true for directory with Flux Kustomization file")
+	}
+
+	// Path with only native kustomize (no Flux Kustomization).
+	nativeOnly := t.TempDir()
+	writeHelper(t, nativeOnly, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: []
+`)
+	has, err = hasDirectKustomizations(nativeOnly)
+	if err != nil {
+		t.Fatalf("hasDirectKustomizations: %v", err)
+	}
+	if has {
+		t.Error("expected false for directory with only native kustomization")
+	}
+
+	// Empty directory.
+	empty := t.TempDir()
+	has, err = hasDirectKustomizations(empty)
+	if err != nil {
+		t.Fatalf("hasDirectKustomizations: %v", err)
+	}
+	if has {
+		t.Error("expected false for empty directory")
+	}
+}
+
+// Test 5: resolveHelmInflationSources finds HelmRepository defined outside
+// clusterPath but inside repoRoot via the repoRoot fallback.
+func TestResolveHelmInflationSources_FallbackToRepoRoot(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	// HelmRepository in a shared sources/ directory outside clusterPath.
+	sourcesDir := filepath.Join(repoRoot, "sources")
+	writeHelper(t, sourcesDir, "helmrepo.yaml", `apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: podinfo
+  namespace: apps
+spec:
+  url: https://stefanprodan.github.io/podinfo
+`)
+
+	// clusterPath has no HelmRepository.
+	clusterPath := filepath.Join(repoRoot, "clusters", "test")
+	writeHelper(t, clusterPath, "placeholder.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: placeholder
+`)
+
+	helmRepos, ociRepos, _, _ := resolveHelmInflationSources(context.Background(), clusterPath, repoRoot)
+	if len(helmRepos) != 1 {
+		t.Fatalf("expected 1 HelmRepository from repoRoot fallback, got %d", len(helmRepos))
+	}
+	if helmRepos[0].Metadata.Name != "podinfo" {
+		t.Errorf("HelmRepository name = %q, want %q", helmRepos[0].Metadata.Name, "podinfo")
+	}
+	if !strings.Contains(helmRepos[0].Spec.URL, "podinfo") {
+		t.Errorf("HelmRepository URL = %q, want one containing 'podinfo'", helmRepos[0].Spec.URL)
+	}
+	if len(ociRepos) != 0 {
+		t.Errorf("expected 0 OCIRepositories, got %d", len(ociRepos))
+	}
+}
+
+// Test 6: inflateHelmReleasesShared prints a warning (not silence) when a
+// HelmRelease's source cannot be resolved.
+func TestInflateHelmReleasesShared_WarnOnMissingSource(t *testing.T) {
+	hr := []flux.HelmRelease{
+		{
+			Metadata: flux.ObjectMeta{Name: "podinfo", Namespace: "apps"},
+			Spec: flux.HelmReleaseSpec{
+				Chart: flux.HelmReleaseChart{
+					Spec: flux.HelmReleaseChartSpec{
+						Chart: "podinfo",
+						SourceRef: struct {
+							Kind      string `yaml:"kind"`
+							Name      string `yaml:"name"`
+							Namespace string `yaml:"namespace,omitempty"`
+						}{
+							Kind: "HelmRepository",
+							Name: "missing-repo",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	inflater, err := helm.NewInflater()
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+
+	stderr := captureStderr(func() {
+		outputs := inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, false, "")
+		if len(outputs) != 0 {
+			t.Errorf("expected 0 outputs (source unresolved), got %d", len(outputs))
+		}
+	})
+
+	if !strings.Contains(stderr, "Warning:") {
+		t.Errorf("expected warning in stderr, got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "podinfo") {
+		t.Errorf("expected HR name 'podinfo' in warning, got:\n%s", stderr)
+	}
+}
+
+// TestInflateHelmReleasesShared_LocalSourceChart verifies that a HelmRelease
+// whose chart is sourced from a GitRepository (chart.spec.chart is a path within
+// the local checkout) renders from disk without any network access.
+func TestInflateHelmReleasesShared_LocalSourceChart(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	// Chart living in the git checkout.
+	chartDir := filepath.Join(repoRoot, "charts", "my-chart")
+	writeHelper(t, chartDir, "Chart.yaml", `apiVersion: v2
+name: my-chart
+version: 1.0.0
+`)
+	writeHelper(t, chartDir, "values.yaml", "")
+	writeHelper(t, filepath.Join(chartDir, "templates"), "dep.yaml", `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: from-local-chart
+spec:
+  replicas: 1
+`)
+
+	hr := []flux.HelmRelease{{
+		Metadata: flux.ObjectMeta{Name: "app", Namespace: "apps"},
+		Spec: flux.HelmReleaseSpec{
+			Chart: flux.HelmReleaseChart{
+				Spec: flux.HelmReleaseChartSpec{
+					Chart: "./charts/my-chart",
+					SourceRef: struct {
+						Kind      string `yaml:"kind"`
+						Name      string `yaml:"name"`
+						Namespace string `yaml:"namespace,omitempty"`
+					}{
+						Kind: flux.KindGitRepository,
+						Name: "flux-system",
+					},
+				},
+			},
+		},
+	}}
+
+	inflater, err := helm.NewInflater()
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+
+	var outputs [][]byte
+	stderr := captureStderr(func() {
+		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, true, repoRoot)
+	})
+
+	if len(outputs) != 1 {
+		t.Fatalf("expected 1 rendered output for GitRepository chart, got %d (stderr:\n%s)", len(outputs), stderr)
+	}
+	rendered := string(outputs[0])
+	if !strings.Contains(rendered, "from-local-chart") {
+		t.Errorf("expected local chart to render for GitRepository source:\n%s", rendered)
+	}
+	if strings.Contains(stderr, "Warning:") {
+		t.Errorf("expected no warning for resolvable GitRepository chart, got:\n%s", stderr)
+	}
+}
+
+// TestInflateHelmReleasesShared_NamespaceInjectedForChartWithoutReleaseNamespace
+// is a regression test for the bug where `diff hr --namespace X` produced
+// "No resources found in namespace X" even though the HelmRelease was correctly
+// inflated.
+//
+// Root cause: Helm renders with --namespace=<ns> but does NOT inject
+// metadata.namespace into templates that don't use {{ .Release.Namespace }}.
+// Resources without explicit metadata.namespace were then dropped by
+// filterByNamespace in computeAndOutputDiff.
+//
+// Fix: inflateHelmReleasesShared runs kustomize's ApplyTargetNamespace on
+// every HR's rendered output, so resources end up with explicit
+// metadata.namespace=<hr-ns> matching the HR's namespace. This test verifies
+// the fix end-to-end: a chart whose template omits namespace entirely still
+// gets metadata.namespace injected, and filterByNamespace finds the resource.
+func TestInflateHelmReleasesShared_NamespaceInjectedForChartWithoutReleaseNamespace(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	// Chart whose Deployment template does NOT reference {{ .Release.Namespace }}.
+	// Helm will render this without metadata.namespace.
+	chartDir := filepath.Join(repoRoot, "charts", "plain")
+	writeHelper(t, chartDir, "Chart.yaml", `apiVersion: v2
+name: plain
+version: 1.0.0
+`)
+	writeHelper(t, chartDir, "values.yaml", "")
+	writeHelper(t, filepath.Join(chartDir, "templates"), "dep.yaml", `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  replicas: 1
+`)
+
+	hrNamespace := "apps"
+	hr := []flux.HelmRelease{{
+		Metadata: flux.ObjectMeta{Name: "app", Namespace: hrNamespace},
+		Spec: flux.HelmReleaseSpec{
+			Chart: flux.HelmReleaseChart{
+				Spec: flux.HelmReleaseChartSpec{
+					Chart: "./charts/plain",
+					SourceRef: struct {
+						Kind      string `yaml:"kind"`
+						Name      string `yaml:"name"`
+						Namespace string `yaml:"namespace,omitempty"`
+					}{
+						Kind: flux.KindGitRepository,
+						Name: "flux-system",
+					},
+				},
+			},
+		},
+	}}
+
+	inflater, err := helm.NewInflater()
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+
+	var outputs [][]byte
+	stderr := captureStderr(func() {
+		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, true, repoRoot)
+	})
+	if len(outputs) != 1 {
+		t.Fatalf("expected 1 rendered output, got %d (stderr:\n%s)", len(outputs), stderr)
+	}
+
+	rendered := outputs[0]
+
+	// Sanity: the chart template produced a Deployment without namespace.
+	// (If it had {{ .Release.Namespace }}, this test wouldn't catch the bug.)
+	if strings.Contains(string(rendered), "namespace:") && strings.Contains(string(rendered), "app") {
+		// Either chart changed to include namespace, or transformer ran.
+		// Either way, the assertion below still must hold.
+	}
+
+	// The regression symptom: filterByNamespace drops resources without an
+	// explicit namespace. After the fix (ApplyTargetNamespace runs inside
+	// inflateHelmReleasesShared), the Deployment has metadata.namespace=apps,
+	// so filterByNamespace keeps it.
+	filtered := filterByNamespace(rendered, hrNamespace)
+	if !strings.Contains(string(filtered), "kind: Deployment") {
+		t.Errorf("expected filterByNamespace(%q) to keep the Deployment after namespace injection;\nrendered:\n%s\nfiltered:\n%s",
+			hrNamespace, rendered, filtered)
+	}
+	if !strings.Contains(string(filtered), "namespace: "+hrNamespace) {
+		t.Errorf("expected rendered output to contain 'namespace: %s' after ApplyTargetNamespace;\nrendered:\n%s",
+			hrNamespace, rendered)
+	}
+	// And the inverse: filtering by a different namespace yields nothing —
+	// the resource is correctly assigned to the HR's namespace only.
+	otherFiltered := filterByNamespace(rendered, "other-ns")
+	if strings.Contains(string(otherFiltered), "kind: Deployment") {
+		t.Errorf("expected filterByNamespace(\"other-ns\") to drop the Deployment;\nfiltered:\n%s", otherFiltered)
+	}
+}
+
+// TestInflateHelmReleasesShared_PreservesHardcodedNamespace is the regression
+// test for the override-semantic bug introduced by the first attempt at the
+// namespace fix (PR #6 before review). The original fix used
+// kustomize.ApplyTargetNamespace directly, which force-overrides
+// metadata.namespace — a behavior that matches
+// Kustomization.spec.targetNamespace but NOT Helm install.
+//
+// Real Helm behavior (and HelmController's): a chart resource with an
+// explicit metadata.namespace in its template is honored. Charts
+// occasionally place a ConfigMap or Secret in a fixed auxiliary namespace
+// (e.g. a shared dashboard config in kube-system, or in a separate
+// observability namespace). Force-overriding such a namespace to the HR's
+// namespace would produce a quietly-wrong diff: the resource "moves" in
+// the output even though on the cluster it would land where the chart put
+// it.
+//
+// This test verifies the fix: a chart with one namespaced resource
+// hard-coding `kube-system` and another resource without a namespace —
+// the first is preserved as-is, the second is filled with the HR's
+// namespace.
+func TestInflateHelmReleasesShared_PreservesHardcodedNamespace(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	chartDir := filepath.Join(repoRoot, "charts", "mixed")
+	writeHelper(t, chartDir, "Chart.yaml", `apiVersion: v2
+name: mixed
+version: 1.0.0
+`)
+	writeHelper(t, chartDir, "values.yaml", "")
+	// dashboard-config: a ConfigMap the chart intentionally places in
+	// kube-system (real-world pattern — shared dashboards / Grafana
+	// configmaps / etc.). Namespaced kind, so a force-override transformer
+	// WOULD touch it — that's the bug we're guarding against.
+	writeHelper(t, filepath.Join(chartDir, "templates"), "dashboard-config.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-config
+  namespace: kube-system
+data:
+  url: http://grafana.kube-system.svc.cluster.local
+`)
+	// app: no namespace in template — Helm would apply it to the HR namespace.
+	writeHelper(t, filepath.Join(chartDir, "templates"), "app.yaml", `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  replicas: 1
+`)
+
+	hrNamespace := "my-apps"
+	hr := []flux.HelmRelease{{
+		Metadata: flux.ObjectMeta{Name: "app", Namespace: hrNamespace},
+		Spec: flux.HelmReleaseSpec{
+			Chart: flux.HelmReleaseChart{
+				Spec: flux.HelmReleaseChartSpec{
+					Chart: "./charts/mixed",
+					SourceRef: struct {
+						Kind      string `yaml:"kind"`
+						Name      string `yaml:"name"`
+						Namespace string `yaml:"namespace,omitempty"`
+					}{
+						Kind: flux.KindGitRepository,
+						Name: "flux-system",
+					},
+				},
+			},
+		},
+	}}
+
+	inflater, err := helm.NewInflater()
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+
+	var outputs [][]byte
+	stderr := captureStderr(func() {
+		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, true, repoRoot)
+	})
+	if len(outputs) != 1 {
+		t.Fatalf("expected 1 rendered output, got %d (stderr:\n%s)", len(outputs), stderr)
+	}
+	rendered := string(outputs[0])
+
+	// The ConfigMap's hard-coded `namespace: kube-system` must be preserved
+	// (NOT force-overridden to the HR's namespace). This is the regression
+	// guard: the previous override-based fix would fail here.
+	if !strings.Contains(rendered, "name: dashboard-config\n  namespace: kube-system") &&
+		!strings.Contains(rendered, "namespace: kube-system") {
+		t.Errorf("expected ConfigMap to keep its hard-coded namespace: kube-system;\nrendered:\n%s", rendered)
+	}
+	// Catch the bug directly: if override happened, the ConfigMap would carry
+	// the HR's namespace instead. Verify that pattern is absent.
+	if strings.Contains(rendered, "name: dashboard-config\n  namespace: "+hrNamespace) {
+		t.Errorf("ConfigMap namespace was force-overridden to %q — Helm semantics require preserving it;\nrendered:\n%s",
+			hrNamespace, rendered)
+	}
+
+	// The Deployment template omitted namespace entirely. Verify the HR's
+	// namespace is filled in.
+	if !strings.Contains(rendered, "namespace: "+hrNamespace) {
+		t.Errorf("expected Deployment to have its missing namespace filled with %q;\nrendered:\n%s",
+			hrNamespace, rendered)
+	}
+
+	// Sanity: filterByNamespace for the HR namespace keeps the Deployment
+	// but drops the ConfigMap (which lives in kube-system).
+	hrFiltered := filterByNamespace([]byte(rendered), hrNamespace)
+	if !strings.Contains(string(hrFiltered), "kind: Deployment") {
+		t.Errorf("expected Deployment to be visible when filtering by %q;\nfiltered:\n%s",
+			hrNamespace, hrFiltered)
+	}
+	if strings.Contains(string(hrFiltered), "dashboard-config") {
+		t.Errorf("expected ConfigMap to be excluded when filtering by %q (it lives in kube-system);\nfiltered:\n%s",
+			hrNamespace, hrFiltered)
+	}
+}
+
+// TestInflateHelmReleasesShared_BucketUnsupported verifies that a Bucket-sourced
+// HelmRelease is skipped with an explicit "not supported" warning (rather than
+// the generic "HelmRepository not found" message, which is misleading for Bucket).
+func TestInflateHelmReleasesShared_BucketUnsupported(t *testing.T) {
+	repoRoot := t.TempDir()
+	hr := []flux.HelmRelease{{
+		Metadata: flux.ObjectMeta{Name: "app", Namespace: "apps"},
+		Spec: flux.HelmReleaseSpec{
+			Chart: flux.HelmReleaseChart{
+				Spec: flux.HelmReleaseChartSpec{
+					Chart: "./charts/my-chart",
+					SourceRef: struct {
+						Kind      string `yaml:"kind"`
+						Name      string `yaml:"name"`
+						Namespace string `yaml:"namespace,omitempty"`
+					}{Kind: flux.KindBucket, Name: "my-bucket"},
+				},
+			},
+		},
+	}}
+
+	inflater, err := helm.NewInflater()
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+
+	var outputs [][]byte
+	stderr := captureStderr(func() {
+		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, true, repoRoot)
+	})
+
+	if len(outputs) != 0 {
+		t.Errorf("expected 0 outputs for Bucket-sourced chart, got %d", len(outputs))
+	}
+	if !strings.Contains(stderr, "Bucket-sourced chart") || !strings.Contains(stderr, "not supported") {
+		t.Errorf("expected explicit 'Bucket-sourced chart ... not supported' warning, got:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "HelmRepository not found") {
+		t.Errorf("Bucket case must not emit the generic 'HelmRepository not found' warning, got:\n%s", stderr)
+	}
+}
+
+// TestInflateHelmReleasesShared_LocalSourceChartNotADirectory verifies that
+// when chart.spec.chart points at a plain file (not a chart directory or .tgz),
+// a clear early warning is emitted instead of a cryptic loader error.
+func TestInflateHelmReleasesShared_LocalSourceChartNotADirectory(t *testing.T) {
+	repoRoot := t.TempDir()
+	// A plain YAML file where the chart should be.
+	writeHelper(t, repoRoot, "not-a-chart.yaml", "key: value\n")
+
+	hr := []flux.HelmRelease{{
+		Metadata: flux.ObjectMeta{Name: "app", Namespace: "apps"},
+		Spec: flux.HelmReleaseSpec{
+			Chart: flux.HelmReleaseChart{
+				Spec: flux.HelmReleaseChartSpec{
+					Chart: "./not-a-chart.yaml",
+					SourceRef: struct {
+						Kind      string `yaml:"kind"`
+						Name      string `yaml:"name"`
+						Namespace string `yaml:"namespace,omitempty"`
+					}{Kind: flux.KindGitRepository, Name: "flux-system"},
+				},
+			},
+		},
+	}}
+
+	inflater, err := helm.NewInflater()
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+
+	var outputs [][]byte
+	stderr := captureStderr(func() {
+		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, true, repoRoot)
+	})
+
+	if len(outputs) != 0 {
+		t.Errorf("expected 0 outputs when chart path is a plain file, got %d", len(outputs))
+	}
+	if !strings.Contains(stderr, "not a chart directory or .tgz archive") {
+		t.Errorf("expected clear 'not a chart directory or .tgz archive' warning, got:\n%s", stderr)
+	}
+}
+
+// TestInflateHelmReleasesShared_LocalSourceChartMissing verifies that when the
+// chart path of a GitRepository-sourced HelmRelease does not exist locally, a
+// warning is printed and the release is skipped.
+func TestInflateHelmReleasesShared_LocalSourceChartMissing(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	hr := []flux.HelmRelease{{
+		Metadata: flux.ObjectMeta{Name: "app", Namespace: "apps"},
+		Spec: flux.HelmReleaseSpec{
+			Chart: flux.HelmReleaseChart{
+				Spec: flux.HelmReleaseChartSpec{
+					Chart: "./charts/does-not-exist",
+					SourceRef: struct {
+						Kind      string `yaml:"kind"`
+						Name      string `yaml:"name"`
+						Namespace string `yaml:"namespace,omitempty"`
+					}{
+						Kind: flux.KindGitRepository,
+						Name: "flux-system",
+					},
+				},
+			},
+		},
+	}}
+
+	inflater, err := helm.NewInflater()
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+
+	var outputs [][]byte
+	stderr := captureStderr(func() {
+		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, true, repoRoot)
+	})
+
+	if len(outputs) != 0 {
+		t.Errorf("expected 0 outputs for missing local chart, got %d", len(outputs))
+	}
+	if !strings.Contains(stderr, "not found locally") {
+		t.Errorf("expected 'not found locally' warning, got:\n%s", stderr)
+	}
+}
+
+// Test: printResourcesBoxed outputs each resource with a box header and
+// sorts by kind/namespace/name.
+func TestPrintResourcesBoxed(t *testing.T) {
+	input := []byte(`apiVersion: v1
+kind: Service
+metadata:
+  name: svc2
+  namespace: z-ns
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm1
+  namespace: a-ns
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc1
+  namespace: a-ns
+`)
+
+	output := captureStdout(func() {
+		printResourcesBoxed(input)
+	})
+
+	// All three resources must have box headers.
+	if !strings.Contains(output, "ConfigMap: a-ns/cm1") {
+		t.Error("missing ConfigMap box header")
+	}
+	if !strings.Contains(output, "Service: a-ns/svc1") {
+		t.Error("missing Service svc1 box header")
+	}
+	if !strings.Contains(output, "Service: z-ns/svc2") {
+		t.Error("missing Service svc2 box header")
+	}
+
+	// ConfigMap must come before Service (sorted by kind).
+	cmIdx := strings.Index(output, "ConfigMap:")
+	svcIdx := strings.Index(output, "Service:")
+	if cmIdx < 0 || svcIdx < 0 || cmIdx > svcIdx {
+		t.Errorf("expected ConfigMap before Service (sorted by kind):\n%s", output)
+	}
+
+	// svc1 (a-ns) must come before svc2 (z-ns) (sorted by namespace within kind).
+	svc1Idx := strings.Index(output, "svc1")
+	svc2Idx := strings.Index(output, "svc2")
+	if svc1Idx < 0 || svc2Idx < 0 || svc1Idx > svc2Idx {
+		t.Errorf("expected svc1 (a-ns) before svc2 (z-ns):\n%s", output)
+	}
+
+	// Each resource must have border lines.
+	if strings.Count(output, "---") < 6 {
+		t.Errorf("expected at least 6 border lines (2 per resource), got fewer:\n%s", output)
+	}
+}
+
+// Test: printResourcesBoxed produces no output for nil/empty input.
+func TestPrintResourcesBoxed_Empty(t *testing.T) {
+	output := captureStdout(func() {
+		printResourcesBoxed(nil)
+	})
+	if output != "" {
+		t.Errorf("expected empty output for nil input, got %q", output)
+	}
+
+	output = captureStdout(func() {
+		printResourcesBoxed([]byte(""))
+	})
+	if output != "" {
+		t.Errorf("expected empty output for empty input, got %q", output)
+	}
+}
+
+// TestBuildSourcePath_SubdirectoryKustomization verifies that when
+// buildSourcePath encounters a directory without a top-level kustomization.yaml
+// but with subdirectories that have their own kustomization.yaml (with a
+// namespace transformer), the namespace is correctly applied to the output.
+func TestBuildSourcePath_SubdirectoryKustomization(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	// Source path: directory WITHOUT kustomization.yaml at top level.
+	sourcePath := filepath.Join(repoRoot, "apps")
+
+	// Subdirectory with kustomization.yaml that sets namespace.
+	appDir := filepath.Join(sourcePath, "podinfo")
+	writeHelper(t, appDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: podinfo
+resources:
+  - helmrelease.yaml
+  - ocirepository.yaml
+`)
+	writeHelper(t, appDir, "helmrelease.yaml", `apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: podinfo
+spec:
+  interval: 5m
+  chartRef:
+    kind: OCIRepository
+    name: podinfo
+`)
+	writeHelper(t, appDir, "ocirepository.yaml", `apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: podinfo
+spec:
+  interval: 6h
+  url: oci://ghcr.io/stefanprodan/charts/podinfo
+`)
+
+	builder := kustomize.NewBuilder(repoRoot)
+	output, err := buildSourcePath(context.Background(), builder, sourcePath, repoRoot, make(buildCache))
+	if err != nil {
+		t.Fatalf("buildSourcePath: %v", err)
+	}
+
+	outputStr := string(output)
+
+	// Namespace from kustomization.yaml must be applied to HelmRelease.
+	if !strings.Contains(outputStr, "kind: HelmRelease") {
+		t.Error("HelmRelease missing from output")
+	}
+	if !strings.Contains(outputStr, "namespace: podinfo") {
+		t.Errorf("namespace: podinfo not applied by kustomize transformer:\n%s", outputStr)
+	}
+
+	// OCIRepository should also have the namespace.
+	if !strings.Contains(outputStr, "kind: OCIRepository") {
+		t.Error("OCIRepository missing from output")
+	}
+}
+
+// TestBuildSourcePath_LooseYAML verifies that loose YAML files (not inside
+// any kustomization.yaml) are still read when mixed with kustomized dirs.
+func TestBuildSourcePath_LooseYAML(t *testing.T) {
+	repoRoot := t.TempDir()
+	sourcePath := filepath.Join(repoRoot, "mixed")
+
+	// Subdirectory with kustomization.yaml.
+	overlayDir := filepath.Join(sourcePath, "overlay")
+	writeHelper(t, overlayDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: test-ns
+resources:
+  - cm.yaml
+`)
+	writeHelper(t, overlayDir, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: from-kustomize
+`)
+
+	// Loose YAML file at the source path level.
+	writeHelper(t, sourcePath, "loose.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loose-file
+`)
+
+	builder := kustomize.NewBuilder(repoRoot)
+	output, err := buildSourcePath(context.Background(), builder, sourcePath, repoRoot, make(buildCache))
+	if err != nil {
+		t.Fatalf("buildSourcePath: %v", err)
+	}
+
+	outputStr := string(output)
+
+	// Kustomized resource should have namespace applied.
+	if !strings.Contains(outputStr, "from-kustomize") {
+		t.Error("resource from kustomized subdirectory missing")
+	}
+	if !strings.Contains(outputStr, "namespace: test-ns") {
+		t.Error("namespace transformer not applied to kustomized resource")
+	}
+
+	// Loose file should also be present (without namespace).
+	if !strings.Contains(outputStr, "loose-file") {
+		t.Error("loose YAML file missing from output")
+	}
+}
+
+func indexOf(s, substr string) int {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestDiscoverKustomizeDirs_NoNestedDuplicates verifies that when an overlay
+// references a base in a subdirectory, the base is NOT discovered separately
+// (it's already built as part of the overlay).
+func TestDiscoverKustomizeDirs_NoNestedDuplicates(t *testing.T) {
+	root := t.TempDir()
+
+	// Overlay references a base subdirectory.
+	overlayDir := filepath.Join(root, "overlay")
+	writeHelper(t, overlayDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: app
+resources:
+  - base
+  - cm.yaml
+`)
+	writeHelper(t, overlayDir, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: overlay-cm
+`)
+
+	// Base inside overlay — should NOT be discovered separately.
+	baseDir := filepath.Join(overlayDir, "base")
+	writeHelper(t, baseDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - base-cm.yaml
+`)
+	writeHelper(t, baseDir, "base-cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-cm
+`)
+
+	// Standalone dir — SHOULD be discovered.
+	standaloneDir := filepath.Join(root, "standalone")
+	writeHelper(t, standaloneDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cm.yaml
+`)
+	writeHelper(t, standaloneDir, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: standalone-cm
+`)
+
+	dirs, err := flux.DiscoverKustomizeDirs(context.Background(), root)
+	if err != nil {
+		t.Fatalf("DiscoverKustomizeDirs: %v", err)
+	}
+
+	// Should discover overlay and standalone, but NOT overlay/base.
+	found := make(map[string]bool)
+	for _, dir := range dirs {
+		found[dir] = true
+		if strings.HasSuffix(dir, filepath.Join("overlay", "base")) {
+			t.Errorf("nested base should not be discovered separately: %s", dir)
+		}
+	}
+	if !found[overlayDir] {
+		t.Error("overlay directory not discovered")
+	}
+	if !found[standaloneDir] {
+		t.Error("standalone directory not discovered")
+	}
+}
+
+// TestDiscoverKustomizeDirs_SiblingBaseOverlay verifies that when overlay
+// references a sibling base via resources: [../base], the base is NOT
+// discovered separately (it's built as part of the overlay).
+func TestDiscoverKustomizeDirs_SiblingBaseOverlay(t *testing.T) {
+	root := t.TempDir()
+
+	// apps/base — referenced by overlay, should NOT be discovered separately.
+	baseDir := filepath.Join(root, "base")
+	writeHelper(t, baseDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cm.yaml
+`)
+	writeHelper(t, baseDir, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-cm
+`)
+
+	// apps/overlay — references ../base, SHOULD be discovered.
+	overlayDir := filepath.Join(root, "overlay")
+	writeHelper(t, overlayDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: app
+resources:
+  - ../base
+  - cm.yaml
+`)
+	writeHelper(t, overlayDir, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: overlay-cm
+`)
+
+	dirs, err := flux.DiscoverKustomizeDirs(context.Background(), root)
+	if err != nil {
+		t.Fatalf("DiscoverKustomizeDirs: %v", err)
+	}
+
+	found := make(map[string]bool)
+	for _, dir := range dirs {
+		found[dir] = true
+		// Base should NOT be discovered — it's referenced by overlay.
+		if strings.HasSuffix(dir, "base") {
+			t.Errorf("sibling base should not be discovered separately: %s", dir)
+		}
+	}
+	if !found[overlayDir] {
+		t.Error("overlay directory not discovered")
+	}
+}
+
+// TestDiscoverKustomizeDirs_AlternateFilenames verifies that kustomization.yml
+// and Kustomization (no extension) are recognized.
+func TestDiscoverKustomizeDirs_AlternateFilenames(t *testing.T) {
+	root := t.TempDir()
+
+	// kustomization.yml
+	dir1 := filepath.Join(root, "yml-dir")
+	writeHelper(t, dir1, "kustomization.yml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+`)
+	writeHelper(t, dir1, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: yml-cm
+`)
+
+	// Kustomization (no extension)
+	dir2 := filepath.Join(root, "noext-dir")
+	writeHelper(t, dir2, "Kustomization", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+`)
+	writeHelper(t, dir2, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: noext-cm
+`)
+
+	dirs, err := flux.DiscoverKustomizeDirs(context.Background(), root)
+	if err != nil {
+		t.Fatalf("DiscoverKustomizeDirs: %v", err)
+	}
+
+	found := make(map[string]bool)
+	for _, dir := range dirs {
+		found[dir] = true
+	}
+	if !found[dir1] {
+		t.Error("directory with kustomization.yml not discovered")
+	}
+	if !found[dir2] {
+		t.Error("directory with Kustomization (no extension) not discovered")
+	}
+}
+
+// TestMergeSources_BuildOutputPriority verifies that when a resource exists
+// in both build output (kustomize-transformed namespace) and raw-parsed
+// (literal namespace from file), the build-output version wins and the
+// raw-parsed version with stale namespace is excluded.
+func TestMergeSources_BuildOutputPriority(t *testing.T) {
+	// Build-output version: correct namespace after kustomize transform.
+	build := []flux.ConfigMap{
+		{Metadata: flux.ObjectMeta{Name: "app-values", Namespace: "podinfo"}},
+	}
+	// Raw-parsed: stale namespace from source file (pre-kustomize).
+	raw := []flux.ConfigMap{
+		{Metadata: flux.ObjectMeta{Name: "app-values", Namespace: "test"}},  // stale
+		{Metadata: flux.ObjectMeta{Name: "other-cm", Namespace: "default"}}, // not in build
+	}
+
+	merged := mergeSources(build, raw, func(c flux.ConfigMap) string { return c.Metadata.Name })
+
+	if len(merged) != 2 {
+		t.Fatalf("expected 2 items (1 from build + 1 new from raw), got %d", len(merged))
+	}
+
+	// First item should be from build (podinfo namespace).
+	if merged[0].Metadata.Namespace != "podinfo" {
+		t.Errorf("expected build-output version (podinfo), got namespace %q", merged[0].Metadata.Namespace)
+	}
+	// Stale raw version (test namespace) must NOT be present.
+	for _, cm := range merged {
+		if cm.Metadata.Name == "app-values" && cm.Metadata.Namespace == "test" {
+			t.Error("stale raw-parsed version should be excluded")
+		}
+	}
+	// New resource from raw (not in build) should be present.
+	found := false
+	for _, cm := range merged {
+		if cm.Metadata.Name == "other-cm" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("raw-only resource 'other-cm' should be present in merged result")
+	}
+}
+
+// TestBuildSourcePath_FailedBuildSingleWarning verifies that when a
+// kustomization.yaml exists but the build fails, exactly one warning
+// is printed (from buildDirCached), not a second one from buildAllKustomizations.
+func TestBuildSourcePath_FailedBuildSingleWarning(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	// Directory with kustomization.yaml referencing a non-existent resource.
+	failDir := filepath.Join(repoRoot, "broken")
+	writeHelper(t, failDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - does-not-exist.yaml
+`)
+
+	builder := kustomize.NewBuilder(repoRoot)
+	cache := make(buildCache)
+
+	_, err := buildSourcePath(context.Background(), builder, failDir, repoRoot, cache)
+	if err == nil {
+		t.Fatal("expected error for broken kustomization")
+	}
+	if !errors.Is(err, errAlreadyWarned) {
+		t.Errorf("expected errAlreadyWarned, got: %v", err)
+	}
+
+	// Second call should NOT re-build or re-warn (cached failure).
+	_, err = buildSourcePath(context.Background(), builder, failDir, repoRoot, cache)
+	if !errors.Is(err, errAlreadyWarned) {
+		t.Errorf("second call should also return errAlreadyWarned (cached), got: %v", err)
+	}
+}
+
+// TestBuildAllKustomizations_FailedBuildSingleWarning verifies that
+// buildAllKustomizations prints exactly one warning when a Flux
+// Kustomization's spec.path build fails (not two — one from
+// buildDirCached, one from buildAllKustomizations itself).
+func TestBuildAllKustomizations_FailedBuildSingleWarning(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	// Broken kustomization directory (missing resource).
+	failDir := filepath.Join(repoRoot, "app", "broken")
+	writeHelper(t, failDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - missing.yaml
+`)
+
+	// Flux Kustomization pointing to the broken directory.
+	clusterPath := filepath.Join(repoRoot, "cluster")
+	writeHelper(t, clusterPath, "ks.yaml", fmt.Sprintf(`apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: broken-app
+  namespace: flux-system
+spec:
+  path: %s
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+`, filepath.Join("..", "app", "broken")))
+
+	ctx := context.Background()
+	kustomizations, err := flux.NewParser(clusterPath).ParseKustomizations(ctx)
+	if err != nil {
+		t.Fatalf("ParseKustomizations: %v", err)
+	}
+
+	builder := kustomize.NewBuilder(repoRoot)
+	cache := make(buildCache)
+
+	stderr := captureStderr(func() {
+		_, _ = buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, true, cache)
+	})
+
+	// Count "Warning:" lines — should be exactly 1.
+	warningCount := strings.Count(stderr, "Warning:")
+	if warningCount != 1 {
+		t.Errorf("expected exactly 1 warning, got %d:\n%s", warningCount, stderr)
+	}
+}
+
+// TestBuildKustomizeOverlays_LooseFiles verifies that loose YAML files in
+// directories WITHOUT kustomization.yaml under clusterPath are included
+// in the output (previously they were silently dropped).
+func TestBuildKustomizeOverlays_LooseFiles(t *testing.T) {
+	clusterPath := t.TempDir()
+
+	// Directory with kustomization.yaml.
+	kustDir := filepath.Join(clusterPath, "overlay")
+	writeHelper(t, kustDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cm.yaml
+`)
+	writeHelper(t, kustDir, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: from-kustomize
+`)
+
+	// Directory WITHOUT kustomization.yaml — loose files.
+	looseDir := filepath.Join(clusterPath, "vars")
+	writeHelper(t, looseDir, "settings.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-settings
+  namespace: flux-system
+data:
+  CLUSTER_NAME: test
+`)
+
+	outputs := buildKustomizeOverlays(context.Background(), clusterPath, clusterPath, map[string]bool{}, make(buildCache))
+	combined := ""
+	for _, o := range outputs {
+		if len(combined) > 0 {
+			combined += "\n"
+		}
+		combined += string(o)
+	}
+
+	// Kustomized resource should be present.
+	if !strings.Contains(combined, "from-kustomize") {
+		t.Error("resource from kustomized directory missing")
+	}
+	// Loose-file resource should also be present.
+	if !strings.Contains(combined, "cluster-settings") {
+		t.Error("loose YAML resource from directory without kustomization.yaml missing")
+	}
+}
+
+// TestBuildKustomizeOverlays_FailedBuildNoLeak verifies that when a directory
+// HAS kustomization.yaml but the build fails, its raw YAML files do NOT
+// leak into the output (no garbage kustomization.yaml, no untransformed resources).
+func TestBuildKustomizeOverlays_FailedBuildNoLeak(t *testing.T) {
+	clusterPath := t.TempDir()
+
+	// Directory with kustomization.yaml referencing a missing resource.
+	failDir := filepath.Join(clusterPath, "vars")
+	writeHelper(t, failDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - missing.yaml
+`)
+	writeHelper(t, failDir, "settings.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-settings
+  namespace: flux-system
+data:
+  CLUSTER_NAME: test
+`)
+
+	outputs := buildKustomizeOverlays(context.Background(), clusterPath, clusterPath, map[string]bool{}, make(buildCache))
+	combined := ""
+	for _, o := range outputs {
+		if len(combined) > 0 {
+			combined += "\n"
+		}
+		combined += string(o)
+	}
+
+	// Neither the kustomization.yaml (garbage) nor the raw settings.yaml
+	// should appear — the directory has a kustomization.yaml, build failed,
+	// loose-file walker must skip it entirely.
+	if strings.Contains(combined, "kustomize.config.k8s.io") {
+		t.Error("kustomization.yaml should NOT leak into output when build fails")
+	}
+	if strings.Contains(combined, "cluster-settings") {
+		t.Error("raw YAML from failed-build directory should NOT leak into output")
+	}
+}
+
+// TestBuildKustomizeOverlays_NonK8sYamlSkipped verifies that loose YAML
+// files that don't look like k8s resources (no apiVersion + kind) are skipped,
+// and in multi-doc files only valid k8s documents are included.
+func TestBuildKustomizeOverlays_NonK8sYamlSkipped(t *testing.T) {
+	clusterPath := t.TempDir()
+
+	// Loose file that is NOT a k8s resource.
+	writeHelper(t, clusterPath, "README.yaml", `title: Some Documentation
+description: Not a k8s resource
+`)
+	// Multi-doc file: one valid k8s resource + one non-resource document.
+	writeHelper(t, clusterPath, "mixed.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: real-resource
+---
+title: Not a k8s document
+description: Should be filtered out
+`)
+
+	outputs := buildKustomizeOverlays(context.Background(), clusterPath, clusterPath, map[string]bool{}, make(buildCache))
+	combined := ""
+	for _, o := range outputs {
+		combined += string(o)
+	}
+
+	if strings.Contains(combined, "Some Documentation") {
+		t.Error("non-k8s YAML file should be skipped entirely")
+	}
+	if !strings.Contains(combined, "real-resource") {
+		t.Error("valid k8s resource should be included")
+	}
+	if strings.Contains(combined, "Not a k8s document") {
+		t.Error("non-k8s document in multi-doc file should be filtered out")
+	}
+}
+
+// TestDedupResources verifies that duplicate resources (same group/kind/namespace/name)
+// are collapsed to one, last occurrence wins. Resources from different API groups
+// with the same kind name are NOT collapsed.
+func TestDedupResources(t *testing.T) {
+	input := []byte(`apiVersion: v1
+kind: Namespace
+metadata:
+  name: podinfo
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: podinfo
+data:
+  key: first
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: podinfo
+data:
+  key: second
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: podinfo
+  namespace: podinfo
+`)
+	result := dedupResources(input)
+	resultStr := string(result)
+
+	// Count top-level kind lines (after newline or at start).
+	docs := flux.SplitYAMLText(result)
+	if len(docs) != 3 {
+		t.Errorf("expected 3 unique documents, got %d", len(docs))
+	}
+
+	// Last occurrence of ConfigMap should win.
+	if strings.Contains(resultStr, "first") {
+		t.Error("expected 'first' to be replaced by 'second' (last wins)")
+	}
+	if !strings.Contains(resultStr, "second") {
+		t.Error("expected 'second' to be present (last occurrence wins)")
+	}
+}
+
+// TestDedupResources_DifferentGroups verifies that resources with the same
+// kind/namespace/name but different API groups are NOT deduped.
+func TestDedupResources_DifferentGroups(t *testing.T) {
+	input := []byte(`apiVersion: example.com/v1
+kind: Endpoint
+metadata:
+  name: shared
+  namespace: default
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Endpoint
+metadata:
+  name: shared
+  namespace: default
+`)
+	result := dedupResources(input)
+	resultStr := string(result)
+
+	// Both should survive — different API groups.
+	if !strings.Contains(resultStr, "example.com/v1") {
+		t.Error("example.com/v1 Endpoint should survive (different group)")
+	}
+	if !strings.Contains(resultStr, "monitoring.coreos.com/v1") {
+		t.Error("monitoring.coreos.com/v1 Endpoint should survive (different group)")
+	}
+}
+
+// TestFilterByNamespace_NamespaceResource verifies that kind: Namespace
+// with metadata.name matching the filter is included.
+func TestFilterByNamespace_NamespaceResource(t *testing.T) {
+	input := []byte(`apiVersion: v1
+kind: Namespace
+metadata:
+  name: podinfo
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app
+  namespace: podinfo
+data:
+  key: val
+`)
+	result := filterByNamespace(input, "podinfo")
+	resultStr := string(result)
+
+	if !strings.Contains(resultStr, "kind: Namespace") {
+		t.Error("Namespace resource should be included when name matches filter")
+	}
+	if !strings.Contains(resultStr, "kind: ConfigMap") {
+		t.Error("ConfigMap in matching namespace should be included")
+	}
+}
+
+// TestFilterByNamespace_DefaultNamespace verifies that resources with empty
+// metadata.namespace match when filter is "default" (except cluster-scoped kinds).
+func TestFilterByNamespace_DefaultNamespace(t *testing.T) {
+	input := []byte(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: no-namespace
+data:
+  key: val
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: podinfo
+`)
+	result := filterByNamespace(input, "default")
+	resultStr := string(result)
+
+	// ConfigMap with empty namespace should match "default".
+	if !strings.Contains(resultStr, "no-namespace") {
+		t.Error("ConfigMap without namespace should match 'default' filter")
+	}
+	// Namespace resource should NOT match "default" (it's cluster-scoped).
+	if strings.Contains(resultStr, "kind: Namespace") {
+		t.Error("Namespace resource should NOT match 'default' filter")
+	}
+}
+
+// TestBuildKustomizeOverlays_OrphanComponentNoLeak verifies that an orphan
+// kind: Component directory (not referenced by any Kustomization) does NOT
+// leak into the output — neither its kustomization.yaml (the Component doc) nor
+// its referenced resource files. Components are kustomize inputs, not standalone
+// resources; only a parent Kustomization referencing them via components: should
+// pull them in.
+func TestBuildKustomizeOverlays_OrphanComponentNoLeak(t *testing.T) {
+	clusterPath := t.TempDir()
+
+	// Orphan Component directory with a kustomization.yaml (kind: Component)
+	// and a referenced resource.
+	compDir := filepath.Join(clusterPath, "components", "foo")
+	writeHelper(t, compDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - dep.yaml
+`)
+	writeHelper(t, compDir, "dep.yaml", `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: comp-app
+`)
+
+	// A legitimate loose resource elsewhere — must still be present.
+	writeHelper(t, clusterPath, "real.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: real-cm
+`)
+
+	outputs := buildKustomizeOverlays(context.Background(), clusterPath, clusterPath, map[string]bool{}, make(buildCache))
+	combined := ""
+	for _, o := range outputs {
+		if len(combined) > 0 {
+			combined += "\n"
+		}
+		combined += string(o)
+	}
+
+	// The orphan Component doc must not leak.
+	if strings.Contains(combined, "kind: Component") {
+		t.Errorf("orphan Component doc leaked into output:\n%s", combined)
+	}
+	// Its referenced resource must not leak either.
+	if strings.Contains(combined, "comp-app") {
+		t.Errorf("orphan Component resource 'comp-app' leaked into output:\n%s", combined)
+	}
+	// The legitimate loose resource must still be present.
+	if !strings.Contains(combined, "real-cm") {
+		t.Errorf("legitimate loose resource 'real-cm' missing from output:\n%s", combined)
+	}
+}
+
+// TestBuildSubdirectoriesAndLooseFiles_OrphanComponentNoLeak is the regression
+// test for the second loose-file path (buildSubdirectoriesAndLooseFiles in
+// diff.go), entered when a Flux Kustomization's spec.path is a directory WITHOUT
+// its own kustomization.yaml. The orphan Component skip must apply here too —
+// not only in buildKustomizeOverlays — so the Component doc and its resources
+// never leak via this code path.
+func TestBuildSubdirectoriesAndLooseFiles_OrphanComponentNoLeak(t *testing.T) {
+	// sourcePath has NO kustomization.yaml itself (case 3 of buildSourcePath).
+	sourcePath := t.TempDir()
+
+	// Orphan Component subdirectory.
+	compDir := filepath.Join(sourcePath, "components", "foo")
+	writeHelper(t, compDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - dep.yaml
+`)
+	writeHelper(t, compDir, "dep.yaml", `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: comp-app
+`)
+
+	// A legitimate loose resource directly under sourcePath — must remain.
+	writeHelper(t, sourcePath, "real.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: real-cm
+`)
+
+	builder := kustomize.NewBuilder(sourcePath)
+	output, err := buildSubdirectoriesAndLooseFiles(context.Background(), builder, sourcePath, sourcePath, make(buildCache))
+	if err != nil {
+		t.Fatalf("buildSubdirectoriesAndLooseFiles: %v", err)
+	}
+	combined := string(output)
+
+	if strings.Contains(combined, "kind: Component") {
+		t.Errorf("orphan Component doc leaked via buildSubdirectoriesAndLooseFiles:\n%s", combined)
+	}
+	if strings.Contains(combined, "comp-app") {
+		t.Errorf("orphan Component resource 'comp-app' leaked via buildSubdirectoriesAndLooseFiles:\n%s", combined)
+	}
+	if !strings.Contains(combined, "real-cm") {
+		t.Errorf("legitimate loose resource 'real-cm' missing from output:\n%s", combined)
+	}
+}
+
+// makeUnreadable sets path to mode 0 so reads fail (EACCES) for a non-root
+// caller, and restores the mode on cleanup so TempDir teardown works.
+func makeUnreadable(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatalf("chmod %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+}
+
+// skipIfReadable aborts the test as skipped when the file is still readable
+// after makeUnreadable (running as root, or a platform that ignores mode 0) —
+// the warning-under-test can never fire in that case.
+func skipIfReadable(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.ReadFile(path); err == nil {
+		t.Skipf("cannot make %s unreadable in this environment (root or unsupported platform)", path)
+	}
+}
+
+// TestBuildSubdirectoriesAndLooseFiles_UnreadableFileWarns verifies that an
+// unreadable loose YAML file is reported via stderr (not silently skipped)
+// while readable loose resources in the same tree are still collected.
+func TestBuildSubdirectoriesAndLooseFiles_UnreadableFileWarns(t *testing.T) {
+	repoRoot := t.TempDir()
+	sourcePath := filepath.Join(repoRoot, "loose")
+
+	// Legitimate loose k8s resource (must still be collected).
+	writeHelper(t, sourcePath, "real.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: real-cm
+`)
+
+	// Unreadable loose YAML file.
+	bad := filepath.Join(sourcePath, "broken.yaml")
+	writeHelper(t, sourcePath, "broken.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bad-cm
+`)
+	makeUnreadable(t, bad)
+	skipIfReadable(t, bad)
+
+	builder := kustomize.NewBuilder(repoRoot)
+	var output []byte
+	stderr := captureStderr(func() {
+		var err error
+		output, err = buildSubdirectoriesAndLooseFiles(context.Background(), builder, sourcePath, repoRoot, make(buildCache))
+		if err != nil {
+			t.Fatalf("buildSubdirectoriesAndLooseFiles: %v", err)
+		}
+	})
+
+	if !strings.Contains(stderr, "Warning: could not read") || !strings.Contains(stderr, bad) {
+		t.Errorf("expected an unreadable-file warning mentioning %s, got:\n%s", bad, stderr)
+	}
+	if !strings.Contains(string(output), "real-cm") {
+		t.Errorf("expected the readable resource to still be collected, got:\n%s", output)
+	}
+}
+
+// TestBuildKustomizeOverlays_UnreadableFileWarns mirrors the above for the
+// build-time loose-file walker inside buildKustomizeOverlays.
+func TestBuildKustomizeOverlays_UnreadableFileWarns(t *testing.T) {
+	repoRoot := t.TempDir()
+	clusterPath := filepath.Join(repoRoot, "cluster")
+
+	writeHelper(t, clusterPath, "real.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: real-cm
+`)
+
+	bad := filepath.Join(clusterPath, "broken.yaml")
+	writeHelper(t, clusterPath, "broken.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bad-cm
+`)
+	makeUnreadable(t, bad)
+	skipIfReadable(t, bad)
+
+	var outputs [][]byte
+	stderr := captureStderr(func() {
+		outputs = buildKustomizeOverlays(context.Background(), clusterPath, repoRoot, nil, make(buildCache))
+	})
+
+	if !strings.Contains(stderr, "Warning: could not read") || !strings.Contains(stderr, bad) {
+		t.Errorf("expected an unreadable-file warning mentioning %s, got:\n%s", bad, stderr)
+	}
+	combined := strings.Join(bytesSliceToStrings(outputs), "")
+	if !strings.Contains(combined, "real-cm") {
+		t.Errorf("expected the readable resource to still be collected, got:\n%s", combined)
+	}
+}
+
+// bytesSliceToStrings joins a [][]byte into a single string for substring checks.
+func bytesSliceToStrings(in [][]byte) []string {
+	out := make([]string, len(in))
+	for i, b := range in {
+		out[i] = string(b)
+	}
+	return out
+}
+
+// TestBuildSubdirectoriesAndLooseFiles_SymlinkEscapeRejected verifies that a
+// loose YAML file which is a symlink pointing OUTSIDE repoRoot is rejected by
+// the root-scoped read (os.Root), so the target's content cannot leak into the
+// build output — the CWE-367 / symlink-traversal hardening. A legitimate file
+// in the same directory is still collected, and the rejected symlink is warned.
+func TestBuildSubdirectoriesAndLooseFiles_SymlinkEscapeRejected(t *testing.T) {
+	repoRoot := t.TempDir()
+	sourcePath := filepath.Join(repoRoot, "loose")
+	writeHelper(t, sourcePath, "real.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: real-cm
+`)
+
+	// A "secret" file OUTSIDE repoRoot — its content must never be read.
+	outside := t.TempDir()
+	const secretMarker = "SUPER-SECRET-SHOULD-NEVER-LEAK"
+	if err := os.WriteFile(filepath.Join(outside, "secret.yaml"),
+		[]byte("data: "+secretMarker+"\n"), 0o644); err != nil {
+		t.Fatalf("write outside secret: %v", err)
+	}
+
+	// Symlink inside sourcePath pointing at the outside file.
+	link := filepath.Join(sourcePath, "leak.yaml")
+	if err := os.Symlink(filepath.Join(outside, "secret.yaml"), link); err != nil {
+		if os.IsPermission(err) {
+			t.Skipf("cannot create symlinks in this environment: %v", err)
+		}
+		t.Fatalf("symlink: %v", err)
+	}
+
+	builder := kustomize.NewBuilder(repoRoot)
+	var output []byte
+	stderr := captureStderr(func() {
+		var err error
+		output, err = buildSubdirectoriesAndLooseFiles(context.Background(), builder, sourcePath, repoRoot, make(buildCache))
+		if err != nil {
+			t.Fatalf("buildSubdirectoriesAndLooseFiles: %v", err)
+		}
+	})
+
+	combined := string(output)
+	// Legit resource still collected.
+	if !strings.Contains(combined, "real-cm") {
+		t.Errorf("expected legit resource 'real-cm' to be collected, got:\n%s", combined)
+	}
+	// The escaped-symlink target content must NOT leak.
+	if strings.Contains(combined, secretMarker) {
+		t.Errorf("symlink-escape: outside content leaked into build output:\n%s", combined)
+	}
+	// The rejected symlink should be reported.
+	if !strings.Contains(stderr, "Warning: could not read") || !strings.Contains(stderr, "leak.yaml") {
+		t.Errorf("expected a warning about the rejected symlink, got:\n%s", stderr)
+	}
+}

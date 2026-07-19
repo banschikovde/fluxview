@@ -1,0 +1,15 @@
+.git
+.github
+.agent
+docs
+bin
+*.exe
+*.swp
+*.md
+.DS_Store
+.idea/
+.vscode/
+vendor/
+Dockerfile
+.dockerignore
+.gitignore
