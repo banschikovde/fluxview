@@ -197,6 +197,38 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 			continue
 		}
 
+		// Apply metadata.namespace via kustomize's native namespace
+		// transformer (same mechanism as Kustomization.spec.targetNamespace).
+		//
+		// Helm renders with --namespace=<ns> but does NOT inject
+		// metadata.namespace into templates that don't use
+		// {{ .Release.Namespace }}. Without this step, downstream
+		// resource-level filters (diff hr --namespace) would drop those
+		// resources ("No resources found in namespace X") even though
+		// the HelmRelease was correctly inflated.
+		//
+		// Reusing the kustomize transformer — rather than a hand-rolled
+		// yaml.Node splice — gives us correct cluster-scoped detection
+		// for free, including for custom CRDs (cert-manager, Crossplane,
+		// ...) via kustomize's own CRD registry. This matches the
+		// behavior of `build ks` (ApplyTargetNamespace is already used
+		// for Kustomization.spec.targetNamespace).
+		//
+		// Override semantics (existing namespace is replaced) are
+		// intentional: HelmController applies HR resources to the HR's
+		// namespace, so a chart hard-coding a different namespace would
+		// be wrong at apply time anyway.
+		hrNamespace := hr.Metadata.Namespace
+		if hr.Spec.TargetNamespace != "" {
+			hrNamespace = hr.Spec.TargetNamespace
+		}
+		if injected, err := kustomize.ApplyTargetNamespace(output, hrNamespace); err == nil {
+			output = injected
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: failed to apply namespace %q to HelmRelease %s/%s output: %v\n",
+				hrNamespace, hr.Metadata.Namespace, hr.Metadata.Name, err)
+		}
+
 		if skipCRDs {
 			output = filterCRDDocs(output)
 		}

@@ -1143,6 +1143,103 @@ spec:
 	}
 }
 
+// TestInflateHelmReleasesShared_NamespaceInjectedForChartWithoutReleaseNamespace
+// is a regression test for the bug where `diff hr --namespace X` produced
+// "No resources found in namespace X" even though the HelmRelease was correctly
+// inflated.
+//
+// Root cause: Helm renders with --namespace=<ns> but does NOT inject
+// metadata.namespace into templates that don't use {{ .Release.Namespace }}.
+// Resources without explicit metadata.namespace were then dropped by
+// filterByNamespace in computeAndOutputDiff.
+//
+// Fix: inflateHelmReleasesShared runs kustomize's ApplyTargetNamespace on
+// every HR's rendered output, so resources end up with explicit
+// metadata.namespace=<hr-ns> matching the HR's namespace. This test verifies
+// the fix end-to-end: a chart whose template omits namespace entirely still
+// gets metadata.namespace injected, and filterByNamespace finds the resource.
+func TestInflateHelmReleasesShared_NamespaceInjectedForChartWithoutReleaseNamespace(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	// Chart whose Deployment template does NOT reference {{ .Release.Namespace }}.
+	// Helm will render this without metadata.namespace.
+	chartDir := filepath.Join(repoRoot, "charts", "plain")
+	writeHelper(t, chartDir, "Chart.yaml", `apiVersion: v2
+name: plain
+version: 1.0.0
+`)
+	writeHelper(t, chartDir, "values.yaml", "")
+	writeHelper(t, filepath.Join(chartDir, "templates"), "dep.yaml", `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  replicas: 1
+`)
+
+	hrNamespace := "apps"
+	hr := []flux.HelmRelease{{
+		Metadata: flux.ObjectMeta{Name: "app", Namespace: hrNamespace},
+		Spec: flux.HelmReleaseSpec{
+			Chart: flux.HelmReleaseChart{
+				Spec: flux.HelmReleaseChartSpec{
+					Chart: "./charts/plain",
+					SourceRef: struct {
+						Kind      string `yaml:"kind"`
+						Name      string `yaml:"name"`
+						Namespace string `yaml:"namespace,omitempty"`
+					}{
+						Kind: flux.KindGitRepository,
+						Name: "flux-system",
+					},
+				},
+			},
+		},
+	}}
+
+	inflater, err := helm.NewInflater()
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+
+	var outputs [][]byte
+	stderr := captureStderr(func() {
+		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, true, repoRoot)
+	})
+	if len(outputs) != 1 {
+		t.Fatalf("expected 1 rendered output, got %d (stderr:\n%s)", len(outputs), stderr)
+	}
+
+	rendered := outputs[0]
+
+	// Sanity: the chart template produced a Deployment without namespace.
+	// (If it had {{ .Release.Namespace }}, this test wouldn't catch the bug.)
+	if strings.Contains(string(rendered), "namespace:") && strings.Contains(string(rendered), "app") {
+		// Either chart changed to include namespace, or transformer ran.
+		// Either way, the assertion below still must hold.
+	}
+
+	// The regression symptom: filterByNamespace drops resources without an
+	// explicit namespace. After the fix (ApplyTargetNamespace runs inside
+	// inflateHelmReleasesShared), the Deployment has metadata.namespace=apps,
+	// so filterByNamespace keeps it.
+	filtered := filterByNamespace(rendered, hrNamespace)
+	if !strings.Contains(string(filtered), "kind: Deployment") {
+		t.Errorf("expected filterByNamespace(%q) to keep the Deployment after namespace injection;\nrendered:\n%s\nfiltered:\n%s",
+			hrNamespace, rendered, filtered)
+	}
+	if !strings.Contains(string(filtered), "namespace: "+hrNamespace) {
+		t.Errorf("expected rendered output to contain 'namespace: %s' after ApplyTargetNamespace;\nrendered:\n%s",
+			hrNamespace, rendered)
+	}
+	// And the inverse: filtering by a different namespace yields nothing —
+	// the resource is correctly assigned to the HR's namespace only.
+	otherFiltered := filterByNamespace(rendered, "other-ns")
+	if strings.Contains(string(otherFiltered), "kind: Deployment") {
+		t.Errorf("expected filterByNamespace(\"other-ns\") to drop the Deployment;\nfiltered:\n%s", otherFiltered)
+	}
+}
+
 // TestInflateHelmReleasesShared_BucketUnsupported verifies that a Bucket-sourced
 // HelmRelease is skipped with an explicit "not supported" warning (rather than
 // the generic "HelmRepository not found" message, which is misleading for Bucket).
