@@ -314,8 +314,12 @@ func injectNamespaceDoc(doc, namespace string) string {
 	if mapping == nil {
 		return doc
 	}
+	// A Kubernetes resource must declare both apiVersion and kind. Helm
+	// output always has both, but defensively skip partial documents
+	// rather than fabricating metadata on something that isn't a resource.
+	apiVersion := mapScalarValue(mapping, "apiVersion")
 	kind := mapScalarValue(mapping, "kind")
-	if kind == "" || isClusterScoped(kind) {
+	if apiVersion == "" || kind == "" || isClusterScoped(kind) {
 		return doc
 	}
 	metadataIdx := mappingKeyIndex(mapping, "metadata")

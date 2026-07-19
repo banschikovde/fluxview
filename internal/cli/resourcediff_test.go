@@ -205,6 +205,33 @@ baz: qux
 	}
 }
 
+func TestInjectNamespace_SkipsPartialResources(t *testing.T) {
+	// A Kubernetes resource must have both apiVersion and kind. Documents
+	// missing either are not resources and must be left alone (defensive —
+	// Helm output always has both, but the guard keeps the function honest
+	// with its docstring and protects against malformed input).
+	cases := map[string]string{
+		"missing apiVersion": `
+kind: ConfigMap
+metadata:
+  name: cm
+`,
+		"missing kind": `
+apiVersion: v1
+metadata:
+  name: cm
+`,
+	}
+	for name, doc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := string(injectNamespace([]byte(doc), "my-ns"))
+			if contains(got, "namespace: my-ns") {
+				t.Errorf("%s: namespace must not be injected:\n%s", name, got)
+			}
+		})
+	}
+}
+
 func TestInjectNamespace_EmptyNamespaceNoOp(t *testing.T) {
 	data := []byte(`apiVersion: v1
 kind: ConfigMap
