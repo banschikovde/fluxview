@@ -1240,6 +1240,124 @@ spec:
 	}
 }
 
+// TestInflateHelmReleasesShared_PreservesHardcodedNamespace is the regression
+// test for the override-semantic bug introduced by the first attempt at the
+// namespace fix (PR #6 before review). The original fix used
+// kustomize.ApplyTargetNamespace directly, which force-overrides
+// metadata.namespace — a behavior that matches
+// Kustomization.spec.targetNamespace but NOT Helm install.
+//
+// Real Helm behavior (and HelmController's): a chart resource with an
+// explicit metadata.namespace in its template is honored. Charts
+// occasionally place a ConfigMap or Secret in a fixed auxiliary namespace
+// (e.g. a shared dashboard config in kube-system, or in a separate
+// observability namespace). Force-overriding such a namespace to the HR's
+// namespace would produce a quietly-wrong diff: the resource "moves" in
+// the output even though on the cluster it would land where the chart put
+// it.
+//
+// This test verifies the fix: a chart with one namespaced resource
+// hard-coding `kube-system` and another resource without a namespace —
+// the first is preserved as-is, the second is filled with the HR's
+// namespace.
+func TestInflateHelmReleasesShared_PreservesHardcodedNamespace(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	chartDir := filepath.Join(repoRoot, "charts", "mixed")
+	writeHelper(t, chartDir, "Chart.yaml", `apiVersion: v2
+name: mixed
+version: 1.0.0
+`)
+	writeHelper(t, chartDir, "values.yaml", "")
+	// dashboard-config: a ConfigMap the chart intentionally places in
+	// kube-system (real-world pattern — shared dashboards / Grafana
+	// configmaps / etc.). Namespaced kind, so a force-override transformer
+	// WOULD touch it — that's the bug we're guarding against.
+	writeHelper(t, filepath.Join(chartDir, "templates"), "dashboard-config.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-config
+  namespace: kube-system
+data:
+  url: http://grafana.kube-system.svc.cluster.local
+`)
+	// app: no namespace in template — Helm would apply it to the HR namespace.
+	writeHelper(t, filepath.Join(chartDir, "templates"), "app.yaml", `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  replicas: 1
+`)
+
+	hrNamespace := "my-apps"
+	hr := []flux.HelmRelease{{
+		Metadata: flux.ObjectMeta{Name: "app", Namespace: hrNamespace},
+		Spec: flux.HelmReleaseSpec{
+			Chart: flux.HelmReleaseChart{
+				Spec: flux.HelmReleaseChartSpec{
+					Chart: "./charts/mixed",
+					SourceRef: struct {
+						Kind      string `yaml:"kind"`
+						Name      string `yaml:"name"`
+						Namespace string `yaml:"namespace,omitempty"`
+					}{
+						Kind: flux.KindGitRepository,
+						Name: "flux-system",
+					},
+				},
+			},
+		},
+	}}
+
+	inflater, err := helm.NewInflater()
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+
+	var outputs [][]byte
+	stderr := captureStderr(func() {
+		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, true, repoRoot)
+	})
+	if len(outputs) != 1 {
+		t.Fatalf("expected 1 rendered output, got %d (stderr:\n%s)", len(outputs), stderr)
+	}
+	rendered := string(outputs[0])
+
+	// The ConfigMap's hard-coded `namespace: kube-system` must be preserved
+	// (NOT force-overridden to the HR's namespace). This is the regression
+	// guard: the previous override-based fix would fail here.
+	if !strings.Contains(rendered, "name: dashboard-config\n  namespace: kube-system") &&
+		!strings.Contains(rendered, "namespace: kube-system") {
+		t.Errorf("expected ConfigMap to keep its hard-coded namespace: kube-system;\nrendered:\n%s", rendered)
+	}
+	// Catch the bug directly: if override happened, the ConfigMap would carry
+	// the HR's namespace instead. Verify that pattern is absent.
+	if strings.Contains(rendered, "name: dashboard-config\n  namespace: "+hrNamespace) {
+		t.Errorf("ConfigMap namespace was force-overridden to %q — Helm semantics require preserving it;\nrendered:\n%s",
+			hrNamespace, rendered)
+	}
+
+	// The Deployment template omitted namespace entirely. Verify the HR's
+	// namespace is filled in.
+	if !strings.Contains(rendered, "namespace: "+hrNamespace) {
+		t.Errorf("expected Deployment to have its missing namespace filled with %q;\nrendered:\n%s",
+			hrNamespace, rendered)
+	}
+
+	// Sanity: filterByNamespace for the HR namespace keeps the Deployment
+	// but drops the ConfigMap (which lives in kube-system).
+	hrFiltered := filterByNamespace([]byte(rendered), hrNamespace)
+	if !strings.Contains(string(hrFiltered), "kind: Deployment") {
+		t.Errorf("expected Deployment to be visible when filtering by %q;\nfiltered:\n%s",
+			hrNamespace, hrFiltered)
+	}
+	if strings.Contains(string(hrFiltered), "dashboard-config") {
+		t.Errorf("expected ConfigMap to be excluded when filtering by %q (it lives in kube-system);\nfiltered:\n%s",
+			hrNamespace, hrFiltered)
+	}
+}
+
 // TestInflateHelmReleasesShared_BucketUnsupported verifies that a Bucket-sourced
 // HelmRelease is skipped with an explicit "not supported" warning (rather than
 // the generic "HelmRepository not found" message, which is misleading for Bucket).

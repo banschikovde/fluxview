@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/banschikovde/fluxview/internal/flux"
 	"github.com/banschikovde/fluxview/internal/helm"
 	"github.com/banschikovde/fluxview/internal/kustomize"
@@ -197,35 +199,40 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 			continue
 		}
 
-		// Apply metadata.namespace via kustomize's native namespace
-		// transformer (same mechanism as Kustomization.spec.targetNamespace).
+		// Fill in metadata.namespace for resources that lack one, matching
+		// `helm install --namespace <ns>` semantics (NOT
+		// Kustomization.spec.targetNamespace force-override).
 		//
 		// Helm renders with --namespace=<ns> but does NOT inject
 		// metadata.namespace into templates that don't use
 		// {{ .Release.Namespace }}. Without this step, downstream
 		// resource-level filters (diff hr --namespace) would drop those
-		// resources ("No resources found in namespace X") even though
-		// the HelmRelease was correctly inflated.
+		// resources ("No resources found in namespace X") even though the
+		// HelmRelease was correctly inflated.
 		//
-		// Reusing the kustomize transformer — rather than a hand-rolled
-		// yaml.Node splice — gives us correct cluster-scoped detection
-		// for free, including for custom CRDs (cert-manager, Crossplane,
-		// ...) via kustomize's own CRD registry. This matches the
-		// behavior of `build ks` (ApplyTargetNamespace is already used
-		// for Kustomization.spec.targetNamespace).
+		// Critically, this is **fill-missing** semantics: a resource whose
+		// template hard-codes a different namespace (e.g. cert-manager
+		// webhooks in kube-system, or a chart resource intentionally placed
+		// in a separate namespace) is preserved as-is. Real HelmController
+		// honors an explicit metadata.namespace and applies the resource
+		// there — overriding it would produce a quietly-wrong diff.
+		// Kustomization.spec.targetNamespace (force-override) is a different
+		// mechanism for a different entity.
 		//
-		// Override semantics (existing namespace is replaced) are
-		// intentional: HelmController applies HR resources to the HR's
-		// namespace, so a chart hard-coding a different namespace would
-		// be wrong at apply time anyway.
+		// We still reuse kustomize's namespace transformer (via
+		// ApplyTargetNamespace) for the cluster-scoped detection — it
+		// correctly skips CRDs/Namespace/ClusterRole and custom cluster-scoped
+		// CRDs through kustomize's CRD registry. To combine the two, we split
+		// the rendered output into "already has namespace" (preserved) and
+		// "missing namespace" (run through the transformer), then merge back.
 		hrNamespace := hr.Metadata.Namespace
 		if hr.Spec.TargetNamespace != "" {
 			hrNamespace = hr.Spec.TargetNamespace
 		}
-		if injected, err := kustomize.ApplyTargetNamespace(output, hrNamespace); err == nil {
-			output = injected
+		if filled, err := applyHelmNamespace(output, hrNamespace); err == nil {
+			output = filled
 		} else {
-			fmt.Fprintf(os.Stderr, "Warning: failed to apply namespace %q to HelmRelease %s/%s output: %v\n",
+			fmt.Fprintf(os.Stderr, "Warning: failed to fill namespace %q in HelmRelease %s/%s output: %v\n",
 				hrNamespace, hr.Metadata.Namespace, hr.Metadata.Name, err)
 		}
 
@@ -236,6 +243,61 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 		outputs = append(outputs, output)
 	}
 	return outputs
+}
+
+// applyHelmNamespace fills metadata.namespace on resources that lack one,
+// matching `helm install --namespace <ns>` semantics. Resources that already
+// declare metadata.namespace are preserved verbatim (including those whose
+// namespace differs from `namespace` — Helm honors an explicit value).
+//
+// To correctly skip cluster-scoped kinds (including custom cluster-scoped
+// CRDs like cert-manager's), resources without metadata.namespace are passed
+// through kustomize.ApplyTargetNamespace, which uses kustomize's CRD-aware
+// namespace transformer. The "has namespace" group is merged back untouched.
+//
+// Returns input unchanged when namespace is empty or no resource needs
+// filling. Errors from the kustomize transformer are propagated.
+func applyHelmNamespace(data []byte, namespace string) ([]byte, error) {
+	if namespace == "" {
+		return data, nil
+	}
+	var preserve, fill []string
+	for _, doc := range flux.SplitYAMLText(data) {
+		trimmed := strings.TrimSpace(doc)
+		if trimmed == "" {
+			continue
+		}
+		// A doc we can't parse is preserved as-is — never silently dropped.
+		var meta struct {
+			Metadata struct {
+				Namespace string `yaml:"namespace"`
+			} `yaml:"metadata"`
+		}
+		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
+			preserve = append(preserve, doc)
+			continue
+		}
+		if meta.Metadata.Namespace != "" {
+			preserve = append(preserve, doc)
+		} else {
+			fill = append(fill, doc)
+		}
+	}
+	if len(fill) == 0 {
+		return data, nil
+	}
+	injected, err := kustomize.ApplyTargetNamespace(
+		[]byte(strings.Join(fill, "\n---\n")),
+		namespace,
+	)
+	if err != nil {
+		return data, err
+	}
+	// Order: preserved docs first, then namespace-filled docs. Downstream
+	// (buildResourceMap → diffResourceMaps) sorts by kind/namespace/name, so
+	// the order here doesn't affect diff output.
+	result := append(preserve, string(injected))
+	return []byte(strings.Join(result, "\n---\n")), nil
 }
 
 // resolveOCIRepoURL finds the OCIRepository reference for a HelmRelease's chartRef.
