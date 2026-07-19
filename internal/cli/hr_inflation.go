@@ -197,6 +197,17 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 			continue
 		}
 
+		// Inject metadata.namespace into resources that lack one. Helm
+		// renders with --namespace=<ns> but does NOT inject metadata.namespace
+		// unless the chart templates {{ .Release.Namespace }}. Match
+		// kubectl-apply semantics so downstream resource-level filters
+		// (diff --namespace) work for charts that don't.
+		hrNamespace := hr.Metadata.Namespace
+		if hr.Spec.TargetNamespace != "" {
+			hrNamespace = hr.Spec.TargetNamespace
+		}
+		output = injectNamespace(output, hrNamespace)
+
 		if skipCRDs {
 			output = filterCRDDocs(output)
 		}

@@ -272,6 +272,131 @@ func stripAllAttrs(data []byte, attrsList string) []byte {
 	return []byte(strings.Join(result, "\n---\n"))
 }
 
+// injectNamespace adds metadata.namespace to every namespaced resource in
+// data that lacks one, mirroring what `kubectl apply -n <ns>` and
+// `helm install --namespace <ns>` do at apply time: a resource without an
+// explicit metadata.namespace is assigned to the request namespace.
+//
+// This is needed because `helm template --namespace X` only sets the
+// .Release.Namespace template variable — it does NOT inject
+// metadata.namespace into the rendered output. Charts that don't template
+// {{ .Release.Namespace }} produce resources without an explicit namespace,
+// which then breaks downstream resource-level filtering (diff hr --namespace).
+//
+// Documents are parsed with yaml.Node so formatting, comments, key ordering,
+// and scalar styles are preserved. Resources that already declare a
+// namespace, cluster-scoped kinds (Namespace, ClusterRole, CRD, ...), and
+// documents without apiVersion/kind are returned unchanged.
+func injectNamespace(data []byte, namespace string) []byte {
+	if namespace == "" {
+		return data
+	}
+	docs := flux.SplitYAMLText(data)
+	var result []string
+	for _, doc := range docs {
+		result = append(result, injectNamespaceDoc(doc, namespace))
+	}
+	return []byte(strings.Join(result, "\n---\n"))
+}
+
+// injectNamespaceDoc adds metadata.namespace to a single YAML document if
+// it represents a namespaced Kubernetes resource that lacks an explicit
+// namespace. See injectNamespace for the full contract.
+func injectNamespaceDoc(doc, namespace string) string {
+	if namespace == "" {
+		return doc
+	}
+	var node yaml.Node
+	if err := yaml.Unmarshal([]byte(doc), &node); err != nil {
+		return doc // keep unparseable docs unchanged
+	}
+	mapping := topLevelMapping(&node)
+	if mapping == nil {
+		return doc
+	}
+	kind := mapScalarValue(mapping, "kind")
+	if kind == "" || isClusterScoped(kind) {
+		return doc
+	}
+	metadataIdx := mappingKeyIndex(mapping, "metadata")
+	if metadataIdx == -1 {
+		return doc // no metadata → don't fabricate one
+	}
+	metadataNode := mapping.Content[metadataIdx+1]
+	if metadataNode.Kind != yaml.MappingNode {
+		return doc
+	}
+	if mappingKeyIndex(metadataNode, "namespace") != -1 {
+		return doc // explicit namespace already set — never override
+	}
+	// Insert "namespace" immediately after "name" when present (k8s
+	// convention: name, namespace, labels, annotations, ...); otherwise
+	// prepend at the start of the metadata mapping.
+	insertIdx := 0
+	if nameIdx := mappingKeyIndex(metadataNode, "name"); nameIdx != -1 {
+		insertIdx = nameIdx + 2 // after the [name, value] pair
+	}
+	keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "namespace"}
+	valNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: namespace}
+	metadataNode.Content = append(
+		metadataNode.Content[:insertIdx],
+		append([]*yaml.Node{keyNode, valNode}, metadataNode.Content[insertIdx:]...)...,
+	)
+	// Use the same indent as ConvertJSONInYAMLToYAML (yaml.Marshal default,
+	// 4 spaces) so injected docs match the indent of docs that already had
+	// a namespace and weren't re-encoded. Mixing indents in one diff output
+	// would be visible noise.
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(4)
+	if err := enc.Encode(&node); err != nil {
+		return doc
+	}
+	enc.Close()
+	return strings.TrimSpace(buf.String())
+}
+
+// topLevelMapping returns the top-level mapping node of a parsed YAML
+// document, or nil if the document is empty or not a mapping.
+func topLevelMapping(node *yaml.Node) *yaml.Node {
+	if node == nil || node.Kind != yaml.DocumentNode || len(node.Content) == 0 {
+		return nil
+	}
+	if node.Content[0].Kind != yaml.MappingNode {
+		return nil
+	}
+	return node.Content[0]
+}
+
+// mapScalarValue returns the string value of a scalar mapping key, or "" if
+// the key is absent or holds a non-scalar value.
+func mapScalarValue(mapping *yaml.Node, key string) string {
+	idx := mappingKeyIndex(mapping, key)
+	if idx == -1 {
+		return ""
+	}
+	v := mapping.Content[idx+1]
+	if v == nil || v.Kind != yaml.ScalarNode {
+		return ""
+	}
+	return v.Value
+}
+
+// mappingKeyIndex returns the index of the key node named key in a mapping
+// node's Content slice (which alternates key, value, key, value, ...), or
+// -1 if not found.
+func mappingKeyIndex(mapping *yaml.Node, key string) int {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return -1
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if k := mapping.Content[i]; k != nil && k.Kind == yaml.ScalarNode && k.Value == key {
+			return i
+		}
+	}
+	return -1
+}
+
 // diffResourceMaps matches resources by key and computes per-resource diffs.
 // Identical resources (same text) are skipped without running LCS.
 func diffResourceMaps(origMap, modMap map[resourceKey]string, ctxLines int) []resourceDiffResult {
