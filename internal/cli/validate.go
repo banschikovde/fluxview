@@ -87,7 +87,7 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 
 	fmt.Fprintf(os.Stderr, "Loaded %d CRD schemas from %s\n", validator.SchemaCount(), schemaDir)
 
-	parser := flux.NewParser(clusterPath)
+	parser := flux.NewParser(absClusterPath)
 	kustomizations, err := parser.ParseKustomizations(ctx)
 	if err != nil {
 		return NewExitError(fmt.Errorf("parsing Kustomization resources: %w", err), ExitCodeError)
@@ -95,9 +95,9 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
+	configMaps := resolveConfigMaps(ctx, absClusterPath, builder, buildCache)
 
-	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, false, buildCache)
+	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, absClusterPath, configMaps, false, buildCache)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}
