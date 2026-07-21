@@ -222,8 +222,8 @@ func buildKSOutputWithCache(ctx context.Context, clusterPath, repoRoot, name str
 
 	builder := kustomize.NewBuilder(repoRoot)
 	// Resolve ConfigMaps and Secrets for postBuild substitution.
-	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache, false)
-	secrets := resolveSecrets(ctx, clusterPath, builder, buildCache, false)
+	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
+	secrets := resolveSecrets(ctx, clusterPath, builder, buildCache)
 
 	return buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, false, buildCache)
 }
@@ -275,8 +275,8 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 	builder := kustomize.NewBuilder(worktreePath)
 	buildCache := make(buildCache)
 	// Resolve ConfigMaps and Secrets for postBuild substitution from the worktree.
-	configMaps := resolveConfigMaps(ctx, worktreeClusterPath, builder, buildCache, false)
-	secrets := resolveSecrets(ctx, worktreeClusterPath, builder, buildCache, false)
+	configMaps := resolveConfigMaps(ctx, worktreeClusterPath, builder, buildCache)
+	secrets := resolveSecrets(ctx, worktreeClusterPath, builder, buildCache)
 
 	// Use worktreePath as repoRoot so that recursive discovery and postBuild
 	// substitution work identically to the current state. External GitRepository

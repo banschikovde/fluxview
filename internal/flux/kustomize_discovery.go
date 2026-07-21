@@ -206,7 +206,9 @@ func isNativeKustomize(kust nativeKustomization) bool {
 // file directly from disk.
 // parseResourcesFromBytes is the generic implementation behind all
 // ParseXxxFromBytes functions: split YAML → filter by kind/apiVersion → unmarshal.
-func parseResourcesFromBytes[T any](data []byte, match func(kind, apiVersion string) bool) ([]T, error) {
+// Documents that fail to unmarshal are silently skipped (they may not be the
+// target type); the function always succeeds.
+func parseResourcesFromBytes[T any](data []byte, match func(kind, apiVersion string) bool) []T {
 	var results []T
 
 	for _, doc := range SplitYAMLDocuments(data) {
@@ -233,34 +235,34 @@ func parseResourcesFromBytes[T any](data []byte, match func(kind, apiVersion str
 		results = append(results, item)
 	}
 
-	return results, nil
+	return results
 }
 
-func ParseHelmReleasesFromBytes(data []byte) ([]HelmRelease, error) {
+func ParseHelmReleasesFromBytes(data []byte) []HelmRelease {
 	return parseResourcesFromBytes[HelmRelease](data, func(kind, api string) bool {
 		return kind == KindHelmRelease && isHelmAPI(api)
 	})
 }
 
-func ParseHelmRepositoriesFromBytes(data []byte) ([]HelmRepository, error) {
+func ParseHelmRepositoriesFromBytes(data []byte) []HelmRepository {
 	return parseResourcesFromBytes[HelmRepository](data, func(kind, api string) bool {
 		return kind == KindHelmRepository && isSourceAPI(api)
 	})
 }
 
-func ParseOCIRepositoriesFromBytes(data []byte) ([]OCIRepository, error) {
+func ParseOCIRepositoriesFromBytes(data []byte) []OCIRepository {
 	return parseResourcesFromBytes[OCIRepository](data, func(kind, api string) bool {
 		return kind == KindOCIRepository && isSourceAPI(api)
 	})
 }
 
-func ParseConfigMapsFromBytes(data []byte) ([]ConfigMap, error) {
+func ParseConfigMapsFromBytes(data []byte) []ConfigMap {
 	return parseResourcesFromBytes[ConfigMap](data, func(kind, api string) bool {
 		return api == "v1" && kind == "ConfigMap"
 	})
 }
 
-func ParseSecretsFromBytes(data []byte) ([]Secret, error) {
+func ParseSecretsFromBytes(data []byte) []Secret {
 	return parseResourcesFromBytes[Secret](data, func(kind, api string) bool {
 		return api == "v1" && kind == "Secret"
 	})

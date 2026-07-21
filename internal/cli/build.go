@@ -117,8 +117,8 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache, false)
-	secrets := resolveSecrets(ctx, clusterPath, builder, buildCache, false)
+	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
+	secrets := resolveSecrets(ctx, clusterPath, builder, buildCache)
 
 	kustomizations, err = flux.TopologicalSort(kustomizations)
 	if err != nil {
@@ -428,13 +428,7 @@ func isExcludedDir(dir string, excludePaths map[string]bool) bool {
 
 // --- ConfigMaps ---
 
-func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomize.Builder, cache buildCache, quiet bool) []flux.ConfigMap {
-	stderr := func(format string, args ...any) {
-		if !quiet {
-			fmt.Fprintf(os.Stderr, format, args...)
-		}
-	}
-
+func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomize.Builder, cache buildCache) []flux.ConfigMap {
 	parser := flux.NewParser(clusterPath)
 
 	// Raw ConfigMaps scanned directly from clusterPath. Errors here are
@@ -452,12 +446,7 @@ func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomi
 		if !ok {
 			continue
 		}
-		cms, err := flux.ParseConfigMapsFromBytes(output)
-		if err != nil {
-			stderr("Warning: could not parse ConfigMaps from build output for %s: %v\n", dir, err)
-			continue
-		}
-		builtCMs = append(builtCMs, cms...)
+		builtCMs = append(builtCMs, flux.ParseConfigMapsFromBytes(output)...)
 	}
 
 	return mergeSources(builtCMs, rawCMs, func(c flux.ConfigMap) string { return c.Metadata.Name })
@@ -470,13 +459,7 @@ func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomi
 // clusterPath are merged with Secrets produced by kustomize builds (which may
 // apply namespace transformation). Only key names matter for substitution —
 // resolveSecrets never returns real secret values to the substitution path.
-func resolveSecrets(ctx context.Context, clusterPath string, builder *kustomize.Builder, cache buildCache, quiet bool) []flux.Secret {
-	stderr := func(format string, args ...any) {
-		if !quiet {
-			fmt.Fprintf(os.Stderr, format, args...)
-		}
-	}
-
+func resolveSecrets(ctx context.Context, clusterPath string, builder *kustomize.Builder, cache buildCache) []flux.Secret {
 	parser := flux.NewParser(clusterPath)
 
 	// Raw Secrets scanned directly from clusterPath. Errors here are non-fatal.
@@ -493,12 +476,7 @@ func resolveSecrets(ctx context.Context, clusterPath string, builder *kustomize.
 		if !ok {
 			continue
 		}
-		ss, err := flux.ParseSecretsFromBytes(output)
-		if err != nil {
-			stderr("Warning: could not parse Secrets from build output for %s: %v\n", dir, err)
-			continue
-		}
-		builtSecrets = append(builtSecrets, ss...)
+		builtSecrets = append(builtSecrets, flux.ParseSecretsFromBytes(output)...)
 	}
 
 	return mergeSources(builtSecrets, rawSecrets, func(s flux.Secret) string { return s.Metadata.Name })

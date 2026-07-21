@@ -29,8 +29,8 @@ func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespac
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache, quiet)
-	secrets := resolveSecrets(ctx, clusterPath, builder, buildCache, quiet)
+	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
+	secrets := resolveSecrets(ctx, clusterPath, builder, buildCache)
 
 	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, true, buildCache)
 	if err != nil {
@@ -38,7 +38,7 @@ func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespac
 	}
 
 	// Extract + dedup HelmReleases from the build output.
-	allHRs, _ := flux.ParseHelmReleasesFromBytes(output)
+	allHRs := flux.ParseHelmReleasesFromBytes(output)
 	seen := make(map[string]bool)
 	// In-place dedup reusing allHRs's backing array (allHRs[:0] aliases the
 	// same storage). Safe because we only append values already read from
@@ -85,10 +85,10 @@ func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespac
 	// stale literal namespaces from the source file that kustomize would
 	// overwrite during build — including them as-is causes false exact-match
 	// in ResolveValuesFrom when valuesFrom references the pre-transform namespace.
-	buildRepos, _ := flux.ParseHelmRepositoriesFromBytes(output)
-	buildOCI, _ := flux.ParseOCIRepositoriesFromBytes(output)
-	buildCMs, _ := flux.ParseConfigMapsFromBytes(output)
-	buildSecrets, _ := flux.ParseSecretsFromBytes(output)
+	buildRepos := flux.ParseHelmRepositoriesFromBytes(output)
+	buildOCI := flux.ParseOCIRepositoriesFromBytes(output)
+	buildCMs := flux.ParseConfigMapsFromBytes(output)
+	buildSecrets := flux.ParseSecretsFromBytes(output)
 	rawRepos, rawOCI, rawCMs, rawSecrets := resolveHelmInflationSources(ctx, clusterPath, repoRoot, quiet)
 
 	// Merge: build-output versions are authoritative. Raw-parsed versions

@@ -457,7 +457,7 @@ spec:
 		t.Fatalf("buildKSContent: %v", err)
 	}
 
-	helmReleases, _ := flux.ParseHelmReleasesFromBytes(output)
+	helmReleases := flux.ParseHelmReleasesFromBytes(output)
 	if len(helmReleases) != 1 {
 		t.Fatalf("expected 1 HelmRelease from shared base, got %d: %+v", len(helmReleases), helmReleases)
 	}
@@ -776,7 +776,7 @@ spec:
 	}
 
 	// The HR should be present in the build output.
-	helmReleases, _ := flux.ParseHelmReleasesFromBytes(output)
+	helmReleases := flux.ParseHelmReleasesFromBytes(output)
 	if len(helmReleases) == 0 {
 		t.Fatal("expected at least 1 HelmRelease from shared base, got 0")
 	}

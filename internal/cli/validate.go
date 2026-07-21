@@ -95,8 +95,8 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	configMaps := resolveConfigMaps(ctx, absClusterPath, builder, buildCache, false)
-	secrets := resolveSecrets(ctx, absClusterPath, builder, buildCache, false)
+	configMaps := resolveConfigMaps(ctx, absClusterPath, builder, buildCache)
+	secrets := resolveSecrets(ctx, absClusterPath, builder, buildCache)
 
 	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, absClusterPath, configMaps, secrets, false, buildCache)
 	if err != nil {

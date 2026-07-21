@@ -202,11 +202,7 @@ metadata:
 data:
   FOO: bar
 `
-	cms, err := ParseConfigMapsFromBytes([]byte(yaml))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
+	cms := ParseConfigMapsFromBytes([]byte(yaml))
 	if len(cms) != 2 {
 		t.Fatalf("expected 2 ConfigMaps, got %d", len(cms))
 	}
@@ -223,10 +219,7 @@ data:
 }
 
 func TestParseConfigMapsFromBytes_Empty(t *testing.T) {
-	cms, err := ParseConfigMapsFromBytes([]byte(""))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	cms := ParseConfigMapsFromBytes([]byte(""))
 	if len(cms) != 0 {
 		t.Errorf("expected 0 ConfigMaps, got %d", len(cms))
 	}
@@ -239,10 +232,7 @@ metadata:
   name: my-secret
 type: Opaque
 `
-	cms, err := ParseConfigMapsFromBytes([]byte(yaml))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	cms := ParseConfigMapsFromBytes([]byte(yaml))
 	if len(cms) != 0 {
 		t.Errorf("expected 0 ConfigMaps, got %d", len(cms))
 	}
@@ -308,10 +298,7 @@ data:
 
 	// Parse ConfigMaps directly (simulating what ParseConfigMapsFromBytes would do
 	// after kustomize build)
-	cms, err := ParseConfigMapsFromBytes([]byte(cmYAML))
-	if err != nil {
-		t.Fatalf("ParseConfigMapsFromBytes error: %v", err)
-	}
+	cms := ParseConfigMapsFromBytes([]byte(cmYAML))
 	if len(cms) != 1 {
 		t.Fatalf("expected 1 ConfigMap, got %d", len(cms))
 	}
