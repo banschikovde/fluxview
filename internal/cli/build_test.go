@@ -1022,7 +1022,7 @@ metadata:
   name: placeholder
 `)
 
-	helmRepos, ociRepos, _, _ := resolveHelmInflationSources(context.Background(), clusterPath, repoRoot)
+	helmRepos, ociRepos, _, _ := resolveHelmInflationSources(context.Background(), clusterPath, repoRoot, false)
 	if len(helmRepos) != 1 {
 		t.Fatalf("expected 1 HelmRepository from repoRoot fallback, got %d", len(helmRepos))
 	}
@@ -2527,5 +2527,33 @@ metadata:
 	// The rejected symlink should be reported.
 	if !strings.Contains(stderr, "Warning: could not read") || !strings.Contains(stderr, "leak.yaml") {
 		t.Errorf("expected a warning about the rejected symlink, got:\n%s", stderr)
+	}
+}
+
+// TestResolveHelmInflationSources_QuietSuppressesWarnings verifies that the
+// parse-failure warnings in resolveHelmInflationSources are gated on !quiet.
+// Uses a non-existent clusterPath to trigger a directory-walk error (the only
+// reliable error path — parseResourcesFromBytes always returns nil, so
+// malformed YAML is silently skipped rather than warned about).
+func TestResolveHelmInflationSources_QuietSuppressesWarnings(t *testing.T) {
+	// Non-existent clusterPath → walkYAMLFiles returns an error → ParseHelmRepositories
+	// wraps and returns it → resolveHelmInflationSources prints a warning.
+	repoRoot := t.TempDir()
+	clusterPath := filepath.Join(repoRoot, "does-not-exist")
+
+	// quiet=true → silent stderr.
+	stderrQuiet := captureStderr(func() {
+		resolveHelmInflationSources(context.Background(), clusterPath, repoRoot, true)
+	})
+	if stderrQuiet != "" {
+		t.Errorf("expected silent stderr in quiet mode, got:\n%s", stderrQuiet)
+	}
+
+	// quiet=false → at least one Warning: line in stderr.
+	stderrVerbose := captureStderr(func() {
+		resolveHelmInflationSources(context.Background(), clusterPath, repoRoot, false)
+	})
+	if !strings.Contains(stderrVerbose, "Warning:") {
+		t.Errorf("expected at least one warning in non-quiet mode, got:\n%s", stderrVerbose)
 	}
 }
