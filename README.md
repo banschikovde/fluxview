@@ -9,7 +9,7 @@ CLI tool for building, diffing, and validating Flux GitOps resources locally. Wo
 - **validate** — validate resources against CRD schemas (Flux CRDs + any custom)
 - Recursive Kustomization discovery following `spec.path` into shared bases (Flux controller behavior)
 - Source resolution with repoRoot fallback for HelmRepository/OCIRepository outside `--path`
-- postBuild variable substitution from ConfigMaps
+- postBuild variable substitution from ConfigMaps and Secrets (Secret values redacted with a placeholder)
 - Automatic secret redaction
 - Box-header output format (per-resource, sorted by kind/namespace/name)
 
@@ -89,11 +89,11 @@ kind: HelmRelease
 ### diff — compare changes
 
 ```bash
-# Diff everything (Kustomizations + HelmReleases)
-fluxview diff all --path clusters/prod/flux/ --branch-orig master
-
 # Diff all Kustomizations against master
 fluxview diff ks --path clusters/prod/flux/ --branch-orig master
+
+# Diff all HelmReleases against master
+fluxview diff hr --path clusters/prod/flux/ --branch-orig master
 
 # Diff only resources in flux-system namespace
 fluxview diff ks --path clusters/prod/flux/ --branch-orig master --namespace flux-system
