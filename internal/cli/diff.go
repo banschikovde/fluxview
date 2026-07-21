@@ -221,10 +221,11 @@ func buildKSOutputWithCache(ctx context.Context, clusterPath, repoRoot, name str
 	}
 
 	builder := kustomize.NewBuilder(repoRoot)
-	// Resolve ConfigMaps for postBuild substitution.
+	// Resolve ConfigMaps and Secrets for postBuild substitution.
 	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
+	secrets := resolveSecrets(ctx, clusterPath, builder, buildCache)
 
-	return buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, false, buildCache)
+	return buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, false, buildCache)
 }
 
 // buildKSOutputAtRevision builds the Kustomization output at a specific git revision.
@@ -273,13 +274,14 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 
 	builder := kustomize.NewBuilder(worktreePath)
 	buildCache := make(buildCache)
-	// Resolve ConfigMaps for postBuild substitution from the worktree.
+	// Resolve ConfigMaps and Secrets for postBuild substitution from the worktree.
 	configMaps := resolveConfigMaps(ctx, worktreeClusterPath, builder, buildCache)
+	secrets := resolveSecrets(ctx, worktreeClusterPath, builder, buildCache)
 
 	// Use worktreePath as repoRoot so that recursive discovery and postBuild
 	// substitution work identically to the current state. External GitRepository
 	// resolution is disabled for diff (too expensive — clones remote repos).
-	return buildKSContent(ctx, builder, kustomizations, worktreePath, worktreeClusterPath, configMaps, true, buildCache)
+	return buildKSContent(ctx, builder, kustomizations, worktreePath, worktreeClusterPath, configMaps, secrets, true, buildCache)
 }
 
 // buildKSContent is the shared build logic for Flux Kustomization resources,
@@ -287,8 +289,8 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 // follows Flux controller behavior: recursive discovery, postBuild substitution,
 // optional external GitRepository resolution) and then appends native kustomize
 // overlay outputs.
-func buildKSContent(ctx context.Context, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot, clusterPath string, configMaps []flux.ConfigMap, quiet bool, cache buildCache) ([]byte, error) {
-	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, configMaps, quiet, cache)
+func buildKSContent(ctx context.Context, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot, clusterPath string, configMaps []flux.ConfigMap, secrets []flux.Secret, quiet bool, cache buildCache) ([]byte, error) {
+	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, configMaps, secrets, quiet, cache)
 	if err != nil {
 		return nil, err
 	}
@@ -313,10 +315,10 @@ func buildKSContent(ctx context.Context, builder *kustomize.Builder, kustomizati
 }
 
 // buildAllKustomizations runs kustomize build for all Kustomization resources,
-// applies postBuild variable substitution from configMaps, and recursively
-// discovers and builds new Kustomization resources found in the output
-// (following Flux Kustomize controller behavior).
-func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot string, configMaps []flux.ConfigMap, quiet bool, cache buildCache) ([]byte, error) {
+// applies postBuild variable substitution from configMaps and secrets, and
+// recursively discovers and builds new Kustomization resources found in the
+// output (following Flux Kustomize controller behavior).
+func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot string, configMaps []flux.ConfigMap, secrets []flux.Secret, quiet bool, cache buildCache) ([]byte, error) {
 	// Track already-processed KS by "namespace/name" to prevent duplicates.
 	seen := make(map[string]bool)
 	var results []string
@@ -429,7 +431,7 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 			// before apply. This lets ${VAR} references inside the content added by
 			// patches/images/targetNamespace be resolved too.
 			if flux.SubstituteNeeded(ks) {
-				vars := flux.ResolveSubstituteVars(ks, configMaps)
+				vars := flux.ResolveSubstituteVars(ks, configMaps, secrets)
 				if len(vars) > 0 {
 					output = flux.ApplySubstitution(output, vars)
 				}
