@@ -30,8 +30,9 @@ func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespac
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
 	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
+	secrets := resolveSecrets(ctx, clusterPath, builder, buildCache)
 
-	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, true, buildCache)
+	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, true, buildCache)
 	if err != nil {
 		return nil, err
 	}
@@ -95,14 +96,14 @@ func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespac
 	helmRepos := mergeSources(buildRepos, rawRepos, func(r flux.HelmRepository) string { return r.Metadata.Name })
 	ociRepos := mergeSources(buildOCI, rawOCI, func(r flux.OCIRepository) string { return r.Metadata.Name })
 	inflationCMs := mergeSources(buildCMs, rawCMs, func(c flux.ConfigMap) string { return c.Metadata.Name })
-	secrets := mergeSources(buildSecrets, rawSecrets, func(s flux.Secret) string { return s.Metadata.Name })
+	inflationSecrets := mergeSources(buildSecrets, rawSecrets, func(s flux.Secret) string { return s.Metadata.Name })
 
 	inflater, err := helm.NewInflater()
 	if err != nil {
 		return nil, fmt.Errorf("initializing helm: %w", err)
 	}
 
-	return inflateAllHelmReleases(ctx, inflater, sorted, helmRepos, ociRepos, inflationCMs, secrets, quiet, repoRoot)
+	return inflateAllHelmReleases(ctx, inflater, sorted, helmRepos, ociRepos, inflationCMs, inflationSecrets, quiet, repoRoot)
 }
 
 // inflateHelmReleasesShared inflates all non-suspended HelmReleases and returns

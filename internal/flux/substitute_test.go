@@ -88,7 +88,7 @@ func TestResolveSubstituteVars(t *testing.T) {
 		},
 	}
 
-	vars := ResolveSubstituteVars(ks, cms)
+	vars := ResolveSubstituteVars(ks, cms, nil)
 	if len(vars) != 2 {
 		t.Fatalf("expected 2 vars, got %d", len(vars))
 	}
@@ -129,7 +129,7 @@ func TestResolveSubstituteVars_InlineOverrides(t *testing.T) {
 		},
 	}
 
-	vars := ResolveSubstituteVars(ks, cms)
+	vars := ResolveSubstituteVars(ks, cms, nil)
 	if vars["CLUSTER_NAME"] != "override" {
 		t.Errorf("CLUSTER_NAME = %q, want %q (inline should override)", vars["CLUSTER_NAME"], "override")
 	}
@@ -160,7 +160,7 @@ func TestResolveSubstituteVars_LooseFileFallback(t *testing.T) {
 		},
 	}
 
-	vars := ResolveSubstituteVars(ks, cms)
+	vars := ResolveSubstituteVars(ks, cms, nil)
 	if vars["CLUSTER_NAME"] != "test" {
 		t.Errorf("CLUSTER_NAME = %v, want test (loose-file fallback)", vars["CLUSTER_NAME"])
 	}
@@ -191,7 +191,7 @@ func TestResolveSubstituteVars_ExplicitNamespaceNoFallback(t *testing.T) {
 		},
 	}
 
-	vars := ResolveSubstituteVars(ks, cms)
+	vars := ResolveSubstituteVars(ks, cms, nil)
 	if vars["CLUSTER_NAME"] != "" {
 		t.Errorf("expected no match — explicit namespace should prevent fallback, got %v", vars["CLUSTER_NAME"])
 	}
@@ -218,7 +218,7 @@ func TestResolveSubstituteVars_NotFoundWarning(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stderr = w
 
-	vars := ResolveSubstituteVars(ks, nil)
+	vars := ResolveSubstituteVars(ks, nil, nil)
 
 	w.Close()
 	os.Stderr = old
@@ -260,7 +260,7 @@ func TestResolveSubstituteVars_OptionalNoWarning(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stderr = w
 
-	vars := ResolveSubstituteVars(ks, nil)
+	vars := ResolveSubstituteVars(ks, nil, nil)
 
 	w.Close()
 	os.Stderr = old
@@ -273,6 +273,190 @@ func TestResolveSubstituteVars_OptionalNoWarning(t *testing.T) {
 	}
 	if strings.Contains(stderrOutput, "Warning:") {
 		t.Errorf("expected NO warning for optional source, got:\n%s", stderrOutput)
+	}
+}
+
+// TestResolveSubstituteVars_SecretPlaceholder verifies that substituteFrom
+// with kind: Secret injects SecretHelmPlaceholder for every key in Data and
+// StringData. Real secret values must NEVER appear in vars — only key names
+// are read, and each key resolves to the placeholder so ${VAR} references
+// don't silently become YAML null.
+func TestResolveSubstituteVars_SecretPlaceholder(t *testing.T) {
+	ks := Kustomization{
+		Metadata: ObjectMeta{Name: "base", Namespace: "flux-system"},
+		Spec: KustomizationSpec{
+			PostBuild: &PostBuild{
+				SubstituteFrom: []interface{}{
+					map[string]interface{}{
+						"kind": "Secret",
+						"name": "cluster-secrets",
+					},
+				},
+			},
+		},
+	}
+
+	secrets := []Secret{
+		{
+			Metadata: ObjectMeta{Name: "cluster-secrets", Namespace: "flux-system"},
+			Data: map[string]string{
+				// base64("super-secret-cookie") — value must never reach vars.
+				"OAUTH2_PROXY_COOKIE_SECRET": "c3VwZXItc2VjcmV0LWNvb2tpZQ==",
+			},
+			StringData: map[string]string{
+				"API_TOKEN": "leaked-if-not-fixed",
+			},
+		},
+	}
+
+	vars := ResolveSubstituteVars(ks, nil, secrets)
+
+	if len(vars) != 2 {
+		t.Fatalf("expected 2 vars (one per key), got %d: %v", len(vars), vars)
+	}
+	if vars["OAUTH2_PROXY_COOKIE_SECRET"] != SecretHelmPlaceholder {
+		t.Errorf("OAUTH2_PROXY_COOKIE_SECRET = %q, want %q",
+			vars["OAUTH2_PROXY_COOKIE_SECRET"], SecretHelmPlaceholder)
+	}
+	if vars["API_TOKEN"] != SecretHelmPlaceholder {
+		t.Errorf("API_TOKEN = %q, want %q", vars["API_TOKEN"], SecretHelmPlaceholder)
+	}
+	// Real values must NEVER leak into vars.
+	for k, v := range vars {
+		if v == "super-secret-cookie" || v == "leaked-if-not-fixed" {
+			t.Errorf("real secret value leaked for key %q: %v", k, v)
+		}
+	}
+}
+
+// TestResolveSubstituteVars_SecretNotFoundWarning verifies a warning is
+// printed when a substituteFrom Secret is missing (mirrors ConfigMap behavior).
+func TestResolveSubstituteVars_SecretNotFoundWarning(t *testing.T) {
+	ks := Kustomization{
+		Metadata: ObjectMeta{Name: "base", Namespace: "flux-system"},
+		Spec: KustomizationSpec{
+			PostBuild: &PostBuild{
+				SubstituteFrom: []interface{}{
+					map[string]interface{}{
+						"kind": "Secret",
+						"name": "nonexistent",
+					},
+				},
+			},
+		},
+	}
+
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	vars := ResolveSubstituteVars(ks, nil, nil)
+
+	w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	stderrOutput := buf.String()
+
+	if len(vars) != 0 {
+		t.Errorf("expected empty vars for missing Secret, got %v", vars)
+	}
+	if !strings.Contains(stderrOutput, "Warning:") {
+		t.Errorf("expected warning in stderr, got:\n%s", stderrOutput)
+	}
+	if !strings.Contains(stderrOutput, "nonexistent") {
+		t.Errorf("expected Secret name in warning, got:\n%s", stderrOutput)
+	}
+}
+
+// TestResolveSubstituteVars_OptionalSecretNoWarning verifies that when
+// optional:true is set on a Secret substituteFrom entry and the Secret is
+// missing, no warning is printed.
+func TestResolveSubstituteVars_OptionalSecretNoWarning(t *testing.T) {
+	ks := Kustomization{
+		Metadata: ObjectMeta{Name: "base", Namespace: "flux-system"},
+		Spec: KustomizationSpec{
+			PostBuild: &PostBuild{
+				SubstituteFrom: []interface{}{
+					map[string]interface{}{
+						"kind":     "Secret",
+						"name":     "maybe-missing",
+						"optional": true,
+					},
+				},
+			},
+		},
+	}
+
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	vars := ResolveSubstituteVars(ks, nil, nil)
+
+	w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	stderrOutput := buf.String()
+
+	if len(vars) != 0 {
+		t.Errorf("expected empty vars for missing optional Secret, got %v", vars)
+	}
+	if strings.Contains(stderrOutput, "Warning:") {
+		t.Errorf("expected NO warning for optional Secret, got:\n%s", stderrOutput)
+	}
+}
+
+// TestResolveSubstituteVars_MixedConfigMapAndSecret verifies that ConfigMap
+// values resolve to real values while Secret keys resolve to placeholder,
+// when both are referenced in the same substituteFrom list. This reproduces
+// the original bug's repro scenario from issue #8.
+func TestResolveSubstituteVars_MixedConfigMapAndSecret(t *testing.T) {
+	ks := Kustomization{
+		Metadata: ObjectMeta{Name: "base", Namespace: "flux-system"},
+		Spec: KustomizationSpec{
+			PostBuild: &PostBuild{
+				SubstituteFrom: []interface{}{
+					map[string]interface{}{
+						"kind": "Secret",
+						"name": "cluster-secrets",
+					},
+					map[string]interface{}{
+						"kind": "ConfigMap",
+						"name": "cluster-settings",
+					},
+				},
+			},
+		},
+	}
+
+	configMaps := []ConfigMap{
+		{
+			Metadata: ObjectMeta{Name: "cluster-settings", Namespace: "flux-system"},
+			Data:     map[string]string{"DEX_OAUTH2_PROXY_SECRET": "from-cm"},
+		},
+	}
+	secrets := []Secret{
+		{
+			Metadata:   ObjectMeta{Name: "cluster-secrets", Namespace: "flux-system"},
+			StringData: map[string]string{"OAUTH2_PROXY_COOKIE_SECRET": "real-cookie"},
+		},
+	}
+
+	vars := ResolveSubstituteVars(ks, configMaps, secrets)
+
+	if vars["DEX_OAUTH2_PROXY_SECRET"] != "from-cm" {
+		t.Errorf("ConfigMap var = %q, want %q",
+			vars["DEX_OAUTH2_PROXY_SECRET"], "from-cm")
+	}
+	if vars["OAUTH2_PROXY_COOKIE_SECRET"] != SecretHelmPlaceholder {
+		t.Errorf("Secret var = %q, want %q",
+			vars["OAUTH2_PROXY_COOKIE_SECRET"], SecretHelmPlaceholder)
+	}
+	// Real secret value must never leak.
+	if vars["OAUTH2_PROXY_COOKIE_SECRET"] == "real-cookie" {
+		t.Error("real secret value leaked into vars")
 	}
 }
 

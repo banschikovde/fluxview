@@ -118,6 +118,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
 	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
+	secrets := resolveSecrets(ctx, clusterPath, builder, buildCache)
 
 	kustomizations, err = flux.TopologicalSort(kustomizations)
 	if err != nil {
@@ -131,7 +132,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		}
 	}
 
-	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, false, buildCache)
+	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, false, buildCache)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}
@@ -454,6 +455,40 @@ func resolveConfigMaps(ctx context.Context, clusterPath string, builder *kustomi
 	}
 
 	return mergeSources(builtCMs, rawCMs, func(c flux.ConfigMap) string { return c.Metadata.Name })
+}
+
+// --- Secrets ---
+
+// resolveSecrets resolves Secrets used for postBuild.substituteFrom with
+// kind: Secret. Mirrors resolveConfigMaps: raw Secrets scanned directly from
+// clusterPath are merged with Secrets produced by kustomize builds (which may
+// apply namespace transformation). Only key names matter for substitution —
+// resolveSecrets never returns real secret values to the substitution path.
+func resolveSecrets(ctx context.Context, clusterPath string, builder *kustomize.Builder, cache buildCache) []flux.Secret {
+	parser := flux.NewParser(clusterPath)
+
+	// Raw Secrets scanned directly from clusterPath. Errors here are non-fatal.
+	rawSecrets, _ := parser.ParseSecrets(ctx)
+
+	kustomizeDirs, err := flux.DiscoverKustomizeDirs(ctx, clusterPath)
+	if err != nil {
+		return rawSecrets
+	}
+
+	var builtSecrets []flux.Secret
+	for _, dir := range kustomizeDirs {
+		output, ok := buildDirCached(ctx, builder, dir, cache)
+		if !ok {
+			continue
+		}
+		ss, err := flux.ParseSecretsFromBytes(output)
+		if err != nil {
+			continue
+		}
+		builtSecrets = append(builtSecrets, ss...)
+	}
+
+	return mergeSources(builtSecrets, rawSecrets, func(s flux.Secret) string { return s.Metadata.Name })
 }
 
 // --- Utilities ---

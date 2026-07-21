@@ -22,8 +22,16 @@ type substituteFromEntry struct {
 // ResolveSubstituteVars resolves all substitution variables for a Kustomization.
 // It collects variables from:
 // 1. spec.postBuild.substitute (inline vars)
-// 2. spec.postBuild.substituteFrom (ConfigMap references, resolved from parsed ConfigMaps)
-func ResolveSubstituteVars(ks Kustomization, configMaps []ConfigMap) map[string]string {
+// 2. spec.postBuild.substituteFrom:
+//   - ConfigMap: real values from parsed ConfigMap.Data
+//   - Secret: SecretHelmPlaceholder injected for every key in Data/StringData
+//     (real secret values are never read locally; only key names are used).
+//
+// The Secret placeholder mirrors valuesFrom handling (mergeSecretPlaceholder /
+// redactRecursive): ${VAR} resolves to a non-empty YAML-safe string instead of
+// being dropped to "" (which YAML parses as null and breaks chart templates
+// that expect a string).
+func ResolveSubstituteVars(ks Kustomization, configMaps []ConfigMap, secrets []Secret) map[string]string {
 	vars := make(map[string]string)
 
 	if ks.Spec.PostBuild == nil || ks.Spec.PostBuild.DisableSubstitute {
@@ -57,9 +65,25 @@ func ResolveSubstituteVars(ks Kustomization, configMaps []ConfigMap) map[string]
 				vars[k] = v
 			}
 		case "secret":
-			// We cannot read actual secret values; use placeholders.
-			// This is consistent with Flux behavior where secrets are available
-			// at runtime but we don't have access to them locally.
+			// Real secret values aren't available locally, but the key names
+			// are (from the parsed Secret resource). Inject SecretHelmPlaceholder
+			// for each key so unresolved ${VAR} references sourced from this
+			// Secret resolve to a non-empty YAML-safe string instead of being
+			// silently dropped to null.
+			secret, ok := findSecretCandidate(secrets, entry.Name, ns, allowFallback)
+			if !ok {
+				if !entry.Optional {
+					fmt.Fprintf(os.Stderr, "Warning: substituteFrom Secret %s/%s not found (referenced by Kustomization %s/%s)\n",
+						ns, entry.Name, ks.Metadata.Namespace, ks.Metadata.Name)
+				}
+				continue
+			}
+			for k := range secret.Data {
+				vars[k] = SecretHelmPlaceholder
+			}
+			for k := range secret.StringData {
+				vars[k] = SecretHelmPlaceholder
+			}
 		}
 	}
 

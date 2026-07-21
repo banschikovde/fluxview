@@ -335,7 +335,7 @@ data:
 	}
 
 	// Resolve substitution variables
-	vars := ResolveSubstituteVars(ks, cms)
+	vars := ResolveSubstituteVars(ks, cms, nil)
 	if len(vars) != 2 {
 		t.Fatalf("expected 2 vars, got %d", len(vars))
 	}

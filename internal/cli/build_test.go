@@ -452,7 +452,7 @@ spec:
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, nil, true, buildCache)
+	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, nil, nil, true, buildCache)
 	if err != nil {
 		t.Fatalf("buildKSContent: %v", err)
 	}
@@ -524,7 +524,7 @@ spec:
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, true, buildCache)
+	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, nil, true, buildCache)
 	if err != nil {
 		t.Fatalf("buildAllKustomizations: %v", err)
 	}
@@ -610,7 +610,7 @@ spec:
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, true, buildCache)
+	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, nil, true, buildCache)
 	if err != nil {
 		t.Fatalf("buildAllKustomizations: %v", err)
 	}
@@ -678,7 +678,7 @@ spec:
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, true, buildCache)
+	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, nil, true, buildCache)
 	if err != nil {
 		t.Fatalf("buildAllKustomizations: %v", err)
 	}
@@ -770,7 +770,7 @@ spec:
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, nil, true, buildCache)
+	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, nil, nil, true, buildCache)
 	if err != nil {
 		t.Fatalf("buildKSContent: %v", err)
 	}
@@ -1955,7 +1955,7 @@ spec:
 	cache := make(buildCache)
 
 	stderr := captureStderr(func() {
-		_, _ = buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, true, cache)
+		_, _ = buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, nil, true, cache)
 	})
 
 	// Count "Warning:" lines — should be exactly 1.
