@@ -1081,6 +1081,49 @@ func TestInflateHelmReleasesShared_WarnOnMissingSource(t *testing.T) {
 	}
 }
 
+// TestInflateHelmReleasesShared_QuietSuppressesWarnings verifies that when
+// quiet=true (the diff comparison side), all diagnostics — progress messages
+// AND warnings — are suppressed. This prevents the diff command from
+// duplicating every warning once per side.
+func TestInflateHelmReleasesShared_QuietSuppressesWarnings(t *testing.T) {
+	hr := []flux.HelmRelease{
+		{
+			Metadata: flux.ObjectMeta{Name: "podinfo", Namespace: "apps"},
+			Spec: flux.HelmReleaseSpec{
+				Chart: flux.HelmReleaseChart{
+					Spec: flux.HelmReleaseChartSpec{
+						Chart: "podinfo",
+						SourceRef: struct {
+							Kind      string `yaml:"kind"`
+							Name      string `yaml:"name"`
+							Namespace string `yaml:"namespace,omitempty"`
+						}{
+							Kind: "HelmRepository",
+							Name: "missing-repo",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	inflater, err := helm.NewInflater()
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+
+	stderr := captureStderr(func() {
+		outputs := inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, true, "")
+		if len(outputs) != 0 {
+			t.Errorf("expected 0 outputs (source unresolved), got %d", len(outputs))
+		}
+	})
+
+	if stderr != "" {
+		t.Errorf("expected silent stderr in quiet mode, got:\n%s", stderr)
+	}
+}
+
 // TestInflateHelmReleasesShared_LocalSourceChart verifies that a HelmRelease
 // whose chart is sourced from a GitRepository (chart.spec.chart is a path within
 // the local checkout) renders from disk without any network access.
@@ -1386,7 +1429,7 @@ func TestInflateHelmReleasesShared_BucketUnsupported(t *testing.T) {
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, true, repoRoot)
+		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, false, repoRoot)
 	})
 
 	if len(outputs) != 0 {
@@ -1431,7 +1474,7 @@ func TestInflateHelmReleasesShared_LocalSourceChartNotADirectory(t *testing.T) {
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, true, repoRoot)
+		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, false, repoRoot)
 	})
 
 	if len(outputs) != 0 {
@@ -1474,7 +1517,7 @@ func TestInflateHelmReleasesShared_LocalSourceChartMissing(t *testing.T) {
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, true, repoRoot)
+		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, false, repoRoot)
 	})
 
 	if len(outputs) != 0 {

@@ -109,6 +109,16 @@ func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespac
 // inflateHelmReleasesShared inflates all non-suspended HelmReleases and returns
 // a slice of YAML outputs. Shared by build and diff commands.
 func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository, configMaps []flux.ConfigMap, secrets []flux.Secret, skipCRDs bool, quiet bool, repoRoot string) [][]byte {
+	// stderr gates all diagnostics (progress + warnings) on !quiet. The diff
+	// command runs inflation twice (current state + comparison revision);
+	// without this gate the comparison side would duplicate every warning
+	// already emitted by the current-state side.
+	stderr := func(format string, args ...any) {
+		if !quiet {
+			fmt.Fprintf(os.Stderr, format, args...)
+		}
+	}
+
 	var outputs [][]byte
 	for _, hr := range helmReleases {
 		if err := CheckInterrupted(ctx); err != nil {
@@ -116,7 +126,7 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 		}
 
 		if hr.Spec.Suspend {
-			fmt.Fprintf(os.Stderr, "Skipping suspended HelmRelease %s/%s\n", hr.Metadata.Namespace, hr.Metadata.Name)
+			stderr("Skipping suspended HelmRelease %s/%s\n", hr.Metadata.Namespace, hr.Metadata.Name)
 			continue
 		}
 
@@ -128,7 +138,7 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 		if hr.Spec.ChartRef != nil && hr.Spec.ChartRef.Kind == flux.KindOCIRepository {
 			ociRef, ociVersion := resolveOCIRepoURL(hr, ociRepos)
 			if ociRef == "" {
-				fmt.Fprintf(os.Stderr, "Warning: could not resolve OCIRepository source for HelmRelease %s/%s (chartRef %s/%s) — not found, skipping\n",
+				stderr("Warning: could not resolve OCIRepository source for HelmRelease %s/%s (chartRef %s/%s) — not found, skipping\n",
 					hr.Metadata.Namespace, hr.Metadata.Name, hr.Spec.ChartRef.Namespace, hr.Spec.ChartRef.Name)
 				continue
 			}
@@ -136,7 +146,7 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 			hr.Spec.Chart.Spec.Version = ociVersion
 		} else {
 			if hr.Spec.Chart.Spec.Chart == "" {
-				fmt.Fprintf(os.Stderr, "Warning: HelmRelease %s/%s has no chart name, skipping\n",
+				stderr("Warning: HelmRelease %s/%s has no chart name, skipping\n",
 					hr.Metadata.Namespace, hr.Metadata.Name)
 				continue
 			}
@@ -148,13 +158,13 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 			if sourceKind := hr.Spec.Chart.Spec.SourceRef.Kind; sourceKind == flux.KindGitRepository {
 				resolved, err := securejoin.SecureJoin(repoRoot, hr.Spec.Chart.Spec.Chart)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: cannot safely resolve chart path %s for HelmRelease %s/%s: %v, skipping\n",
+					stderr("Warning: cannot safely resolve chart path %s for HelmRelease %s/%s: %v, skipping\n",
 						hr.Spec.Chart.Spec.Chart, hr.Metadata.Namespace, hr.Metadata.Name, err)
 					continue
 				}
 				info, err := os.Stat(resolved)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: chart %q for HelmRelease %s/%s not found locally (%s source) — skipping\n",
+					stderr("Warning: chart %q for HelmRelease %s/%s not found locally (%s source) — skipping\n",
 						hr.Spec.Chart.Spec.Chart, hr.Metadata.Namespace, hr.Metadata.Name, sourceKind)
 					continue
 				}
@@ -165,7 +175,7 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 				lower := strings.ToLower(resolved)
 				isArchive := strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".tar.gz")
 				if !info.IsDir() && !isArchive {
-					fmt.Fprintf(os.Stderr, "Warning: chart path %q for HelmRelease %s/%s is not a chart directory or .tgz archive (%s source) — skipping\n",
+					stderr("Warning: chart path %q for HelmRelease %s/%s is not a chart directory or .tgz archive (%s source) — skipping\n",
 						hr.Spec.Chart.Spec.Chart, hr.Metadata.Namespace, hr.Metadata.Name, sourceKind)
 					continue
 				}
@@ -175,27 +185,25 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 				// Bucket content lives in object storage, never in the local git
 				// checkout, so it cannot be resolved offline. Emit a dedicated,
 				// explicit warning (see README limitations).
-				fmt.Fprintf(os.Stderr, "Warning: Bucket-sourced chart for HelmRelease %s/%s (chart %q) is not supported, skipping\n",
+				stderr("Warning: Bucket-sourced chart for HelmRelease %s/%s (chart %q) is not supported, skipping\n",
 					hr.Metadata.Namespace, hr.Metadata.Name, hr.Spec.Chart.Spec.Chart)
 				continue
 			} else {
 				repoURL, username, password = resolveHelmRepoURL(hr, helmRepos, secrets)
 				if repoURL == "" {
-					fmt.Fprintf(os.Stderr, "Warning: could not resolve source for HelmRelease %s/%s (chart %q) — HelmRepository not found, skipping\n",
+					stderr("Warning: could not resolve source for HelmRelease %s/%s (chart %q) — HelmRepository not found, skipping\n",
 						hr.Metadata.Namespace, hr.Metadata.Name, hr.Spec.Chart.Spec.Chart)
 					continue
 				}
 			}
 		}
 
-		if !quiet {
-			fmt.Fprintf(os.Stderr, "Inflating HelmRelease %s/%s\n",
-				hr.Metadata.Namespace, hr.Metadata.Name)
-		}
+		stderr("Inflating HelmRelease %s/%s\n",
+			hr.Metadata.Namespace, hr.Metadata.Name)
 
 		output, err := inflater.InflateHelmRelease(ctx, hr, repoURL, username, password, configMaps, secrets, repoRoot)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to inflate HelmRelease %s/%s: %v\n",
+			stderr("Warning: failed to inflate HelmRelease %s/%s: %v\n",
 				hr.Metadata.Namespace, hr.Metadata.Name, err)
 			continue
 		}
@@ -233,7 +241,7 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 		if filled, err := applyHelmNamespace(output, hrNamespace); err == nil {
 			output = filled
 		} else {
-			fmt.Fprintf(os.Stderr, "Warning: failed to fill namespace %q in HelmRelease %s/%s output: %v\n",
+			stderr("Warning: failed to fill namespace %q in HelmRelease %s/%s output: %v\n",
 				hrNamespace, hr.Metadata.Namespace, hr.Metadata.Name, err)
 		}
 
