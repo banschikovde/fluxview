@@ -1067,7 +1067,7 @@ func TestInflateHelmReleasesShared_WarnOnMissingSource(t *testing.T) {
 	}
 
 	stderr := captureStderr(func() {
-		outputs := inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, false, "")
+		outputs, _ := inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{})
 		if len(outputs) != 0 {
 			t.Errorf("expected 0 outputs (source unresolved), got %d", len(outputs))
 		}
@@ -1113,7 +1113,7 @@ func TestInflateHelmReleasesShared_QuietSuppressesWarnings(t *testing.T) {
 	}
 
 	stderr := captureStderr(func() {
-		outputs := inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, true, "")
+		outputs, _ := inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{quiet: true})
 		if len(outputs) != 0 {
 			t.Errorf("expected 0 outputs (source unresolved), got %d", len(outputs))
 		}
@@ -1171,7 +1171,7 @@ spec:
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, true, repoRoot)
+		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{quiet: true, repoRoot: repoRoot})
 	})
 
 	if len(outputs) != 1 {
@@ -1247,7 +1247,7 @@ spec:
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, true, repoRoot)
+		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{quiet: true, repoRoot: repoRoot})
 	})
 	if len(outputs) != 1 {
 		t.Fatalf("expected 1 rendered output, got %d (stderr:\n%s)", len(outputs), stderr)
@@ -1360,7 +1360,7 @@ spec:
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, true, repoRoot)
+		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{quiet: true, repoRoot: repoRoot})
 	})
 	if len(outputs) != 1 {
 		t.Fatalf("expected 1 rendered output, got %d (stderr:\n%s)", len(outputs), stderr)
@@ -1429,7 +1429,7 @@ func TestInflateHelmReleasesShared_BucketUnsupported(t *testing.T) {
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, false, repoRoot)
+		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{repoRoot: repoRoot})
 	})
 
 	if len(outputs) != 0 {
@@ -1474,7 +1474,7 @@ func TestInflateHelmReleasesShared_LocalSourceChartNotADirectory(t *testing.T) {
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, false, repoRoot)
+		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{repoRoot: repoRoot})
 	})
 
 	if len(outputs) != 0 {
@@ -1517,7 +1517,7 @@ func TestInflateHelmReleasesShared_LocalSourceChartMissing(t *testing.T) {
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, false, false, repoRoot)
+		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{repoRoot: repoRoot})
 	})
 
 	if len(outputs) != 0 {

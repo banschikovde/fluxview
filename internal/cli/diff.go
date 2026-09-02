@@ -160,7 +160,11 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	if !hasDirectKS {
 		return NewExitError(fmt.Errorf("no Kustomization files found in %s", clusterPath), ExitCodeError)
 	}
-	currentOutput, err := buildHRInflation(ctx, clusterPath, repoRoot, name, flags.Namespace, false)
+	// Diff mode is strict: a HelmRelease that fails to inflate (e.g. chart
+	// download impossible) on either side must fail the diff — otherwise the
+	// side silently missing its resources would show up as a false
+	// "added" (green) / "removed" (red) diff.
+	currentOutput, err := buildHRInflation(ctx, clusterPath, repoRoot, name, flags.Namespace, false, true)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building current state: %w", err), ExitCodeError)
 	}
@@ -181,9 +185,18 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	if _, err := os.Stat(worktreeClusterPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Warning: path %s does not exist at revision %s\n", relPath, compareCommit)
 	} else {
-		compareOutput, err := buildHRInflation(ctx, worktreeClusterPath, worktreePath, name, flags.Namespace, true)
+		compareOutput, err := buildHRInflation(ctx, worktreeClusterPath, worktreePath, name, flags.Namespace, true, true)
 		if err != nil {
-			return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, err), ExitCodeError)
+			// A HelmRelease selected by name may legitimately not exist at the
+			// comparison revision (added in this branch) — that's a valid
+			// "added" diff, not an error. Any other failure means this side's
+			// state could not be built; the diff would be incomplete and
+			// misleading, so fail instead.
+			if errors.Is(err, errHRNotFound) {
+				compareOutput = nil
+			} else {
+				return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, err), ExitCodeError)
+			}
 		}
 		return computeAndOutputDiff(compareOutput, currentOutput, flags)
 	}
@@ -711,8 +724,11 @@ func readYAMLFilesRecursive(ctx context.Context, dir, repoRoot string) ([]byte, 
 }
 
 // inflateAllHelmReleases inflates all HelmRelease resources and returns combined YAML.
-func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository, configMaps []flux.ConfigMap, secrets []flux.Secret, quiet bool, repoRoot string) ([]byte, error) {
-	outputs := inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets, false, quiet, repoRoot)
+func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository, configMaps []flux.ConfigMap, secrets []flux.Secret, opts inflateOptions) ([]byte, error) {
+	outputs, err := inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets, opts)
+	if err != nil {
+		return nil, err
+	}
 	if len(outputs) == 0 {
 		return nil, nil
 	}

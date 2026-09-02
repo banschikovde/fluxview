@@ -108,6 +108,8 @@ fluxview diff hr podinfo --path clusters/prod/flux/
 
 Diff output is per-resource — each changed resource gets its own header followed by a line-level diff. In a TTY, changes are color-coded: green for added, red for removed. In pipes/CI, `+`/`-` prefixes are used.
 
+`diff hr` is strict: if a HelmRelease cannot be built on either side (chart download failure, unresolvable chart source), the diff fails with exit code 2 instead of producing a partial comparison — a HelmRelease silently missing from one side would otherwise show up as a false "added"/"removed" diff. Deterministic skips (suspended releases, unsupported Bucket sources) stay warnings since they affect both sides equally.
+
 ```
 ---------------------------------------
  VMCluster: victoria-metrics/vmcluster
@@ -196,7 +198,7 @@ Apache-2.0
 
 ## Limitations
 
-These are intentional non-goals (not planned unless requested). In all cases the affected HelmReleases are skipped with a warning rather than rendered incorrectly.
+These are intentional non-goals (not planned unless requested). In `build` the affected HelmReleases are skipped with a warning rather than rendered incorrectly; in `diff` they are skipped on both sides (warning), which never fails the strict check.
 
 - **Bucket-sourced Helm charts are not supported** — `HelmRelease.spec.chart.spec.sourceRef.kind: Bucket` is not resolved (unlike `GitRepository`, which works since the chart already lives in the local checkout). Bucket content lives in S3-compatible object storage and would require fetching it separately (endpoint/credentials from `spec.secretRef`) — out of scope for now.
 - **`HelmRelease.spec.chartRef.kind: HelmChart` is not supported** — only `chartRef.kind: OCIRepository` is resolved. Referencing a standalone `HelmChart` resource (used to share one chart artifact across multiple HelmReleases) is a rare, advanced pattern — HelmReleases using it are skipped with a warning ("has no chart name").
