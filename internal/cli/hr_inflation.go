@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -21,7 +22,11 @@ import (
 //
 // namespace filters the HelmRelease list BEFORE inflation — when set, only
 // matching HRs are inflated, avoiding unnecessary chart downloads.
-func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespace string, quiet bool) ([]byte, error) {
+//
+// strict (diff mode) turns skip-worthy inflation failures into a returned
+// error instead of a warning + skip, so an unbuildable state never produces
+// a misleading partial diff.
+func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespace string, quiet, strict bool) ([]byte, error) {
 	kustomizations, err := flux.NewParser(clusterPath).ParseKustomizations(ctx)
 	if err != nil {
 		return nil, nil // no Flux KS — valid for diff
@@ -57,7 +62,7 @@ func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespac
 	if name != "" {
 		helmReleases = filterHelmReleases(helmReleases, name)
 		if len(helmReleases) == 0 {
-			return nil, fmt.Errorf("HelmRelease %q not found", name)
+			return nil, fmt.Errorf("%w: %q", errHRNotFound, name)
 		}
 	}
 
@@ -103,26 +108,72 @@ func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespac
 		return nil, fmt.Errorf("initializing helm: %w", err)
 	}
 
-	return inflateAllHelmReleases(ctx, inflater, sorted, helmRepos, ociRepos, inflationCMs, inflationSecrets, quiet, repoRoot)
+	return inflateAllHelmReleases(ctx, inflater, sorted, helmRepos, ociRepos, inflationCMs, inflationSecrets, inflateOptions{
+		quiet:    quiet,
+		strict:   strict,
+		repoRoot: repoRoot,
+	})
+}
+
+// errHRNotFound signals that a HelmRelease selected by name was not found.
+// A sentinel so the diff comparison side can distinguish "does not exist at
+// this revision" (valid added/removed diff) from build failures.
+var errHRNotFound = errors.New("helmrelease not found")
+
+// inflateOptions controls how HelmReleases are inflated.
+type inflateOptions struct {
+	// skipCRDs drops CustomResourceDefinition documents from the output.
+	skipCRDs bool
+	// quiet suppresses stderr diagnostics (progress + warnings). Used by the
+	// diff command's comparison side so diagnostics are not printed twice.
+	quiet bool
+	// strict turns skip-worthy failures (chart download/render error,
+	// unresolvable chart source) into a returned error instead of a
+	// warning + skip. Used by the diff command: a HelmRelease silently
+	// missing from one diff side only surfaces as a false "added"/"removed"
+	// diff. Deterministic skips that are documented limitations (suspend,
+	// Bucket source, chartRef HelmChart) stay warnings even in strict mode —
+	// they affect both diff sides equally.
+	strict bool
+	// repoRoot resolves GitRepository chart paths and postRenderer patches.
+	repoRoot string
 }
 
 // inflateHelmReleasesShared inflates all non-suspended HelmReleases and returns
 // a slice of YAML outputs. Shared by build and diff commands.
-func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository, configMaps []flux.ConfigMap, secrets []flux.Secret, skipCRDs bool, quiet bool, repoRoot string) [][]byte {
+//
+// In strict mode, skip-worthy failures are collected and returned as an error
+// (partial output is discarded): a diff built over a state that could not be
+// fully rendered would report the missing resources as added/removed.
+func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository, configMaps []flux.ConfigMap, secrets []flux.Secret, opts inflateOptions) ([][]byte, error) {
 	// stderr gates all diagnostics (progress + warnings) on !quiet. The diff
 	// command runs inflation twice (current state + comparison revision);
 	// without this gate the comparison side would duplicate every warning
 	// already emitted by the current-state side.
 	stderr := func(format string, args ...any) {
-		if !quiet {
+		if !opts.quiet {
 			fmt.Fprintf(os.Stderr, format, args...)
 		}
+	}
+
+	// fail records a skip-worthy failure. In strict mode it is collected and
+	// returned as an error at the end (the loop continues so all failures are
+	// reported at once); otherwise it degrades to the historical behavior:
+	// warning + skip.
+	var failures []string
+	fail := func(hr flux.HelmRelease, reason string) {
+		if opts.strict {
+			failures = append(failures, fmt.Sprintf("%s/%s: %s", hr.Metadata.Namespace, hr.Metadata.Name, reason))
+			return
+		}
+		stderr("Warning: %s for HelmRelease %s/%s — skipping\n",
+			reason, hr.Metadata.Namespace, hr.Metadata.Name)
 	}
 
 	var outputs [][]byte
 	for _, hr := range helmReleases {
 		if err := CheckInterrupted(ctx); err != nil {
-			return nil
+			return nil, err
 		}
 
 		if hr.Spec.Suspend {
@@ -138,14 +189,16 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 		if hr.Spec.ChartRef != nil && hr.Spec.ChartRef.Kind == flux.KindOCIRepository {
 			ociRef, ociVersion := resolveOCIRepoURL(hr, ociRepos)
 			if ociRef == "" {
-				stderr("Warning: could not resolve OCIRepository source for HelmRelease %s/%s (chartRef %s/%s) — not found, skipping\n",
-					hr.Metadata.Namespace, hr.Metadata.Name, hr.Spec.ChartRef.Namespace, hr.Spec.ChartRef.Name)
+				fail(hr, fmt.Sprintf("could not resolve OCIRepository source (chartRef %s/%s) — not found",
+					hr.Spec.ChartRef.Namespace, hr.Spec.ChartRef.Name))
 				continue
 			}
 			hr.Spec.Chart.Spec.Chart = ociRef
 			hr.Spec.Chart.Spec.Version = ociVersion
 		} else {
 			if hr.Spec.Chart.Spec.Chart == "" {
+				// Includes chartRef.kind=HelmChart (documented limitation) —
+				// deterministic skip, warning even in strict mode.
 				stderr("Warning: HelmRelease %s/%s has no chart name, skipping\n",
 					hr.Metadata.Namespace, hr.Metadata.Name)
 				continue
@@ -156,16 +209,16 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 			// (Bucket sources are not supported — their content lives in object
 			// storage, never in the git checkout; see README limitations.)
 			if sourceKind := hr.Spec.Chart.Spec.SourceRef.Kind; sourceKind == flux.KindGitRepository {
-				resolved, err := securejoin.SecureJoin(repoRoot, hr.Spec.Chart.Spec.Chart)
+				resolved, err := securejoin.SecureJoin(opts.repoRoot, hr.Spec.Chart.Spec.Chart)
 				if err != nil {
-					stderr("Warning: cannot safely resolve chart path %s for HelmRelease %s/%s: %v, skipping\n",
-						hr.Spec.Chart.Spec.Chart, hr.Metadata.Namespace, hr.Metadata.Name, err)
+					fail(hr, fmt.Sprintf("cannot safely resolve chart path %s: %v",
+						hr.Spec.Chart.Spec.Chart, err))
 					continue
 				}
 				info, err := os.Stat(resolved)
 				if err != nil {
-					stderr("Warning: chart %q for HelmRelease %s/%s not found locally (%s source) — skipping\n",
-						hr.Spec.Chart.Spec.Chart, hr.Metadata.Namespace, hr.Metadata.Name, sourceKind)
+					fail(hr, fmt.Sprintf("chart %q not found locally (%s source)",
+						hr.Spec.Chart.Spec.Chart, sourceKind))
 					continue
 				}
 				// A chart source is either a directory (Chart.yaml inside) or a
@@ -175,8 +228,8 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 				lower := strings.ToLower(resolved)
 				isArchive := strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".tar.gz")
 				if !info.IsDir() && !isArchive {
-					stderr("Warning: chart path %q for HelmRelease %s/%s is not a chart directory or .tgz archive (%s source) — skipping\n",
-						hr.Spec.Chart.Spec.Chart, hr.Metadata.Namespace, hr.Metadata.Name, sourceKind)
+					fail(hr, fmt.Sprintf("chart path %q is not a chart directory or .tgz archive (%s source)",
+						hr.Spec.Chart.Spec.Chart, sourceKind))
 					continue
 				}
 				hr.Spec.Chart.Spec.Chart = resolved
@@ -184,15 +237,16 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 			} else if hr.Spec.Chart.Spec.SourceRef.Kind == flux.KindBucket {
 				// Bucket content lives in object storage, never in the local git
 				// checkout, so it cannot be resolved offline. Emit a dedicated,
-				// explicit warning (see README limitations).
+				// explicit warning (see README limitations). Deterministic skip —
+				// warning even in strict mode.
 				stderr("Warning: Bucket-sourced chart for HelmRelease %s/%s (chart %q) is not supported, skipping\n",
 					hr.Metadata.Namespace, hr.Metadata.Name, hr.Spec.Chart.Spec.Chart)
 				continue
 			} else {
 				repoURL, username, password = resolveHelmRepoURL(hr, helmRepos, secrets)
 				if repoURL == "" {
-					stderr("Warning: could not resolve source for HelmRelease %s/%s (chart %q) — HelmRepository not found, skipping\n",
-						hr.Metadata.Namespace, hr.Metadata.Name, hr.Spec.Chart.Spec.Chart)
+					fail(hr, fmt.Sprintf("could not resolve source (chart %q) — HelmRepository not found",
+						hr.Spec.Chart.Spec.Chart))
 					continue
 				}
 			}
@@ -201,10 +255,9 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 		stderr("Inflating HelmRelease %s/%s\n",
 			hr.Metadata.Namespace, hr.Metadata.Name)
 
-		output, err := inflater.InflateHelmRelease(ctx, hr, repoURL, username, password, configMaps, secrets, repoRoot)
+		output, err := inflater.InflateHelmRelease(ctx, hr, repoURL, username, password, configMaps, secrets, opts.repoRoot)
 		if err != nil {
-			stderr("Warning: failed to inflate HelmRelease %s/%s: %v\n",
-				hr.Metadata.Namespace, hr.Metadata.Name, err)
+			fail(hr, fmt.Sprintf("failed to inflate: %v", err))
 			continue
 		}
 
@@ -245,13 +298,22 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 				hrNamespace, hr.Metadata.Namespace, hr.Metadata.Name, err)
 		}
 
-		if skipCRDs {
+		if opts.skipCRDs {
 			output = filterCRDDocs(output)
 		}
 
 		outputs = append(outputs, output)
 	}
-	return outputs
+
+	if len(failures) > 0 {
+		if len(failures) == 1 {
+			return nil, fmt.Errorf("HelmRelease %s — diff would be incomplete", failures[0])
+		}
+		return nil, fmt.Errorf("%d HelmReleases could not be inflated — diff would be incomplete:\n  %s",
+			len(failures), strings.Join(failures, "\n  "))
+	}
+
+	return outputs, nil
 }
 
 // applyHelmNamespace fills metadata.namespace on resources that lack one,
