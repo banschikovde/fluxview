@@ -77,6 +77,8 @@ docker run --rm -v $(pwd):/repo -v /path/to/crds:/crds \
 
 Both `build ks` and `build hr` require Flux Kustomization files in `--path` (same contract).
 
+Resource type accepts the full name as well as the short alias: `kustomization` = `ks`, `helmrelease` = `hr`.
+
 ```bash
 # Build all Kustomizations (kustomize output: Flux CRs, HelmRelease, OCIRepository, etc.)
 fluxview build ks --path clusters/prod/flux/
@@ -106,6 +108,8 @@ kind: HelmRelease
 ```
 
 ### diff — compare changes
+
+Resource types: `ks`/`kustomization`, `hr`/`helmrelease` — same aliases as `build`.
 
 ```bash
 # Diff all Kustomizations against master

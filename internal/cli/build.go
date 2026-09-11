@@ -101,7 +101,7 @@ func runBuild(ctx context.Context, args []string, flags *BuildFlags) error {
 	case "hr", "helmrelease":
 		return runBuildHR(ctx, absClusterPath, repoRoot, name, flags)
 	default:
-		return NewExitError(fmt.Errorf("unsupported resource type %q (use 'ks' or 'hr')", resourceType), ExitCodeError)
+		return NewExitError(fmt.Errorf("unsupported resource type %q (use 'ks'/'kustomization' or 'hr'/'helmrelease')", resourceType), ExitCodeError)
 	}
 }
 
