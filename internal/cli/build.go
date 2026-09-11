@@ -21,12 +21,14 @@ import (
 
 // BuildFlags holds flags for the build command.
 type BuildFlags struct {
-	Path         string
-	Namespace    string
-	SkipCRDs     bool
-	StripAttrs   string
-	HelmCacheDir string
-	HelmIndexTTL time.Duration
+	Path              string
+	Namespace         string
+	SkipCRDs          bool
+	StripAttrs        string
+	HelmCacheDir      string
+	HelmIndexTTL      time.Duration
+	KustomizeCacheDir string
+	KustomizeCacheTTL time.Duration
 }
 
 func newBuildCmd() *cobra.Command {
@@ -58,6 +60,7 @@ Examples:
 	cmd.Flags().BoolVar(&flags.SkipCRDs, "skip-crds", false, "Skip CustomResourceDefinition resources in output")
 	cmd.Flags().StringVar(&flags.StripAttrs, "strip-attrs", "", "Comma-separated keys to strip from output (e.g. helm.sh/chart,status)")
 	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL)
+	registerKustomizeCacheFlags(cmd, &flags.KustomizeCacheDir, &flags.KustomizeCacheTTL)
 
 	return cmd
 }
@@ -119,7 +122,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return NewExitError(fmt.Errorf("parsing Kustomization resources: %w", err), ExitCodeError)
 	}
 
-	builder := kustomize.NewBuilder(repoRoot)
+	builder := kustomize.NewBuilder(repoRoot, kustomizeCacheOptions{dir: flags.KustomizeCacheDir, ttl: flags.KustomizeCacheTTL}.builderOptions()...)
 	buildCache := make(buildCache)
 	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
 	secrets := resolveSecrets(ctx, clusterPath, builder, buildCache)
@@ -176,7 +179,9 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return NewExitError(fmt.Errorf("no Kustomization files found in %s", clusterPath), ExitCodeError)
 	}
 
-	output, err := buildHRInflation(ctx, clusterPath, repoRoot, name, flags.Namespace, false, false, helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL})
+	output, err := buildHRInflation(ctx, clusterPath, repoRoot, name, flags.Namespace, false, false,
+		helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL},
+		kustomizeCacheOptions{dir: flags.KustomizeCacheDir, ttl: flags.KustomizeCacheTTL})
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}
@@ -294,12 +299,15 @@ func collectKustomizationPaths(repoRoot string, kustomizations []flux.Kustomizat
 	return paths
 }
 
-func buildKustomizeOverlays(ctx context.Context, clusterPath, repoRoot string, excludePaths map[string]bool, cache buildCache) [][]byte {
+// buildKustomizeOverlays builds native kustomize overlays under clusterPath
+// (see DiscoverKustomizeDirsAndFiles for the selection rules). The builder is
+// passed in so all builds in one command share one configured Builder
+// (including the remote resource cache).
+func buildKustomizeOverlays(ctx context.Context, builder *kustomize.Builder, clusterPath string, excludePaths map[string]bool, cache buildCache) [][]byte {
 	// Single tree walk returns both the native overlays to build and every
 	// kustomization-file directory (any kind) to keep the loose-file walker
 	// out of.
 	kustomizeDirs, allKustFileDirs, err := flux.DiscoverKustomizeDirsAndFiles(ctx, clusterPath)
-	builder := kustomize.NewBuilder(repoRoot)
 	var outputs [][]byte
 
 	// Track ALL directories that have a kustomization.yaml (attempted build),
@@ -329,6 +337,7 @@ func buildKustomizeOverlays(ctx context.Context, clusterPath, repoRoot string, e
 	// any symlink that resolves outside the repository (CWE-367). Scoped to
 	// repoRoot — not clusterPath — to keep legitimate intra-repo symlinks
 	// working, matching the restrictedFs boundary used by kustomize builds.
+	repoRoot := builder.RootDir()
 	root, rootErr := os.OpenRoot(repoRoot)
 	if rootErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not open repo root %s for scoped reads: %v\n", repoRoot, rootErr)

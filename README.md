@@ -11,6 +11,7 @@ CLI tool for building, diffing, and validating Flux GitOps resources locally. Wo
 - Source resolution with repoRoot fallback for HelmRepository/OCIRepository outside `--path`
 - postBuild variable substitution from ConfigMaps and Secrets (Secret values redacted with a placeholder)
 - Helm chart caching — repo indexes and chart tarballs are cached on disk; repeated runs (and both sides of `diff hr`) don't re-download
+- Kustomize remote resource caching — http(s) resources in kustomizations (CRD bundles, release assets) are cached on disk; warm `build ks`/`diff ks` runs make no network requests
 - Automatic secret redaction
 - Box-header output format (per-resource, sorted by kind/namespace/name)
 
@@ -39,18 +40,18 @@ docker run --rm -v $(pwd):/repo -w /repo ghcr.io/banschikovde/fluxview:latest \
   diff ks --path clusters/prod/flux/ --branch-orig master --strip-attrs helm.sh/chart,status --skip-crds
 ```
 
-The image runs as a fixed non-root user (65532:65532); the chart cache defaults to `/home/fluxview/.cache/fluxview` inside the container and disappears with it — mount or point the cache elsewhere to keep it between runs:
+The image runs as a fixed non-root user (65532:65532); the caches (Helm charts, kustomize remote resources) default to `/home/fluxview/.cache/fluxview/` inside the container and disappear with it — mount or point them elsewhere to keep them between runs:
 
 ```bash
 docker run --rm -v $(pwd):/repo -v fluxview-cache:/home/fluxview/.cache/fluxview \
   -w /repo ghcr.io/banschikovde/fluxview:latest build hr --path clusters/prod/flux/
 ```
 
-To run as your host user (e.g. so a mounted cache is owned correctly), override `--user` and point the cache to a writable path — an arbitrary UID has no writable HOME in the image:
+To run as your host user (e.g. so a mounted cache is owned correctly), override `--user` and point the caches to a writable path — an arbitrary UID has no writable HOME in the image:
 
 ```bash
 docker run --rm --user "$(id -u):$(id -g)" \
-  -v $(pwd):/repo -e FLUXVIEW_HELM_CACHE_DIR=/tmp/helm-cache \
+  -v $(pwd):/repo -e FLUXVIEW_HELM_CACHE_DIR=/tmp/helm-cache -e FLUXVIEW_KUSTOMIZE_CACHE_DIR=/tmp/ks-cache \
   -w /repo ghcr.io/banschikovde/fluxview:latest build hr --path clusters/prod/flux/
 ```
 
@@ -169,6 +170,8 @@ Missing schemas never break the pipeline — resources without a matching schema
 | `--strip-attrs` | build, diff | Comma-separated keys to strip (e.g. `helm.sh/chart,status`) |
 | `--helm-cache-dir` | build, diff | Helm cache directory for repo indexes and downloaded charts (default: `$FLUXVIEW_HELM_CACHE_DIR`, else `~/.cache/fluxview/helm`) |
 | `--helm-index-ttl` | build, diff | How long cached Helm repo indexes and OCI tag resolutions stay fresh; `0` always refreshes (default: `10m`, env: `FLUXVIEW_HELM_INDEX_TTL`) |
+| `--kustomize-cache-dir` | build, diff, validate | Cache directory for remote resources referenced by kustomizations (default: `$FLUXVIEW_KUSTOMIZE_CACHE_DIR`, else `~/.cache/fluxview/kustomize-remote`) |
+| `--kustomize-cache-ttl` | build, diff, validate | How long cached remote kustomize resources with floating refs (branch/HEAD URLs) stay fresh; pinned version URLs never expire; `0` always refreshes (default: `10m`, env: `FLUXVIEW_KUSTOMIZE_CACHE_TTL`) |
 | `--schema-dir` | validate | Schema files directory |
 
 ## Exit codes
@@ -180,7 +183,11 @@ Missing schemas never break the pipeline — resources without a matching schema
 | 2 | Error |
 | 3 | Validation failed (validate only) |
 
-## Helm chart cache
+## Caching
+
+fluxview keeps two independent on-disk caches, each with its own directory, TTL and env vars: the **Helm chart cache** (repo indexes, chart tarballs) and the **kustomize remote resource cache** (remote resources referenced by kustomizations). They share nothing but a parent: both default under `~/.cache/fluxview/`, so a single volume mount covers both.
+
+### Helm chart cache
 
 Downloaded Helm charts and repository indexes are cached on disk, so repeated `build hr`/`diff hr` runs (and the two sides of every diff) resolve pinned chart versions without re-downloading.
 
@@ -194,17 +201,31 @@ Downloaded Helm charts and repository indexes are cached on disk, so repeated `b
 
 Caveat: with a non-zero TTL, a floating chart version (empty or range `spec.chart.spec.version`, or a moved OCI tag) resolves against the cached index/digest — up to TTL stale. Pinned versions are unaffected (chart versions are immutable).
 
-In CI, mount or cache the directory to keep downloads between jobs (GitLab example):
+### Kustomize remote resource cache
+
+Remote resources referenced by kustomizations (http(s) entries in `resources:`, e.g. CRD bundles from `raw.githubusercontent.com` or GitHub release assets) are cached on disk, so `build ks`/`diff ks` (and the HelmRelease pipeline) make no network requests for them on warm runs.
+
+- **Location**: `~/.cache/fluxview/kustomize-remote` (or `$FLUXVIEW_KUSTOMIZE_CACHE_DIR`, or `$XDG_CACHE_HOME/fluxview/kustomize-remote`; override per-run with `--kustomize-cache-dir`). Files are stored as `<sha256(url)>.yaml` with a `.url` sidecar naming the source.
+- **How it works**: before the first build the repository is scanned for remote references and every file-like URL is downloaded once with a plain HTTP GET (GitHub release assets are fetched the same way — no git clone). Kustomization files are then served to kustomize with URLs rewritten to absolute cache paths, so kustomize itself never fetches anything and its output is byte-identical to a non-cached build.
+- **Pinned vs floating**: URLs with a version marker (`releases/download/vX.Y.Z/…`, `raw/…/<tag>/…`, `?ref=<tag|sha>`) are immutable — downloaded once, served forever, no TTL. Everything else (branch/HEAD refs like `main`, unversioned URLs) honors `--kustomize-cache-ttl`; an expired entry is re-fetched, and if the refresh fails the stale copy is used with a warning.
+- **What is not cached**: git/directory bases (`github.com/org/repo/path?ref=…` as a kustomization base, remote `components:`) are left for kustomize itself and warned about once — they still trigger kustomize's own git fetch. A URL that cannot be downloaded and has no cached copy is likewise left untouched, preserving the pre-cache behavior (warning + skip in `build`, strict failure in `diff`). Private/authenticated URLs are out of scope.
+- **Scope**: only `resources:` entries are cached. Remote URLs in `crds:`, `patches:`, `configurations:` and `transformers:` (if any) are not scanned or rewritten — kustomize fetches them itself on every build, as before.
+- **Integrity**: cached entries are validated as YAML on every use — a corrupted entry is re-downloaded instead of failing the build.
+
+Caveat: with `--kustomize-cache-ttl=0` every `diff` side re-fetches floating URLs independently, so a remote resource that changes mid-run can surface as a phantom diff unrelated to the commit. With a non-zero TTL (default) both diff sides share one fresh cached copy, so this cannot happen.
+
+In CI, mount or cache the directories to keep downloads between jobs (GitLab example):
 
 ```yaml
 fluxview:diff:
   image: ghcr.io/banschikovde/fluxview:latest
   cache:
-    key: fluxview-helm-cache
+    key: fluxview-cache
     paths:
-      - .helm-cache/
+      - .cache/
   variables:
-    FLUXVIEW_HELM_CACHE_DIR: .helm-cache
+    FLUXVIEW_HELM_CACHE_DIR: .cache/helm
+    FLUXVIEW_KUSTOMIZE_CACHE_DIR: .cache/kustomize-remote
   script:
     - fluxview diff hr --path clusters/prod/flux/ --branch-orig master
         --strip-attrs helm.sh/chart,checksum/cm,status --skip-crds --color never

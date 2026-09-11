@@ -26,15 +26,17 @@ var errAlreadyWarned = errors.New("build already warned")
 
 // DiffFlags holds flags for the diff command.
 type DiffFlags struct {
-	Path         string
-	Namespace    string
-	Color        string
-	BranchOrig   string
-	Unified      int
-	SkipCRDs     bool
-	StripAttrs   string
-	HelmCacheDir string
-	HelmIndexTTL time.Duration
+	Path              string
+	Namespace         string
+	Color             string
+	BranchOrig        string
+	Unified           int
+	SkipCRDs          bool
+	StripAttrs        string
+	HelmCacheDir      string
+	HelmIndexTTL      time.Duration
+	KustomizeCacheDir string
+	KustomizeCacheTTL time.Duration
 }
 
 func newDiffCmd() *cobra.Command {
@@ -70,6 +72,7 @@ Examples:
 	cmd.Flags().BoolVar(&flags.SkipCRDs, "skip-crds", false, "Skip CustomResourceDefinition resources in diff")
 	cmd.Flags().StringVar(&flags.StripAttrs, "strip-attrs", "", "Comma-separated keys to strip from diff (e.g. helm.sh/chart,status)")
 	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL)
+	registerKustomizeCacheFlags(cmd, &flags.KustomizeCacheDir, &flags.KustomizeCacheTTL)
 	return cmd
 }
 
@@ -142,12 +145,13 @@ func runDiff(ctx context.Context, args []string, flags *DiffFlags) error {
 }
 
 func runDiffKS(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, compareCommit string, flags *DiffFlags) error {
-	currentOutput, err := buildKSOutput(ctx, clusterPath, repoRoot, name)
+	ksCache := kustomizeCacheOptions{dir: flags.KustomizeCacheDir, ttl: flags.KustomizeCacheTTL}
+	currentOutput, err := buildKSOutput(ctx, clusterPath, repoRoot, name, ksCache)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building current state: %w", err), ExitCodeError)
 	}
 
-	compareOutput, err := buildKSOutputAtRevision(ctx, gitOps, clusterPath, repoRoot, name, compareCommit)
+	compareOutput, err := buildKSOutputAtRevision(ctx, gitOps, clusterPath, repoRoot, name, compareCommit, ksCache)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, err), ExitCodeError)
 	}
@@ -168,7 +172,9 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	// download impossible) on either side must fail the diff — otherwise the
 	// side silently missing its resources would show up as a false
 	// "added" (green) / "removed" (red) diff.
-	currentOutput, err := buildHRInflation(ctx, clusterPath, repoRoot, name, flags.Namespace, false, true, helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL})
+	currentOutput, err := buildHRInflation(ctx, clusterPath, repoRoot, name, flags.Namespace, false, true,
+		helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL},
+		kustomizeCacheOptions{dir: flags.KustomizeCacheDir, ttl: flags.KustomizeCacheTTL})
 	if err != nil {
 		return NewExitError(fmt.Errorf("building current state: %w", err), ExitCodeError)
 	}
@@ -189,7 +195,9 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	if _, err := os.Stat(worktreeClusterPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Warning: path %s does not exist at revision %s\n", relPath, compareCommit)
 	} else {
-		compareOutput, err := buildHRInflation(ctx, worktreeClusterPath, worktreePath, name, flags.Namespace, true, true, helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL})
+		compareOutput, err := buildHRInflation(ctx, worktreeClusterPath, worktreePath, name, flags.Namespace, true, true,
+			helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL},
+			kustomizeCacheOptions{dir: flags.KustomizeCacheDir, ttl: flags.KustomizeCacheTTL})
 		if err != nil {
 			// A HelmRelease selected by name may legitimately not exist at the
 			// comparison revision (added in this branch) — that's a valid
@@ -209,12 +217,12 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 }
 
 // buildKSOutput builds the Kustomization output for the current working tree.
-func buildKSOutput(ctx context.Context, clusterPath, repoRoot, name string) ([]byte, error) {
-	return buildKSOutputWithCache(ctx, clusterPath, repoRoot, name, make(buildCache))
+func buildKSOutput(ctx context.Context, clusterPath, repoRoot, name string, ksCache kustomizeCacheOptions) ([]byte, error) {
+	return buildKSOutputWithCache(ctx, clusterPath, repoRoot, name, make(buildCache), ksCache)
 }
 
 // buildKSOutputWithCache builds the Kustomization output for the current working tree with build cache.
-func buildKSOutputWithCache(ctx context.Context, clusterPath, repoRoot, name string, buildCache map[string]buildResult) ([]byte, error) {
+func buildKSOutputWithCache(ctx context.Context, clusterPath, repoRoot, name string, buildCache map[string]buildResult, ksCache kustomizeCacheOptions) ([]byte, error) {
 	// Check that the path contains Kustomization files directly (not just in subdirectories)
 	hasDirectKS, err := hasDirectKustomizations(clusterPath)
 	if err != nil {
@@ -237,7 +245,7 @@ func buildKSOutputWithCache(ctx context.Context, clusterPath, repoRoot, name str
 		}
 	}
 
-	builder := kustomize.NewBuilder(repoRoot)
+	builder := kustomize.NewBuilder(repoRoot, ksCache.builderOptions()...)
 	// Resolve ConfigMaps and Secrets for postBuild substitution.
 	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
 	secrets := resolveSecrets(ctx, clusterPath, builder, buildCache)
@@ -246,7 +254,7 @@ func buildKSOutputWithCache(ctx context.Context, clusterPath, repoRoot, name str
 }
 
 // buildKSOutputAtRevision builds the Kustomization output at a specific git revision.
-func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, revision string) ([]byte, error) {
+func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, revision string, ksCache kustomizeCacheOptions) ([]byte, error) {
 	// Create a git worktree at the target revision.
 	worktreePath, err := gitOps.CloneToDir(ctx, revision)
 	if err != nil {
@@ -289,7 +297,7 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 		}
 	}
 
-	builder := kustomize.NewBuilder(worktreePath)
+	builder := kustomize.NewBuilder(worktreePath, ksCache.builderOptions()...)
 	buildCache := make(buildCache)
 	// Resolve ConfigMaps and Secrets for postBuild substitution from the worktree.
 	configMaps := resolveConfigMaps(ctx, worktreeClusterPath, builder, buildCache)
@@ -316,7 +324,7 @@ func buildKSContent(ctx context.Context, builder *kustomize.Builder, kustomizati
 	// Skip overlays when no KS are selected (name filter returned empty).
 	if len(kustomizations) > 0 {
 		ksPaths := collectKustomizationPaths(repoRoot, kustomizations)
-		overlayOutputs := buildKustomizeOverlays(ctx, clusterPath, repoRoot, ksPaths, cache)
+		overlayOutputs := buildKustomizeOverlays(ctx, builder, clusterPath, ksPaths, cache)
 		for _, overlay := range overlayOutputs {
 			if len(output) > 0 {
 				output = append(output, []byte("\n---\n")...)

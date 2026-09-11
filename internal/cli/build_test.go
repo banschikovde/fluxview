@@ -2038,7 +2038,7 @@ data:
   CLUSTER_NAME: test
 `)
 
-	outputs := buildKustomizeOverlays(context.Background(), clusterPath, clusterPath, map[string]bool{}, make(buildCache))
+	outputs := buildKustomizeOverlays(context.Background(), kustomize.NewBuilder(clusterPath), clusterPath, map[string]bool{}, make(buildCache))
 	combined := ""
 	for _, o := range outputs {
 		if len(combined) > 0 {
@@ -2079,7 +2079,7 @@ data:
   CLUSTER_NAME: test
 `)
 
-	outputs := buildKustomizeOverlays(context.Background(), clusterPath, clusterPath, map[string]bool{}, make(buildCache))
+	outputs := buildKustomizeOverlays(context.Background(), kustomize.NewBuilder(clusterPath), clusterPath, map[string]bool{}, make(buildCache))
 	combined := ""
 	for _, o := range outputs {
 		if len(combined) > 0 {
@@ -2119,7 +2119,7 @@ title: Not a k8s document
 description: Should be filtered out
 `)
 
-	outputs := buildKustomizeOverlays(context.Background(), clusterPath, clusterPath, map[string]bool{}, make(buildCache))
+	outputs := buildKustomizeOverlays(context.Background(), kustomize.NewBuilder(clusterPath), clusterPath, map[string]bool{}, make(buildCache))
 	combined := ""
 	for _, o := range outputs {
 		combined += string(o)
@@ -2297,7 +2297,7 @@ metadata:
   name: real-cm
 `)
 
-	outputs := buildKustomizeOverlays(context.Background(), clusterPath, clusterPath, map[string]bool{}, make(buildCache))
+	outputs := buildKustomizeOverlays(context.Background(), kustomize.NewBuilder(clusterPath), clusterPath, map[string]bool{}, make(buildCache))
 	combined := ""
 	for _, o := range outputs {
 		if len(combined) > 0 {
@@ -2453,7 +2453,7 @@ metadata:
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs = buildKustomizeOverlays(context.Background(), clusterPath, repoRoot, nil, make(buildCache))
+		outputs = buildKustomizeOverlays(context.Background(), kustomize.NewBuilder(repoRoot), clusterPath, nil, make(buildCache))
 	})
 
 	if !strings.Contains(stderr, "Warning: could not read") || !strings.Contains(stderr, bad) {

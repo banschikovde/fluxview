@@ -18,8 +18,8 @@ import (
 )
 
 // helmCacheOptions carries Helm cache settings from CLI flags/env into the
-// Inflater: where the on-disk cache lives and how long repository indexes
-// stay fresh.
+// Inflater: where the on-disk Helm cache lives and how long repository
+// indexes stay fresh. Independent of the kustomize cache.
 type helmCacheOptions struct {
 	dir      string
 	indexTTL time.Duration
@@ -32,8 +32,21 @@ func (o helmCacheOptions) inflaterOptions() []helm.InflaterOption {
 	}
 }
 
-// registerHelmCacheFlags registers the Helm cache flags shared by build and
-// diff. Defaults come from helm.DefaultCacheDir()/DefaultIndexTTL() so the
+// kustomizeCacheOptions carries kustomize remote-resource cache settings from
+// CLI flags/env into the kustomize Builder. Independent of the Helm cache.
+type kustomizeCacheOptions struct {
+	dir string
+	ttl time.Duration
+}
+
+func (o kustomizeCacheOptions) builderOptions() []kustomize.BuilderOption {
+	return []kustomize.BuilderOption{
+		kustomize.WithRemoteCache(o.dir, o.ttl),
+	}
+}
+
+// registerHelmCacheFlags registers the Helm cache flags shared by the
+// commands. Defaults come from helm.DefaultCacheDir()/DefaultIndexTTL() so the
 // FLUXVIEW_HELM_CACHE_DIR / FLUXVIEW_HELM_INDEX_TTL env vars are honored
 // unless overridden by an explicit flag.
 func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL *time.Duration) {
@@ -41,6 +54,18 @@ func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL *time
 		"Helm cache directory for repo indexes and downloaded charts (env: FLUXVIEW_HELM_CACHE_DIR)")
 	cmd.Flags().DurationVar(indexTTL, "helm-index-ttl", helm.DefaultIndexTTL(),
 		"How long cached Helm repo indexes and OCI tag resolutions stay fresh; 0 always refreshes (env: FLUXVIEW_HELM_INDEX_TTL)")
+}
+
+// registerKustomizeCacheFlags registers the kustomize remote-resource cache
+// flags shared by the commands. Defaults come from
+// kustomize.DefaultCacheDir()/DefaultCacheTTL() so the
+// FLUXVIEW_KUSTOMIZE_CACHE_DIR / FLUXVIEW_KUSTOMIZE_CACHE_TTL env vars are
+// honored unless overridden by an explicit flag.
+func registerKustomizeCacheFlags(cmd *cobra.Command, cacheDir *string, ttl *time.Duration) {
+	cmd.Flags().StringVar(cacheDir, "kustomize-cache-dir", kustomize.DefaultCacheDir(),
+		"Cache directory for remote resources referenced by kustomizations (env: FLUXVIEW_KUSTOMIZE_CACHE_DIR)")
+	cmd.Flags().DurationVar(ttl, "kustomize-cache-ttl", kustomize.DefaultCacheTTL(),
+		"How long cached remote kustomize resources with floating refs (branch/HEAD URLs) stay fresh; pinned version URLs never expire; 0 always refreshes (env: FLUXVIEW_KUSTOMIZE_CACHE_TTL)")
 }
 
 // buildHRInflation discovers HelmReleases through the Flux Kustomization pipeline
@@ -54,13 +79,13 @@ func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL *time
 // strict (diff mode) turns skip-worthy inflation failures into a returned
 // error instead of a warning + skip, so an unbuildable state never produces a
 // misleading partial diff.
-func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespace string, quiet, strict bool, helmCache helmCacheOptions) ([]byte, error) {
+func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespace string, quiet, strict bool, helmCache helmCacheOptions, ksCache kustomizeCacheOptions) ([]byte, error) {
 	kustomizations, err := flux.NewParser(clusterPath).ParseKustomizations(ctx)
 	if err != nil {
 		return nil, nil // no Flux KS — valid for diff
 	}
 
-	builder := kustomize.NewBuilder(repoRoot)
+	builder := kustomize.NewBuilder(repoRoot, ksCache.builderOptions()...)
 	buildCache := make(buildCache)
 	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
 	secrets := resolveSecrets(ctx, clusterPath, builder, buildCache)

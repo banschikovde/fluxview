@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"sigs.k8s.io/kustomize/api/krusty"
 	"sigs.k8s.io/kustomize/api/types"
@@ -18,24 +19,60 @@ type Builder struct {
 	options    *krusty.Options
 	kustomizer *krusty.Kustomizer
 	rootDir    string
+	// remote caches remote resources referenced by kustomizations and
+	// rewrites their URLs to local cache paths; nil when disabled.
+	remote *remoteCache
+}
+
+// BuilderOption configures a Builder created via NewBuilder.
+type BuilderOption func(*Builder)
+
+// WithRemoteCache enables the on-disk cache for remote resources referenced by
+// kustomization files (http(s) entries in resources). The cache is independent
+// of the Helm cache: its own directory (--kustomize-cache-dir, env
+// FLUXVIEW_KUSTOMIZE_CACHE_DIR) and its own TTL (--kustomize-cache-ttl):
+// pinned version URLs are cached without TTL, floating refs honor ttl
+// (0 = always re-fetch). An empty cacheDir means DefaultCacheDir().
+//
+// With the cache enabled, builds serve rewritten kustomization content whose
+// remote URLs point at cached files, so kustomize makes no network requests
+// for them. URLs that cannot be cached (git/directory bases, failed downloads)
+// keep their previous behavior — kustomize fetches them itself.
+func WithRemoteCache(cacheDir string, ttl time.Duration) BuilderOption {
+	return func(b *Builder) {
+		b.remote = newRemoteCache(cacheDir, ttl)
+	}
 }
 
 // NewBuilder creates a new kustomize Builder. LoadRestrictionsNone is used to
 // support Flux's ../../base pattern, but file access is restricted to rootDir
 // via a custom filesystem wrapper to prevent reading outside the repository.
-func NewBuilder(rootDir string) *Builder {
-	opts := krusty.MakeDefaultOptions()
-	opts.LoadRestrictions = types.LoadRestrictionsNone
-	return &Builder{
-		options:    opts,
-		kustomizer: krusty.MakeKustomizer(opts),
+func NewBuilder(rootDir string, opts ...BuilderOption) *Builder {
+	krustyOpts := krusty.MakeDefaultOptions()
+	krustyOpts.LoadRestrictions = types.LoadRestrictionsNone
+	b := &Builder{
+		options:    krustyOpts,
+		kustomizer: krusty.MakeKustomizer(krustyOpts),
 		rootDir:    rootDir,
 	}
+	for _, opt := range opts {
+		opt(b)
+	}
+	return b
+}
+
+// RootDir returns the repository root this Builder is confined to.
+func (b *Builder) RootDir() string {
+	return b.rootDir
 }
 
 // Build runs kustomize build in the given directory and returns YAML output.
 // File access is restricted to the builder's rootDir to prevent path traversal
 // attacks via malicious kustomization.yaml files.
+//
+// When a remote cache is configured, the repository is scanned once and remote
+// resources are downloaded before the first build; kustomization reads then go
+// through a rewriting filesystem layer that substitutes cached paths for URLs.
 //
 // ctx is checked before the build starts; the kustomize library itself does
 // not expose mid-build cancellation points, so a build already in flight runs
@@ -49,7 +86,21 @@ func (b *Builder) Build(ctx context.Context, dir string) ([]byte, error) {
 		return nil, fmt.Errorf("no kustomization file found in %s", dir)
 	}
 
-	fsys := newRestrictedFs(b.rootDir)
+	var extraRoots []string
+	if b.remote != nil {
+		// Download everything cacheable before kustomize touches any file, so
+		// the rewriting layer only ever does map lookups during builds.
+		b.remote.prepare(ctx, b.rootDir)
+		// Cached remote resources are absolute paths outside rootDir; they
+		// contain only public content this tool fetched on the repository's
+		// behalf, so the restricted filesystem admits exactly that directory.
+		extraRoots = append(extraRoots, b.remote.dir)
+	}
+
+	fsys := newRestrictedFs(b.rootDir, extraRoots...)
+	if b.remote != nil {
+		fsys = b.remote.wrapFs(fsys)
+	}
 
 	resMap, err := b.kustomizer.Run(fsys, dir)
 	if err != nil {
@@ -68,12 +119,16 @@ func (b *Builder) Build(ctx context.Context, dir string) ([]byte, error) {
 // This prevents malicious kustomization.yaml from reading files outside the
 // repository (e.g. resources: ../../../../etc/passwd) even though
 // LoadRestrictionsNone is used (needed for Flux's ../../base pattern).
+//
+// extraRoots lists additional read-only roots (the remote resource cache
+// directory) that kustomizations may reference via absolute paths.
 type restrictedFs struct {
 	filesys.FileSystem
-	rootDir string
+	rootDir    string
+	extraRoots []string
 }
 
-func newRestrictedFs(rootDir string) filesys.FileSystem {
+func newRestrictedFs(rootDir string, extraRoots ...string) filesys.FileSystem {
 	abs, err := filepath.Abs(rootDir)
 	if err != nil {
 		abs = rootDir
@@ -83,17 +138,51 @@ func newRestrictedFs(rootDir string) filesys.FileSystem {
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
 		abs = resolved
 	}
+	resolvedExtras := make([]string, 0, len(extraRoots))
+	for _, extra := range extraRoots {
+		resolvedExtras = append(resolvedExtras, resolveRootPath(extra))
+	}
 	return &restrictedFs{
 		FileSystem: filesys.MakeFsOnDisk(),
 		rootDir:    abs,
+		extraRoots: resolvedExtras,
 	}
 }
 
-// isWithinRoot checks if path stays within rootDir after resolution.
+// resolveRootPath absolutizes and symlink-resolves a directory used as a
+// filesystem boundary.
+func resolveRootPath(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		abs = dir
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return abs
+}
+
+// isWithinRoot checks if path stays within rootDir (or one of the extra
+// read-only roots) after resolution.
 func (fs *restrictedFs) isWithinRoot(path string) bool {
 	// fs.rootDir is already absolute + symlink-resolved at construction (see
 	// newRestrictedFs), so don't re-resolve it on every file access — only
 	// the path is resolved here (the actual security check).
+	if isWithinResolvedRoot(path, fs.rootDir) {
+		return true
+	}
+	for _, extra := range fs.extraRoots {
+		if isWithinResolvedRoot(path, extra) {
+			return true
+		}
+	}
+	return false
+}
+
+// isWritableRoot checks if path stays within rootDir only: extra roots (the
+// remote cache directory) are admitted read-only — a build must never mutate
+// the cache, it is written exclusively by the downloader.
+func (fs *restrictedFs) isWritableRoot(path string) bool {
 	return isWithinResolvedRoot(path, fs.rootDir)
 }
 
@@ -140,7 +229,7 @@ func (fs *restrictedFs) Open(path string) (filesys.File, error) {
 }
 
 func (fs *restrictedFs) Create(path string) (filesys.File, error) {
-	if !fs.isWithinRoot(path) {
+	if !fs.isWritableRoot(path) {
 		return nil, fmt.Errorf("path %s is outside repository root", path)
 	}
 	return fs.FileSystem.Create(path)
@@ -168,28 +257,28 @@ func (fs *restrictedFs) ReadDir(path string) ([]string, error) {
 }
 
 func (fs *restrictedFs) WriteFile(path string, data []byte) error {
-	if !fs.isWithinRoot(path) {
+	if !fs.isWritableRoot(path) {
 		return fmt.Errorf("path %s is outside repository root", path)
 	}
 	return fs.FileSystem.WriteFile(path, data)
 }
 
 func (fs *restrictedFs) Mkdir(path string) error {
-	if !fs.isWithinRoot(path) {
+	if !fs.isWritableRoot(path) {
 		return fmt.Errorf("path %s is outside repository root", path)
 	}
 	return fs.FileSystem.Mkdir(path)
 }
 
 func (fs *restrictedFs) MkdirAll(path string) error {
-	if !fs.isWithinRoot(path) {
+	if !fs.isWritableRoot(path) {
 		return fmt.Errorf("path %s is outside repository root", path)
 	}
 	return fs.FileSystem.MkdirAll(path)
 }
 
 func (fs *restrictedFs) RemoveAll(path string) error {
-	if !fs.isWithinRoot(path) {
+	if !fs.isWritableRoot(path) {
 		return fmt.Errorf("path %s is outside repository root", path)
 	}
 	return fs.FileSystem.RemoveAll(path)
