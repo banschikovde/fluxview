@@ -1061,7 +1061,7 @@ func TestInflateHelmReleasesShared_WarnOnMissingSource(t *testing.T) {
 		},
 	}
 
-	inflater, err := helm.NewInflater()
+	inflater, err := helm.NewInflater(helm.WithCacheDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
@@ -1107,7 +1107,7 @@ func TestInflateHelmReleasesShared_QuietSuppressesWarnings(t *testing.T) {
 		},
 	}
 
-	inflater, err := helm.NewInflater()
+	inflater, err := helm.NewInflater(helm.WithCacheDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
@@ -1164,7 +1164,7 @@ spec:
 		},
 	}}
 
-	inflater, err := helm.NewInflater()
+	inflater, err := helm.NewInflater(helm.WithCacheDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
@@ -1240,7 +1240,7 @@ spec:
 		},
 	}}
 
-	inflater, err := helm.NewInflater()
+	inflater, err := helm.NewInflater(helm.WithCacheDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
@@ -1353,7 +1353,7 @@ spec:
 		},
 	}}
 
-	inflater, err := helm.NewInflater()
+	inflater, err := helm.NewInflater(helm.WithCacheDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
@@ -1422,7 +1422,7 @@ func TestInflateHelmReleasesShared_BucketUnsupported(t *testing.T) {
 		},
 	}}
 
-	inflater, err := helm.NewInflater()
+	inflater, err := helm.NewInflater(helm.WithCacheDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
@@ -1467,7 +1467,7 @@ func TestInflateHelmReleasesShared_LocalSourceChartNotADirectory(t *testing.T) {
 		},
 	}}
 
-	inflater, err := helm.NewInflater()
+	inflater, err := helm.NewInflater(helm.WithCacheDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
@@ -1510,7 +1510,7 @@ func TestInflateHelmReleasesShared_LocalSourceChartMissing(t *testing.T) {
 		},
 	}}
 
-	inflater, err := helm.NewInflater()
+	inflater, err := helm.NewInflater(helm.WithCacheDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}

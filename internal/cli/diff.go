@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -25,13 +26,15 @@ var errAlreadyWarned = errors.New("build already warned")
 
 // DiffFlags holds flags for the diff command.
 type DiffFlags struct {
-	Path       string
-	Namespace  string
-	Color      string
-	BranchOrig string
-	Unified    int
-	SkipCRDs   bool
-	StripAttrs string
+	Path         string
+	Namespace    string
+	Color        string
+	BranchOrig   string
+	Unified      int
+	SkipCRDs     bool
+	StripAttrs   string
+	HelmCacheDir string
+	HelmIndexTTL time.Duration
 }
 
 func newDiffCmd() *cobra.Command {
@@ -66,6 +69,7 @@ Examples:
 	cmd.Flags().IntVar(&flags.Unified, "unified", 3, "Number of context lines in diff output")
 	cmd.Flags().BoolVar(&flags.SkipCRDs, "skip-crds", false, "Skip CustomResourceDefinition resources in diff")
 	cmd.Flags().StringVar(&flags.StripAttrs, "strip-attrs", "", "Comma-separated keys to strip from diff (e.g. helm.sh/chart,status)")
+	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL)
 	return cmd
 }
 
@@ -164,7 +168,7 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	// download impossible) on either side must fail the diff — otherwise the
 	// side silently missing its resources would show up as a false
 	// "added" (green) / "removed" (red) diff.
-	currentOutput, err := buildHRInflation(ctx, clusterPath, repoRoot, name, flags.Namespace, false, true)
+	currentOutput, err := buildHRInflation(ctx, clusterPath, repoRoot, name, flags.Namespace, false, true, helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL})
 	if err != nil {
 		return NewExitError(fmt.Errorf("building current state: %w", err), ExitCodeError)
 	}
@@ -185,7 +189,7 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	if _, err := os.Stat(worktreeClusterPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Warning: path %s does not exist at revision %s\n", relPath, compareCommit)
 	} else {
-		compareOutput, err := buildHRInflation(ctx, worktreeClusterPath, worktreePath, name, flags.Namespace, true, true)
+		compareOutput, err := buildHRInflation(ctx, worktreeClusterPath, worktreePath, name, flags.Namespace, true, true, helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL})
 		if err != nil {
 			// A HelmRelease selected by name may legitimately not exist at the
 			// comparison revision (added in this branch) — that's a valid

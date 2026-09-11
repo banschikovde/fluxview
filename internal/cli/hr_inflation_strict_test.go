@@ -39,7 +39,7 @@ func strictHR(name, repoName string) flux.HelmRelease {
 func TestInflateHelmReleasesShared_StrictFailsOnUnresolvedSource(t *testing.T) {
 	hr := []flux.HelmRelease{strictHR("podinfo", "missing-repo")}
 
-	inflater, err := helm.NewInflater()
+	inflater, err := helm.NewInflater(helm.WithCacheDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestInflateHelmReleasesShared_StrictFailsOnUnresolvedSource(t *testing.T) {
 func TestInflateHelmReleasesShared_StrictQuietStillFails(t *testing.T) {
 	hr := []flux.HelmRelease{strictHR("podinfo", "missing-repo")}
 
-	inflater, err := helm.NewInflater()
+	inflater, err := helm.NewInflater(helm.WithCacheDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestInflateHelmReleasesShared_StrictFailsOnChartDownloadError(t *testing.T)
 		Spec:     flux.HelmRepositorySpec{URL: "http://127.0.0.1:1"},
 	}}
 
-	inflater, err := helm.NewInflater()
+	inflater, err := helm.NewInflater(helm.WithCacheDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestInflateHelmReleasesShared_StrictFailsOnChartDownloadError(t *testing.T)
 func TestInflateHelmReleasesShared_StrictAggregatesFailures(t *testing.T) {
 	hr := []flux.HelmRelease{strictHR("one", "missing-a"), strictHR("two", "missing-b")}
 
-	inflater, err := helm.NewInflater()
+	inflater, err := helm.NewInflater(helm.WithCacheDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestInflateHelmReleasesShared_StrictToleratesSuspended(t *testing.T) {
 	h.Spec.Suspend = true
 	hr := []flux.HelmRelease{h}
 
-	inflater, err := helm.NewInflater()
+	inflater, err := helm.NewInflater(helm.WithCacheDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestInflateHelmReleasesShared_StrictToleratesBucket(t *testing.T) {
 	h.Spec.Chart.Spec.SourceRef.Kind = flux.KindBucket
 	hr := []flux.HelmRelease{h}
 
-	inflater, err := helm.NewInflater()
+	inflater, err := helm.NewInflater(helm.WithCacheDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestInflateHelmReleasesShared_StrictFailsOnMissingLocalChart(t *testing.T) 
 	h.Spec.Chart.Spec.SourceRef.Kind = flux.KindGitRepository
 	hr := []flux.HelmRelease{h}
 
-	inflater, err := helm.NewInflater()
+	inflater, err := helm.NewInflater(helm.WithCacheDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}

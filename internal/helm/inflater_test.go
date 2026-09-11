@@ -58,7 +58,7 @@ func TestInflateHelmRelease_CRDSkip(t *testing.T) {
 	chartDir := filepath.Join(t.TempDir(), "testchart")
 	writeTestChart(t, chartDir)
 
-	inflater, err := NewInflater()
+	inflater, err := NewInflater(WithCacheDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestInflateHelmRelease_CRDDefault(t *testing.T) {
 	chartDir := filepath.Join(t.TempDir(), "testchart")
 	writeTestChart(t, chartDir)
 
-	inflater, err := NewInflater()
+	inflater, err := NewInflater(WithCacheDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
@@ -158,7 +158,7 @@ data:
   release: {{ .Release.Name }}
 `)
 
-	inflater, err := NewInflater()
+	inflater, err := NewInflater(WithCacheDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
@@ -233,7 +233,7 @@ data:
   replicas: {{ .Values.replicas | quote }}
 `)
 
-	inflater, err := NewInflater()
+	inflater, err := NewInflater(WithCacheDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
@@ -344,7 +344,7 @@ func TestInflateHelmRelease_ValuesFiles_TgzArchive(t *testing.T) {
 		"templates/cm.yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: snap\ndata:\n  replicas: {{ .Values.replicas | quote }}\n",
 	})
 
-	inflater, err := NewInflater()
+	inflater, err := NewInflater(WithCacheDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
@@ -380,11 +380,17 @@ func captureStderrHelm(f func()) string {
 	return buf.String()
 }
 
-// writeTgzChart writes a .tgz chart archive at tgzPath. files maps chart-relative
-// paths (e.g. "Chart.yaml", "templates/cm.yaml") to content; they are placed
-// under a top-level "testchart/" directory, which helm's archive loader requires
-// and strips.
+// writeTgzChart writes a .tgz chart archive at tgzPath with the conventional
+// "testchart/" top-level directory. See writeTgzChartAt for other layouts.
 func writeTgzChart(t *testing.T, tgzPath string, files map[string]string) {
+	t.Helper()
+	writeTgzChartAt(t, tgzPath, "testchart", files)
+}
+
+// writeTgzChartAt writes a .tgz chart archive whose members live under the
+// given top-level directory, which helm's archive loader requires and strips
+// (e.g. the OCI test server needs "oci-dependent-chart/").
+func writeTgzChartAt(t *testing.T, tgzPath, topDir string, files map[string]string) {
 	t.Helper()
 	f, err := os.Create(tgzPath)
 	if err != nil {
@@ -398,7 +404,7 @@ func writeTgzChart(t *testing.T, tgzPath string, files map[string]string) {
 	for name, content := range files {
 		data := []byte(content)
 		if err := tw.WriteHeader(&tar.Header{
-			Name: "testchart/" + name,
+			Name: topDir + "/" + name,
 			Mode: 0o644,
 			Size: int64(len(data)),
 		}); err != nil {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/cyphar/filepath-securejoin"
 	"github.com/spf13/cobra"
@@ -20,10 +21,12 @@ import (
 
 // BuildFlags holds flags for the build command.
 type BuildFlags struct {
-	Path       string
-	Namespace  string
-	SkipCRDs   bool
-	StripAttrs string
+	Path         string
+	Namespace    string
+	SkipCRDs     bool
+	StripAttrs   string
+	HelmCacheDir string
+	HelmIndexTTL time.Duration
 }
 
 func newBuildCmd() *cobra.Command {
@@ -54,6 +57,7 @@ Examples:
 	cmd.Flags().StringVarP(&flags.Namespace, "namespace", "n", "", "Filter output resources by namespace")
 	cmd.Flags().BoolVar(&flags.SkipCRDs, "skip-crds", false, "Skip CustomResourceDefinition resources in output")
 	cmd.Flags().StringVar(&flags.StripAttrs, "strip-attrs", "", "Comma-separated keys to strip from output (e.g. helm.sh/chart,status)")
+	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL)
 
 	return cmd
 }
@@ -172,7 +176,7 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return NewExitError(fmt.Errorf("no Kustomization files found in %s", clusterPath), ExitCodeError)
 	}
 
-	output, err := buildHRInflation(ctx, clusterPath, repoRoot, name, flags.Namespace, false, false)
+	output, err := buildHRInflation(ctx, clusterPath, repoRoot, name, flags.Namespace, false, false, helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL})
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}

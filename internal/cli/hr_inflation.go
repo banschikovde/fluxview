@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
 	"github.com/banschikovde/fluxview/internal/flux"
@@ -14,6 +16,32 @@ import (
 	"github.com/banschikovde/fluxview/internal/kustomize"
 	"github.com/cyphar/filepath-securejoin"
 )
+
+// helmCacheOptions carries Helm cache settings from CLI flags/env into the
+// Inflater: where the on-disk cache lives and how long repository indexes
+// stay fresh.
+type helmCacheOptions struct {
+	dir      string
+	indexTTL time.Duration
+}
+
+func (o helmCacheOptions) inflaterOptions() []helm.InflaterOption {
+	return []helm.InflaterOption{
+		helm.WithCacheDir(o.dir),
+		helm.WithIndexTTL(o.indexTTL),
+	}
+}
+
+// registerHelmCacheFlags registers the Helm cache flags shared by build and
+// diff. Defaults come from helm.DefaultCacheDir()/DefaultIndexTTL() so the
+// FLUXVIEW_HELM_CACHE_DIR / FLUXVIEW_HELM_INDEX_TTL env vars are honored
+// unless overridden by an explicit flag.
+func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL *time.Duration) {
+	cmd.Flags().StringVar(cacheDir, "helm-cache-dir", helm.DefaultCacheDir(),
+		"Helm cache directory for repo indexes and downloaded charts (env: FLUXVIEW_HELM_CACHE_DIR)")
+	cmd.Flags().DurationVar(indexTTL, "helm-index-ttl", helm.DefaultIndexTTL(),
+		"How long cached Helm repo indexes and OCI tag resolutions stay fresh; 0 always refreshes (env: FLUXVIEW_HELM_INDEX_TTL)")
+}
 
 // buildHRInflation discovers HelmReleases through the Flux Kustomization pipeline
 // (same discovery logic as runBuildHR), resolves sources, inflates the charts,
@@ -24,9 +52,9 @@ import (
 // matching HRs are inflated, avoiding unnecessary chart downloads.
 //
 // strict (diff mode) turns skip-worthy inflation failures into a returned
-// error instead of a warning + skip, so an unbuildable state never produces
-// a misleading partial diff.
-func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespace string, quiet, strict bool) ([]byte, error) {
+// error instead of a warning + skip, so an unbuildable state never produces a
+// misleading partial diff.
+func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespace string, quiet, strict bool, helmCache helmCacheOptions) ([]byte, error) {
 	kustomizations, err := flux.NewParser(clusterPath).ParseKustomizations(ctx)
 	if err != nil {
 		return nil, nil // no Flux KS — valid for diff
@@ -103,7 +131,7 @@ func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespac
 	inflationCMs := mergeSources(buildCMs, rawCMs, func(c flux.ConfigMap) string { return c.Metadata.Name })
 	inflationSecrets := mergeSources(buildSecrets, rawSecrets, func(s flux.Secret) string { return s.Metadata.Name })
 
-	inflater, err := helm.NewInflater()
+	inflater, err := helm.NewInflater(helmCache.inflaterOptions()...)
 	if err != nil {
 		return nil, fmt.Errorf("initializing helm: %w", err)
 	}

@@ -5,11 +5,12 @@ CLI tool for building, diffing, and validating Flux GitOps resources locally. Wo
 ## Features
 
 - **build** — assemble Kustomization and HelmRelease resources
-- **diff** — per-resource comparison against a git revision (flux-local style)
+- **diff** — per-resource comparison against a git revision
 - **validate** — validate resources against CRD schemas (Flux CRDs + any custom)
 - Recursive Kustomization discovery following `spec.path` into shared bases (Flux controller behavior)
 - Source resolution with repoRoot fallback for HelmRepository/OCIRepository outside `--path`
 - postBuild variable substitution from ConfigMaps and Secrets (Secret values redacted with a placeholder)
+- Helm chart caching — repo indexes and chart tarballs are cached on disk; repeated runs (and both sides of `diff hr`) don't re-download
 - Automatic secret redaction
 - Box-header output format (per-resource, sorted by kind/namespace/name)
 
@@ -37,6 +38,23 @@ Run against a local repo mounted as a volume:
 docker run --rm -v $(pwd):/repo -w /repo ghcr.io/banschikovde/fluxview:latest \
   diff ks --path clusters/prod/flux/ --branch-orig master --strip-attrs helm.sh/chart,status --skip-crds
 ```
+
+The image runs as a fixed non-root user (65532:65532); the chart cache defaults to `/home/fluxview/.cache/fluxview` inside the container and disappears with it — mount or point the cache elsewhere to keep it between runs:
+
+```bash
+docker run --rm -v $(pwd):/repo -v fluxview-cache:/home/fluxview/.cache/fluxview \
+  -w /repo ghcr.io/banschikovde/fluxview:latest build hr --path clusters/prod/flux/
+```
+
+To run as your host user (e.g. so a mounted cache is owned correctly), override `--user` and point the cache to a writable path — an arbitrary UID has no writable HOME in the image:
+
+```bash
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v $(pwd):/repo -e FLUXVIEW_HELM_CACHE_DIR=/tmp/helm-cache \
+  -w /repo ghcr.io/banschikovde/fluxview:latest build hr --path clusters/prod/flux/
+```
+
+The repository mount can be read-only (`:ro`): git worktrees for `diff` are written to `/tmp`.
 
 Build locally:
 
@@ -98,7 +116,7 @@ fluxview diff hr --path clusters/prod/flux/ --branch-orig master
 # Diff only resources in flux-system namespace
 fluxview diff ks --path clusters/prod/flux/ --branch-orig master --namespace flux-system
 
-# With flux-local flags
+# Tuning: strip noisy attrs, skip CRDs, wider diff context
 fluxview diff ks --path clusters/prod/flux/ --branch-orig master \
   --strip-attrs helm.sh/chart,checksum/cm,status --skip-crds --unified 6
 
@@ -149,6 +167,8 @@ Missing schemas never break the pipeline — resources without a matching schema
 | `--unified` | diff | Context lines (default: 3) |
 | `--skip-crds` | build, diff | Skip CustomResourceDefinition resources |
 | `--strip-attrs` | build, diff | Comma-separated keys to strip (e.g. `helm.sh/chart,status`) |
+| `--helm-cache-dir` | build, diff | Helm cache directory for repo indexes and downloaded charts (default: `$FLUXVIEW_HELM_CACHE_DIR`, else `~/.cache/fluxview/helm`) |
+| `--helm-index-ttl` | build, diff | How long cached Helm repo indexes and OCI tag resolutions stay fresh; `0` always refreshes (default: `10m`, env: `FLUXVIEW_HELM_INDEX_TTL`) |
 | `--schema-dir` | validate | Schema files directory |
 
 ## Exit codes
@@ -159,6 +179,38 @@ Missing schemas never break the pipeline — resources without a matching schema
 | 1 | Differences found (diff only) |
 | 2 | Error |
 | 3 | Validation failed (validate only) |
+
+## Helm chart cache
+
+Downloaded Helm charts and repository indexes are cached on disk, so repeated `build hr`/`diff hr` runs (and the two sides of every diff) resolve pinned chart versions without re-downloading.
+
+- **Location**: `~/.cache/fluxview/helm` (or `$FLUXVIEW_HELM_CACHE_DIR`, or `$XDG_CACHE_HOME/fluxview/helm`; override per-run with `--helm-cache-dir`).
+- **Charts**: tarballs are stored keyed by the sha256 digest from the repo index (or the OCI manifest digest) — a pinned chart version downloads once, then renders offline.
+- **OCI**: tags are resolved to digests once per TTL (`oci-digests.yaml`); chart blobs come from the content cache by digest, so warm runs make zero registry requests. Floating versions (empty `spec.chart.spec.version` or a semver range, `OCIRepository.spec.ref.semver`) are resolved against the tag list, also cached with TTL (`oci-tags.yaml`). Digest-pinned refs (`spec.ref.digest`) are immutable and never re-resolve.
+- **Indexes**: repo `index.yaml` is re-fetched when older than `--helm-index-ttl` (default `10m`). `--helm-index-ttl=0` always fetches a fresh index — use it if a newly published chart version is reported missing from a cached index.
+- **Offline fallback**: if the index cannot be refreshed but a cached copy exists, the stale copy is used with a warning.
+- **Credentials**: auth resolved from cluster Secrets is used for downloads but never written to the cache (`repositories.yaml` holds URLs only).
+- **Cleanup**: the cache has no eviction — clear it any time with `rm -rf ~/.cache/fluxview/helm` (or your `--helm-cache-dir`); everything is re-downloadable.
+
+Caveat: with a non-zero TTL, a floating chart version (empty or range `spec.chart.spec.version`, or a moved OCI tag) resolves against the cached index/digest — up to TTL stale. Pinned versions are unaffected (chart versions are immutable).
+
+In CI, mount or cache the directory to keep downloads between jobs (GitLab example):
+
+```yaml
+fluxview:diff:
+  image: ghcr.io/banschikovde/fluxview:latest
+  cache:
+    key: fluxview-helm-cache
+    paths:
+      - .helm-cache/
+  variables:
+    FLUXVIEW_HELM_CACHE_DIR: .helm-cache
+  script:
+    - fluxview diff hr --path clusters/prod/flux/ --branch-orig master
+        --strip-attrs helm.sh/chart,checksum/cm,status --skip-crds --color never
+  rules:
+    - if: $CI_MERGE_REQUEST_ID
+```
 
 ## CRD schemas
 
@@ -202,7 +254,3 @@ These are intentional non-goals (not planned unless requested). In `build` the a
 
 - **Bucket-sourced Helm charts are not supported** — `HelmRelease.spec.chart.spec.sourceRef.kind: Bucket` is not resolved (unlike `GitRepository`, which works since the chart already lives in the local checkout). Bucket content lives in S3-compatible object storage and would require fetching it separately (endpoint/credentials from `spec.secretRef`) — out of scope for now.
 - **`HelmRelease.spec.chartRef.kind: HelmChart` is not supported** — only `chartRef.kind: OCIRepository` is resolved. Referencing a standalone `HelmChart` resource (used to share one chart artifact across multiple HelmReleases) is a rare, advanced pattern — HelmReleases using it are skipped with a warning ("has no chart name").
-
-## TODO
-
-- **Security: Docker image runs as root** — add non-root user to the runtime stage. Requires fixed UID/GID and `--user` documentation for bind-mount compatibility (see #4 in code review).
