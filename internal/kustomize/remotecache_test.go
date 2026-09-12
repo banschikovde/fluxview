@@ -713,6 +713,44 @@ func TestRemoteCache_NonYAMLBodyFallsBack(t *testing.T) {
 	}
 }
 
+// TestRemoteCache_RelativeCacheDirAnchoredToCWD: a relative cache directory
+// (CI passes FLUXVIEW_KUSTOMIZE_CACHE_DIR=.cache/...) must resolve against the
+// process working directory — never against a kustomization's own directory.
+// Regression test: with a relative dir the rewritten resource path stayed
+// relative, kustomize resolved it against the nested kustomization root and
+// the build failed with "no such file or directory" (CI: .cache-fluxview
+// looked up under k8s/crds/cert-manager/).
+func TestRemoteCache_RelativeCacheDirAnchoredToCWD(t *testing.T) {
+	cs := newCountingServer(t, "/crds/bundle.yaml", remoteCRDBody)
+	url := cs.URL + "/crds/bundle.yaml"
+
+	workDir := t.TempDir() // process CWD for the test
+	repo := t.TempDir()    // repo root, deliberately different from CWD
+	overlay := filepath.Join(repo, "k8s", "clusters", "bss", "test", "crds")
+	writeRemoteKustomization(t, overlay, url)
+
+	t.Chdir(workDir)
+
+	// Relative cache dir: expected to land at <CWD>/rel-cache, and the
+	// rewritten path inside the kustomization to be absolute.
+	b := NewBuilder(repo, WithRemoteCache("rel-cache", time.Hour))
+	out, err := b.Build(context.Background(), overlay)
+	if err != nil {
+		t.Fatalf("build with relative cache dir: %v", err)
+	}
+	if !strings.Contains(string(out), "from-remote") {
+		t.Fatalf("output missing remote resource:\n%s", out)
+	}
+
+	rc := newRemoteCache("rel-cache", time.Hour)
+	if !filepath.IsAbs(rc.dir) {
+		t.Fatalf("cache dir must be absolutized, got %q", rc.dir)
+	}
+	if want := filepath.Join(workDir, "rel-cache"); rc.dir != want {
+		t.Fatalf("cache dir = %q, want %q (anchored to CWD)", rc.dir, want)
+	}
+}
+
 // TestDefaultCacheTTLInvalidEnvWarnsOnce: an unparsable
 // FLUXVIEW_KUSTOMIZE_CACHE_TTL warns exactly once and falls back to 10m.
 func TestDefaultCacheTTLInvalidEnvWarnsOnce(t *testing.T) {

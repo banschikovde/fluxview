@@ -132,6 +132,14 @@ func newRemoteCache(cacheDir string, ttl time.Duration) *remoteCache {
 	if cacheDir == "" {
 		cacheDir = DefaultCacheDir()
 	}
+	// Anchor the directory absolutely: a relative dir (e.g. CI's
+	// FLUXVIEW_KUSTOMIZE_CACHE_DIR=.cache/kustomize-remote) resolves against
+	// the process working directory here, once. Without this the paths
+	// rewritten into kustomization files stay relative and kustomize would
+	// resolve them against each kustomization's own directory instead.
+	if abs, err := filepath.Abs(cacheDir); err == nil {
+		cacheDir = abs
+	}
 	if ttl < 0 {
 		fmt.Fprintf(os.Stderr, "Warning: negative kustomize remote cache TTL %s, treating as 0 (always refresh)\n", ttl)
 		ttl = 0
