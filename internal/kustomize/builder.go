@@ -54,11 +54,12 @@ func WithRemoteCache(cacheDir string, ttl time.Duration) BuilderOption {
 // WithBuildCache enables the on-disk cache of kustomize build outputs:
 // --build-cache-dir / env FLUXVIEW_BUILD_CACHE_DIR, TTL via
 // --build-cache-ttl / FLUXVIEW_BUILD_CACHE_TTL. A cached output is served
-// only while every input file recorded during the original build still has
-// the same size and mtime, and every recorded directory the same mtime —
-// any edit, checkout or added file invalidates the affected entries.
-// A ttl of 0 always rebuilds but still refreshes entries for later runs;
-// the dir values "off"/"none"/"disabled" disable the cache entirely.
+// only when re-hashing every recorded input file and re-listing every
+// recorded directory reproduces the recorded manifest exactly — identity is
+// content, so entries survive fresh checkouts while any edit or
+// added/removed file invalidates the affected entries. A ttl of 0 always
+// rebuilds but still refreshes entries for later runs; the dir values
+// "off"/"none"/"disabled" disable the cache entirely.
 func WithBuildCache(cacheDir string, ttl time.Duration) BuilderOption {
 	return func(b *Builder) {
 		if cacheDirDisabled(cacheDir) {
@@ -95,7 +96,9 @@ func (b *Builder) RootDir() string {
 // attacks via malicious kustomization.yaml files.
 //
 // When a remote cache is configured, the repository is scanned once and remote
-// resources are downloaded before the first build; kustomization reads then go
+// resources are downloaded before the first build — and before any build-cache
+// lookup, so a refreshed floating resource (new content hash) invalidates the
+// stale entry instead of being masked by it. Kustomization reads then go
 // through a rewriting filesystem layer that substitutes cached paths for URLs.
 //
 // When a build cache is configured, outputs are served from disk while the
@@ -114,21 +117,25 @@ func (b *Builder) Build(ctx context.Context, dir string) ([]byte, error) {
 		return nil, fmt.Errorf("no kustomization file found in %s", dir)
 	}
 
-	if b.buildCache != nil {
-		if output, ok := b.buildCache.lookup(b.rootDir, dir, kustFile); ok {
-			return output, nil
-		}
-	}
-
 	var extraRoots []string
 	if b.remote != nil {
-		// Download everything cacheable before kustomize touches any file, so
-		// the rewriting layer only ever does map lookups during builds.
+		// Download everything cacheable before kustomize touches any file —
+		// and before the build-cache lookup below: a re-fetched floating
+		// resource changes content, and the changed hash is exactly what
+		// invalidates a build entry that consumed the old copy. Doing this
+		// after the lookup would freeze floating resources until the build
+		// entry itself expired.
 		b.remote.prepare(ctx, b.rootDir)
 		// Cached remote resources are absolute paths outside rootDir; they
 		// contain only public content this tool fetched on the repository's
 		// behalf, so the restricted filesystem admits exactly that directory.
 		extraRoots = append(extraRoots, b.remote.dir)
+	}
+
+	if b.buildCache != nil {
+		if output, ok := b.buildCache.lookup(b.rootDir, dir, kustFile); ok {
+			return output, nil
+		}
 	}
 
 	fsys := newRestrictedFs(b.rootDir, extraRoots...)

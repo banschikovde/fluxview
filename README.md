@@ -236,17 +236,17 @@ Caveat: with `--remote-cache-ttl=0` every `diff` side re-fetches floating URLs i
 
 ### Kustomize build cache
 
-Kustomize builds dominate fluxview's CPU cost (the SDK re-parses and re-serializes every input file on each run). The build cache stores the final output of every kustomize build together with an input manifest — the exact files read during the build (path, size, mtime) plus the directories visited (path, mtime). A cached output is served only while a fresh stat of every recorded input still matches exactly; otherwise the build runs normally and refreshes the entry.
+Kustomize builds dominate fluxview's CPU cost (the SDK re-parses and re-serializes every input file on each run). The build cache stores the final output of every kustomize build together with an input manifest — the exact files read during the build (path, sha256 of content) plus a listing of every directory involved (sorted entry names). A cached output is served only when re-hashing every recorded file and re-listing every recorded directory reproduces the manifest exactly. Identity is **content**, not mtime, so entries survive fresh git checkouts — which is what makes the cache useful across CI jobs: a pipeline rebuilds only the subtrees its commit actually touched.
 
 - **Location**: `~/.cache/fluxview/kustomize-builds` (or `$FLUXVIEW_BUILD_CACHE_DIR`, or `$XDG_CACHE_HOME/fluxview/kustomize-builds`; override per-run with `--build-cache-dir`; `off`/`none` disables).
-- **Invalidation is automatic**: any edit, `git checkout`, branch switch or file added/removed in a visited directory changes a recorded size/mtime and forces a rebuild of exactly the affected directories. Fresh git worktrees (diff comparison states) always have fresh mtimes, so they never hit stale entries.
-- **Effect**: warm runs on an unchanged tree skip kustomize entirely — roughly half the CPU of a cold run; schema loading and post-processing still apply. First (cold) runs are unaffected.
-- **TTL**: entries older than `--build-cache-ttl` (default `24h`) are rebuilt once; `--build-cache-ttl=0` always rebuilds (fresh outputs are still cached for later runs). The TTL bounds staleness for scenarios mtimes cannot express (e.g. content restored with preserved mtimes by `rsync -a`/`tar`).
-- **Remote resources**: refreshed remote-cache files get new mtimes, which invalidate dependent build entries on the next run.
+- **Invalidation is automatic**: any content change in a recorded file, or any file added/removed/renamed in a recorded directory, forces a rebuild of exactly the affected directories. Touching files without changing content (fresh checkouts, branch switches of identical trees) keeps entries valid.
+- **Effect**: warm runs skip kustomize entirely — roughly half the CPU of a cold run; schema loading and post-processing still apply. In CI with a shared cache directory, unchanged subtrees (shared bases, unrelated apps) are served from the previous job's entries. First (cold) runs are unaffected; the lookup overhead (re-hashing the inputs kustomize would read anyway) is milliseconds.
+- **TTL**: entries older than `--build-cache-ttl` (default `24h`) are rebuilt once; `--build-cache-ttl=0` always rebuilds (fresh outputs are still cached for later runs). With content addressing this is a belt-and-braces bound, not a correctness need.
+- **Remote resources**: refreshed remote-cache files change content, which invalidates dependent build entries on the next run.
 - **Versioning**: entries are salted with the fluxview and kustomize library versions; after an upgrade the cache repopulates automatically.
 - **Cleanup**: oldest entries are evicted beyond 2048 entries / 256 MB; clear any time with `rm -rf ~/.cache/fluxview/kustomize-builds` — everything is rebuildable.
 
-Caveat: like make/bazel mtime caching, the cache trusts that changed content means changed mtime. Normal editors and git always update mtimes, so this holds in practice; the TTL is the safety net.
+Caveats: keep the cache directory **outside** directories containing kustomizations — a cache entry appearing inside a recorded directory changes its listing and needlessly invalidates entries (the CI examples put `.cache/` at the repository root, away from the cluster trees). Floating remote resources are refreshed before the first build-cache lookup of each run (each fluxview invocation is a fresh process in CI), so a changed remote copy invalidates dependent entries immediately rather than waiting out the build TTL; pinned URLs never change and never invalidate.
 
 In CI, mount or cache the directories to keep downloads between jobs (GitLab example):
 
@@ -259,9 +259,10 @@ fluxview:diff:
       - .cache/
   variables:
     FLUXVIEW_HELM_CACHE_DIR: .cache/helm
+    FLUXVIEW_BUILD_CACHE_DIR: .cache/kustomize-builds
   script:
     - fluxview diff hr --path clusters/prod/flux/ --branch-orig master
-        --remote-cache-dir .cache/kustomize-remote --build-cache-dir .cache/kustomize-builds
+        --remote-cache-dir .cache/kustomize-remote
         --strip-attrs helm.sh/chart,checksum/cm,status --skip-crds --color never
   rules:
     - if: $CI_MERGE_REQUEST_ID

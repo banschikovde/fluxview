@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -19,22 +20,25 @@ import (
 // A kustomize build is the single most expensive step of every fluxview
 // command (~70% of CPU and allocations): the SDK re-parses every input file
 // into YAML node trees, deep-copies them and re-serializes the result on each
-// run. For periodic invocations on an unchanged tree (watchers, CI re-runs,
-// repeated local validate) that work is pure waste.
+// run. For repeated invocations that work is pure waste — CI re-runs, jobs
+// that call fluxview several times, periodic validate on a mounted tree.
 //
 // The build cache stores the final build output together with an input
 // manifest recorded by the filesystem layer (see recordingfs.go): every file
-// actually read during the build (path, size, mtime) plus every directory
-// confirmed or listed (path, mtime). A cached entry is served only when a
-// fresh stat of every recorded file and directory matches exactly. This is
-// make/bazel-style mtime caching: any git checkout, edit or new file in a
-// listed directory invalidates the affected entries, while unchanged trees
-// are served without running kustomize at all.
+// read during the build (path, sha256 of content) plus a listing of every
+// directory involved (sorted entry names). A cached entry is served only when
+// re-hashing every recorded file and re-listing every recorded directory
+// reproduces the manifest exactly. The cache is therefore CONTENT-addressed:
+// it survives fresh git checkouts (mtimes change, content does not), which is
+// what makes it useful across CI jobs — a job rebuilds only the subtrees its
+// commit actually touched. Directory listings catch files appearing or
+// disappearing (new resource pulled in by a glob or directory reference)
+// without trusting directory mtimes.
 //
-// Cache key = tool/version salt + build directory + kustomization file name,
-// size and mtime. The full manifest then verifies the rest of the tree. A
-// TTL bounds staleness for scenarios mtimes cannot express, and the cache
-// directory can be disabled entirely (--build-cache-dir=off).
+// Cache key = tool/version salt + build directory + kustomization file name
+// and content hash. The full manifest then verifies the rest of the tree. A
+// TTL bounds staleness as a belt-and-braces safety net, and the cache can be
+// disabled entirely (--build-cache-dir=off).
 
 const (
 	// maxBuildCacheEntryBytes skips caching absurdly large build outputs so a
@@ -49,8 +53,7 @@ const (
 
 // DefaultBuildCacheDir returns the build cache directory: env
 // FLUXVIEW_BUILD_CACHE_DIR, else a sibling of the other fluxview caches under
-// ~/.cache/fluxview. The special values "off", "none" and "disabled" disable
-// the cache (checked in WithBuildCache).
+// ~/.cache/fluxview.
 func DefaultBuildCacheDir() string {
 	if dir := os.Getenv("FLUXVIEW_BUILD_CACHE_DIR"); dir != "" {
 		return dir
@@ -66,7 +69,7 @@ func DefaultBuildCacheDir() string {
 }
 
 // warnBuildCacheTTLOnce keeps the invalid-env warning to a single line per
-// process (same convention as warnCacheTTLOnce).
+// process (same convention as the Helm cache).
 var warnBuildCacheTTLOnce sync.Once
 
 // DefaultBuildCacheTTL returns how long a build cache entry stays usable:
@@ -99,7 +102,7 @@ func cacheDirDisabled(dir string) bool {
 	return false
 }
 
-// buildCache stores build outputs on disk keyed by their input state.
+// buildCache stores build outputs on disk keyed by their input content.
 // A Builder holds at most one; lookups never fail the build — any doubt
 // (missing entry, mismatch, corruption, TTL) is a cache miss.
 type buildCache struct {
@@ -137,20 +140,21 @@ func (c *buildCache) warnf(key, format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "Warning: "+format+"\n", args...)
 }
 
-// buildFileInput is one file read during a build, with the stat signature the
-// verification re-checks. Path is relative to the build's rootDir when the
-// file lives inside it, absolute otherwise (remote-cache files).
+// buildFileInput is one file read during a build, identified by content.
+// Path is relative to the build's rootDir when the file lives inside it,
+// absolute otherwise (remote-cache files).
 type buildFileInput struct {
-	Path        string `json:"path"`
-	Size        int64  `json:"size"`
-	ModTimeNano int64  `json:"mtime"`
+	Path   string `json:"path"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
 }
 
-// buildDirInput is one directory confirmed or listed during a build. Its
-// mtime changes when direct entries are added, removed or renamed.
+// buildDirInput is one directory involved in a build, identified by its
+// sorted direct entry names — stable across checkouts, unlike mtime, and it
+// changes exactly when a file is added, removed or renamed inside.
 type buildDirInput struct {
-	Path        string `json:"path"`
-	ModTimeNano int64  `json:"mtime"`
+	Path    string   `json:"path"`
+	Entries []string `json:"entries"`
 }
 
 // buildCacheEntry is the on-disk cache format: input manifest + output.
@@ -165,12 +169,13 @@ type buildCacheEntry struct {
 
 // buildCacheSalt fingerprints the binary (module version, VCS revision and
 // dirtiness, kustomize library version) so entries from a different tool or
-// library version never hit. Computed once per process.
+// library version never hit. Computed once per process. The format version
+// ("v2") invalidates entries from the earlier mtime-based manifest format.
 var buildCacheSalt = sync.OnceValue(calcBuildCacheSalt)
 
 func calcBuildCacheSalt() string {
 	h := sha256.New()
-	fmt.Fprintf(h, "fluxview-build-cache-v1")
+	fmt.Fprintf(h, "fluxview-build-cache-v2")
 	if info, ok := debug.ReadBuildInfo(); ok {
 		fmt.Fprintf(h, "main=%s", info.Main.Version)
 		for _, s := range info.Settings {
@@ -216,12 +221,27 @@ func sortInputs(files []buildFileInput, dirs []buildDirInput) {
 	})
 }
 
-// entryPath derives the cache entry file path for a build directory and its
-// kustomization file stat signature.
-func (c *buildCache) entryPath(rootDir, dir, kustFile string, kustSize int64, kustMtimeNano int64) string {
+// hashFileContent returns the hex sha256 of the file at path.
+func hashFileContent(path string) (string, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	size, err := io.Copy(h, f)
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), size, nil
+}
+
+// entryPath derives the cache entry file path for a build directory and the
+// content hash of its kustomization file.
+func (c *buildCache) entryPath(rootDir, dir, kustFile, kustHash string) string {
 	relDir := cachePathRelative(rootDir, normalizeFsPath(dir))
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%s|%d|%d", buildCacheSalt(), relDir, filepath.Base(kustFile), kustSize, kustMtimeNano)
+	fmt.Fprintf(h, "%s|%s|%s|%s", buildCacheSalt(), relDir, filepath.Base(kustFile), kustHash)
 	return filepath.Join(c.dir, hex.EncodeToString(h.Sum(nil))+".json")
 }
 
@@ -232,11 +252,11 @@ func (c *buildCache) lookup(rootDir, dir, kustFile string) ([]byte, bool) {
 	if c.ttl <= 0 {
 		return nil, false
 	}
-	st, err := os.Stat(kustFile)
+	kustHash, _, err := hashFileContent(kustFile)
 	if err != nil {
 		return nil, false
 	}
-	path := c.entryPath(rootDir, dir, kustFile, st.Size(), st.ModTime().UnixNano())
+	path := c.entryPath(rootDir, dir, kustFile, kustHash)
 
 	info, err := os.Stat(path)
 	if err != nil {
@@ -263,16 +283,16 @@ func (c *buildCache) lookup(rootDir, dir, kustFile string) ([]byte, bool) {
 	return entry.Output, true
 }
 
-// verifyBuildInputs re-stats every recorded file and directory and reports
-// whether all signatures still match exactly.
+// verifyBuildInputs re-hashes every recorded file and re-lists every recorded
+// directory and reports whether all signatures still match exactly.
 func verifyBuildInputs(rootDir string, entry buildCacheEntry) bool {
 	for _, f := range entry.Files {
 		path := f.Path
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(rootDir, path)
 		}
-		st, err := os.Stat(path)
-		if err != nil || st.Size() != f.Size || st.ModTime().UnixNano() != f.ModTimeNano {
+		hash, size, err := hashFileContent(path)
+		if err != nil || size != f.Size || hash != f.SHA256 {
 			return false
 		}
 	}
@@ -281,8 +301,16 @@ func verifyBuildInputs(rootDir string, entry buildCacheEntry) bool {
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(rootDir, path)
 		}
-		st, err := os.Stat(path)
-		if err != nil || !st.IsDir() || st.ModTime().UnixNano() != d.ModTimeNano {
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return false
+		}
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		slices.Sort(names)
+		if !slices.Equal(names, d.Entries) {
 			return false
 		}
 	}
@@ -307,25 +335,25 @@ func (c *buildCache) store(rootDir, dir, kustFile string, rec *recordingFs, outp
 		return
 	}
 
-	// The kustomization file and the build directory are always inputs, even
-	// if a future kustomize variant reads them through another path.
-	st, err := os.Stat(kustFile)
+	// The kustomization file is always an input, even if a future kustomize
+	// variant reads it through another path.
+	kustHash, kustSize, err := hashFileContent(kustFile)
 	if err != nil {
 		return
 	}
 	kust := buildFileInput{
-		Path:        cachePathRelative(rootDir, normalizeFsPath(kustFile)),
-		Size:        st.Size(),
-		ModTimeNano: st.ModTime().UnixNano(),
+		Path:   cachePathRelative(rootDir, normalizeFsPath(kustFile)),
+		Size:   kustSize,
+		SHA256: kustHash,
 	}
 	if !slices.Contains(files, kust) {
 		files = append(files, kust)
 	}
 	buildDir := buildDirInput{
-		Path:        cachePathRelative(rootDir, normalizeFsPath(dir)),
-		ModTimeNano: statDirMtimeNano(dir),
+		Path:    cachePathRelative(rootDir, normalizeFsPath(dir)),
+		Entries: listDirEntries(dir),
 	}
-	if buildDir.ModTimeNano != 0 && !slices.Contains(dirs, buildDir) {
+	if buildDir.Entries != nil && !slices.ContainsFunc(dirs, func(d buildDirInput) bool { return d.Path == buildDir.Path }) {
 		dirs = append(dirs, buildDir)
 	}
 	sortInputs(files, dirs)
@@ -343,7 +371,7 @@ func (c *buildCache) store(rootDir, dir, kustFile string, rec *recordingFs, outp
 		return
 	}
 
-	path := c.entryPath(rootDir, dir, kustFile, st.Size(), st.ModTime().UnixNano())
+	path := c.entryPath(rootDir, dir, kustFile, kustHash)
 	if err := os.MkdirAll(c.dir, 0o755); err != nil {
 		c.warnf("mkdir", "build cache directory %s unavailable: %v", c.dir, err)
 		return
@@ -361,14 +389,19 @@ func (c *buildCache) store(rootDir, dir, kustFile string, rec *recordingFs, outp
 	}
 }
 
-// statDirMtimeNano returns a directory's mtime, or 0 when it cannot be
-// stat'ed (the caller then skips the record).
-func statDirMtimeNano(dir string) int64 {
-	st, err := os.Stat(dir)
-	if err != nil || !st.IsDir() {
-		return 0
+// listDirEntries returns the sorted direct entry names of dir, or nil when it
+// cannot be listed (the caller then skips the record).
+func listDirEntries(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
 	}
-	return st.ModTime().UnixNano()
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	slices.Sort(names)
+	return names
 }
 
 // sweep evicts oldest-first when the cache grew beyond maxBuildCacheEntries
