@@ -32,16 +32,23 @@ func (o helmCacheOptions) inflaterOptions() []helm.InflaterOption {
 	}
 }
 
-// kustomizeCacheOptions carries kustomize remote-resource cache settings from
-// CLI flags/env into the kustomize Builder. Independent of the Helm cache.
+// kustomizeCacheOptions carries the two kustomize caches from CLI flags/env
+// into the kustomize Builder: the remote resource cache
+// (remoteDir/remoteTtl) and the build output cache
+// (buildCacheDir/buildCacheTTL). Independent of the Helm cache. Both follow
+// the same conventions: dir "off"/"none"/"disabled" disables the cache, ttl 0
+// always bypasses it (entries are still refreshed on disk).
 type kustomizeCacheOptions struct {
-	dir string
-	ttl time.Duration
+	remoteDir     string
+	remoteTtl     time.Duration
+	buildCacheDir string
+	buildCacheTTL time.Duration
 }
 
 func (o kustomizeCacheOptions) builderOptions() []kustomize.BuilderOption {
 	return []kustomize.BuilderOption{
-		kustomize.WithRemoteCache(o.dir, o.ttl),
+		kustomize.WithRemoteCache(o.remoteDir, o.remoteTtl),
+		kustomize.WithBuildCache(o.buildCacheDir, o.buildCacheTTL),
 	}
 }
 
@@ -56,16 +63,25 @@ func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL *time
 		"How long cached Helm repo indexes and OCI tag resolutions stay fresh; 0 always refreshes (env: FLUXVIEW_HELM_INDEX_TTL)")
 }
 
-// registerKustomizeCacheFlags registers the kustomize remote-resource cache
-// flags shared by the commands. Defaults come from
-// kustomize.DefaultCacheDir()/DefaultCacheTTL() so the
-// FLUXVIEW_KUSTOMIZE_CACHE_DIR / FLUXVIEW_KUSTOMIZE_CACHE_TTL env vars are
-// honored unless overridden by an explicit flag.
-func registerKustomizeCacheFlags(cmd *cobra.Command, cacheDir *string, ttl *time.Duration) {
-	cmd.Flags().StringVar(cacheDir, "kustomize-cache-dir", kustomize.DefaultCacheDir(),
-		"Cache directory for remote resources referenced by kustomizations (env: FLUXVIEW_KUSTOMIZE_CACHE_DIR)")
-	cmd.Flags().DurationVar(ttl, "kustomize-cache-ttl", kustomize.DefaultCacheTTL(),
-		"How long cached remote kustomize resources with floating refs (branch/HEAD URLs) stay fresh; pinned version URLs never expire; 0 always refreshes (env: FLUXVIEW_KUSTOMIZE_CACHE_TTL)")
+// registerKustomizeCacheFlags registers the kustomize cache flags shared by
+// the commands, following one convention for every fluxview cache:
+//
+//	--<name>-cache-dir  cache directory; "off"/"none"/"disabled" disables
+//	--<name>-cache-ttl  freshness window; 0 always bypasses (still writes)
+//
+// Here <name> is "remote" (resources fetched by URL, referenced by
+// kustomizations) and "build" (kustomize build outputs). Defaults come from
+// kustomize.DefaultRemoteCacheDir()/DefaultRemoteCacheTTL()/
+// DefaultBuildCacheDir()/DefaultBuildCacheTTL().
+func registerKustomizeCacheFlags(cmd *cobra.Command, remoteDir *string, remoteTtl *time.Duration, buildCacheDir *string, buildCacheTTL *time.Duration) {
+	cmd.Flags().StringVar(remoteDir, "remote-cache-dir", kustomize.DefaultRemoteCacheDir(),
+		"Cache directory for remote resources referenced by kustomizations; off/none disables")
+	cmd.Flags().DurationVar(remoteTtl, "remote-cache-ttl", kustomize.DefaultRemoteCacheTTL(),
+		"How long cached remote resources with floating refs (branch/HEAD URLs) stay fresh; pinned version URLs never expire; 0 always re-fetches")
+	cmd.Flags().StringVar(buildCacheDir, "build-cache-dir", kustomize.DefaultBuildCacheDir(),
+		"Cache directory for kustomize build outputs, reused while input files are unchanged; off/none disables (env: FLUXVIEW_BUILD_CACHE_DIR)")
+	cmd.Flags().DurationVar(buildCacheTTL, "build-cache-ttl", kustomize.DefaultBuildCacheTTL(),
+		"How long cached kustomize build outputs stay usable; 0 always rebuilds (entries are still refreshed) (env: FLUXVIEW_BUILD_CACHE_TTL)")
 }
 
 // buildHRInflation discovers HelmReleases through the Flux Kustomization pipeline

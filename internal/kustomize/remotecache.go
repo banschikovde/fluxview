@@ -32,7 +32,7 @@ import (
 // no network requests of its own.
 //
 // The cache is fully independent of the Helm cache: its own directory
-// (--kustomize-cache-dir) and its own TTL (--kustomize-cache-ttl), defaulting
+// (--remote-cache-dir) and its own TTL (--remote-cache-ttl), defaulting
 // to a sibling directory under ~/.cache/fluxview/.
 //
 // Classification:
@@ -53,49 +53,26 @@ import (
 // MB; 64 MiB is a generous ceiling.
 const maxRemoteResourceBytes = 64 << 20
 
-// DefaultCacheDir returns the kustomize remote resource cache directory:
-// $FLUXVIEW_KUSTOMIZE_CACHE_DIR, else $XDG_CACHE_HOME/fluxview/kustomize-remote,
-// else ~/.cache/fluxview/kustomize-remote. A sibling of the Helm cache under
-// the same parent, so one volume mount covers both.
-func DefaultCacheDir() string {
-	if dir := os.Getenv("FLUXVIEW_KUSTOMIZE_CACHE_DIR"); dir != "" {
-		return dir
-	}
+// DefaultRemoteCacheDir returns the remote resource cache directory:
+// $XDG_CACHE_HOME/fluxview/kustomize-remote, else
+// ~/.cache/fluxview/kustomize-remote. A sibling of the Helm cache under the
+// same parent, so one volume mount covers both. The special values "off",
+// "none" and "disabled" disable the cache (checked in WithRemoteCache).
+func DefaultRemoteCacheDir() string {
 	if base := os.Getenv("XDG_CACHE_HOME"); base != "" {
 		return filepath.Join(base, "fluxview", "kustomize-remote")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(os.TempDir(), "fluxview-kustomize-cache")
+		return filepath.Join(os.TempDir(), "fluxview-remote-cache")
 	}
 	return filepath.Join(home, ".cache", "fluxview", "kustomize-remote")
 }
 
-// warnCacheTTLOnce keeps the invalid-env warning to a single line per process:
-// DefaultCacheTTL runs both at flag registration (build, diff and validate
-// commands) and inside newRemoteCache. Tests reset it
-// (warnCacheTTLOnce = sync.Once{}) to assert the warning order-independently —
-// keep it a plain variable, not a func.
-var warnCacheTTLOnce sync.Once
-
-// DefaultCacheTTL returns the freshness TTL for floating (non-pinned) remote
-// resources: $FLUXVIEW_KUSTOMIZE_CACHE_TTL (Go duration, e.g. "10m"), else
-// 10 minutes. An unparsable value warns once and falls back to the default;
-// a negative value flows through and is normalized by newRemoteCache.
-func DefaultCacheTTL() time.Duration {
-	const def = 10 * time.Minute
-	v := os.Getenv("FLUXVIEW_KUSTOMIZE_CACHE_TTL")
-	if v == "" {
-		return def
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		warnCacheTTLOnce.Do(func() {
-			fmt.Fprintf(os.Stderr, "Warning: invalid FLUXVIEW_KUSTOMIZE_CACHE_TTL %q, using %s\n", v, def)
-		})
-		return def
-	}
-	return d
+// DefaultRemoteCacheTTL returns the freshness TTL for floating (non-pinned)
+// remote resources: 10 minutes.
+func DefaultRemoteCacheTTL() time.Duration {
+	return 10 * time.Minute
 }
 
 // remoteCache downloads remote kustomize resources into an on-disk cache and
@@ -130,10 +107,10 @@ type remoteCache struct {
 // directories for repositories without remote refs.
 func newRemoteCache(cacheDir string, ttl time.Duration) *remoteCache {
 	if cacheDir == "" {
-		cacheDir = DefaultCacheDir()
+		cacheDir = DefaultRemoteCacheDir()
 	}
 	// Anchor the directory absolutely: a relative dir (e.g. CI's
-	// FLUXVIEW_KUSTOMIZE_CACHE_DIR=.cache/kustomize-remote) resolves against
+	// --remote-cache-dir .cache/kustomize-remote) resolves against
 	// the process working directory here, once. Without this the paths
 	// rewritten into kustomization files stay relative and kustomize would
 	// resolve them against each kustomization's own directory instead.

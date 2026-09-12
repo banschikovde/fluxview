@@ -17,11 +17,13 @@ import (
 
 // ValidateFlags holds flags for the validate command.
 type ValidateFlags struct {
-	Path              string
-	Namespace         string
-	SchemaDir         string
-	KustomizeCacheDir string
-	KustomizeCacheTTL time.Duration
+	Path           string
+	Namespace      string
+	SchemaDir      string
+	RemoteCacheDir string
+	RemoteCacheTTL time.Duration
+	BuildCacheDir  string
+	BuildCacheTTL  time.Duration
 }
 
 func newValidateCmd() *cobra.Command {
@@ -47,7 +49,7 @@ Examples:
 	cmd.Flags().StringVarP(&flags.Path, "path", "p", "", "Path to the cluster directory in the repository")
 	cmd.Flags().StringVarP(&flags.Namespace, "namespace", "n", "", "Filter output resources by namespace")
 	cmd.Flags().StringVar(&flags.SchemaDir, "schema-dir", "", "Directory with CRD schema files (default: ./crds/)")
-	registerKustomizeCacheFlags(cmd, &flags.KustomizeCacheDir, &flags.KustomizeCacheTTL)
+	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.BuildCacheDir, &flags.BuildCacheTTL)
 
 	return cmd
 }
@@ -97,7 +99,12 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 		return NewExitError(fmt.Errorf("parsing Kustomization resources: %w", err), ExitCodeError)
 	}
 
-	builder := kustomize.NewBuilder(repoRoot, kustomizeCacheOptions{dir: flags.KustomizeCacheDir, ttl: flags.KustomizeCacheTTL}.builderOptions()...)
+	builder := kustomize.NewBuilder(repoRoot, kustomizeCacheOptions{
+		remoteDir:     flags.RemoteCacheDir,
+		remoteTtl:     flags.RemoteCacheTTL,
+		buildCacheDir: flags.BuildCacheDir,
+		buildCacheTTL: flags.BuildCacheTTL,
+	}.builderOptions()...)
 	buildCache := make(buildCache)
 	configMaps := resolveConfigMaps(ctx, absClusterPath, builder, buildCache)
 	secrets := resolveSecrets(ctx, absClusterPath, builder, buildCache)

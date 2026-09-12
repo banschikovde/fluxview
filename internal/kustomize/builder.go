@@ -22,17 +22,21 @@ type Builder struct {
 	// remote caches remote resources referenced by kustomizations and
 	// rewrites their URLs to local cache paths; nil when disabled.
 	remote *remoteCache
+	// buildCache caches kustomize build outputs on disk keyed by the input
+	// file state; nil when disabled.
+	buildCache *buildCache
 }
 
 // BuilderOption configures a Builder created via NewBuilder.
 type BuilderOption func(*Builder)
 
 // WithRemoteCache enables the on-disk cache for remote resources referenced by
-// kustomization files (http(s) entries in resources). The cache is independent
-// of the Helm cache: its own directory (--kustomize-cache-dir, env
-// FLUXVIEW_KUSTOMIZE_CACHE_DIR) and its own TTL (--kustomize-cache-ttl):
-// pinned version URLs are cached without TTL, floating refs honor ttl
-// (0 = always re-fetch). An empty cacheDir means DefaultCacheDir().
+// kustomization files (http(s) entries in resources): --remote-cache-dir for
+// the directory, --remote-cache-ttl for the TTL. Pinned version URLs are
+// cached without TTL, floating refs honor the ttl (0 = always re-fetch). An
+// empty cacheDir means DefaultRemoteCacheDir(); the values
+// "off"/"none"/"disabled" disable the cache entirely (same spell as the build
+// cache).
 //
 // With the cache enabled, builds serve rewritten kustomization content whose
 // remote URLs point at cached files, so kustomize makes no network requests
@@ -40,7 +44,27 @@ type BuilderOption func(*Builder)
 // keep their previous behavior — kustomize fetches them itself.
 func WithRemoteCache(cacheDir string, ttl time.Duration) BuilderOption {
 	return func(b *Builder) {
+		if cacheDirDisabled(cacheDir) {
+			return
+		}
 		b.remote = newRemoteCache(cacheDir, ttl)
+	}
+}
+
+// WithBuildCache enables the on-disk cache of kustomize build outputs:
+// --build-cache-dir / env FLUXVIEW_BUILD_CACHE_DIR, TTL via
+// --build-cache-ttl / FLUXVIEW_BUILD_CACHE_TTL. A cached output is served
+// only while every input file recorded during the original build still has
+// the same size and mtime, and every recorded directory the same mtime —
+// any edit, checkout or added file invalidates the affected entries.
+// A ttl of 0 always rebuilds but still refreshes entries for later runs;
+// the dir values "off"/"none"/"disabled" disable the cache entirely.
+func WithBuildCache(cacheDir string, ttl time.Duration) BuilderOption {
+	return func(b *Builder) {
+		if cacheDirDisabled(cacheDir) {
+			return
+		}
+		b.buildCache = newBuildCache(cacheDir, ttl)
 	}
 }
 
@@ -74,6 +98,10 @@ func (b *Builder) RootDir() string {
 // resources are downloaded before the first build; kustomization reads then go
 // through a rewriting filesystem layer that substitutes cached paths for URLs.
 //
+// When a build cache is configured, outputs are served from disk while the
+// input manifest recorded for them still matches the filesystem; otherwise the
+// build runs through a recording filesystem layer and refreshes the entry.
+//
 // ctx is checked before the build starts; the kustomize library itself does
 // not expose mid-build cancellation points, so a build already in flight runs
 // to completion even if ctx is cancelled.
@@ -84,6 +112,12 @@ func (b *Builder) Build(ctx context.Context, dir string) ([]byte, error) {
 	kustFile := findKustomizationFile(dir)
 	if kustFile == "" {
 		return nil, fmt.Errorf("no kustomization file found in %s", dir)
+	}
+
+	if b.buildCache != nil {
+		if output, ok := b.buildCache.lookup(b.rootDir, dir, kustFile); ok {
+			return output, nil
+		}
 	}
 
 	var extraRoots []string
@@ -98,6 +132,13 @@ func (b *Builder) Build(ctx context.Context, dir string) ([]byte, error) {
 	}
 
 	fsys := newRestrictedFs(b.rootDir, extraRoots...)
+	// The recording layer sits below the URL rewriter so it sees the final
+	// local paths (rewritten remote URLs included) that the build reads.
+	var rec *recordingFs
+	if b.buildCache != nil {
+		rec = newRecordingFs(fsys)
+		fsys = rec
+	}
 	if b.remote != nil {
 		fsys = b.remote.wrapFs(fsys)
 	}
@@ -110,6 +151,10 @@ func (b *Builder) Build(ctx context.Context, dir string) ([]byte, error) {
 	yamlOutput, err := resMap.AsYaml()
 	if err != nil {
 		return nil, fmt.Errorf("serializing kustomize output: %w", err)
+	}
+
+	if b.buildCache != nil {
+		b.buildCache.store(b.rootDir, dir, kustFile, rec, yamlOutput)
 	}
 
 	return yamlOutput, nil

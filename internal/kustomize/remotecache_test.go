@@ -714,7 +714,7 @@ func TestRemoteCache_NonYAMLBodyFallsBack(t *testing.T) {
 }
 
 // TestRemoteCache_RelativeCacheDirAnchoredToCWD: a relative cache directory
-// (CI passes FLUXVIEW_KUSTOMIZE_CACHE_DIR=.cache/...) must resolve against the
+// (CI passes --remote-cache-dir .cache/...) must resolve against the
 // process working directory — never against a kustomization's own directory.
 // Regression test: with a relative dir the rewritten resource path stayed
 // relative, kustomize resolved it against the nested kustomization root and
@@ -751,52 +751,36 @@ func TestRemoteCache_RelativeCacheDirAnchoredToCWD(t *testing.T) {
 	}
 }
 
-// TestDefaultCacheTTLInvalidEnvWarnsOnce: an unparsable
-// FLUXVIEW_KUSTOMIZE_CACHE_TTL warns exactly once and falls back to 10m.
-func TestDefaultCacheTTLInvalidEnvWarnsOnce(t *testing.T) {
-	t.Setenv("FLUXVIEW_KUSTOMIZE_CACHE_TTL", "not-a-duration")
-	warnCacheTTLOnce = sync.Once{}
-
-	stderr := captureStderr(t, func() {
-		if ttl := DefaultCacheTTL(); ttl != 10*time.Minute {
-			t.Errorf("DefaultCacheTTL() = %s, want default 10m for invalid env", ttl)
+// TestRemoteCacheDisabledViaDir: WithRemoteCache with the shared disable
+// spell leaves the Builder without a remote cache.
+func TestRemoteCacheDisabledViaDir(t *testing.T) {
+	for _, dir := range []string{"off", "none", "DISABLED"} {
+		if b := NewBuilder(t.TempDir(), WithRemoteCache(dir, time.Hour)); b.remote != nil {
+			t.Fatalf("remote cache must be disabled with dir=%q", dir)
 		}
-	})
-	if !strings.Contains(stderr, "invalid FLUXVIEW_KUSTOMIZE_CACHE_TTL") {
-		t.Fatalf("expected invalid-TTL warning, got: %q", stderr)
 	}
-	stderr = captureStderr(t, func() {
-		if ttl := DefaultCacheTTL(); ttl != 10*time.Minute {
-			t.Errorf("DefaultCacheTTL() = %s, want default 10m for invalid env", ttl)
-		}
-	})
-	if stderr != "" {
-		t.Fatalf("warning repeated on second call: %q", stderr)
+	if b := NewBuilder(t.TempDir(), WithRemoteCache("", time.Hour)); b.remote == nil {
+		t.Fatal("empty dir must keep the remote cache enabled (default dir)")
 	}
 }
 
-// TestDefaultCacheTTLAndDir covers env resolution: unset → default, valid
-// value honored, empty cache dir → default dir.
-func TestDefaultCacheTTLAndDir(t *testing.T) {
-	t.Setenv("FLUXVIEW_KUSTOMIZE_CACHE_TTL", "")
-	if got := DefaultCacheTTL(); got != 10*time.Minute {
-		t.Errorf("DefaultCacheTTL() unset = %s, want 10m", got)
-	}
-	t.Setenv("FLUXVIEW_KUSTOMIZE_CACHE_TTL", "90s")
-	if got := DefaultCacheTTL(); got != 90*time.Second {
-		t.Errorf("DefaultCacheTTL() = %s, want 90s", got)
+// TestDefaultRemoteCacheTTLAndDir covers the defaults and the
+// newRemoteCache normalization of empty dir / negative TTL.
+func TestDefaultRemoteCacheTTLAndDir(t *testing.T) {
+	if got := DefaultRemoteCacheTTL(); got != 10*time.Minute {
+		t.Errorf("DefaultRemoteCacheTTL() = %s, want 10m", got)
 	}
 
-	t.Setenv("FLUXVIEW_KUSTOMIZE_CACHE_DIR", "/custom/ks-cache")
-	if got := DefaultCacheDir(); got != "/custom/ks-cache" {
-		t.Errorf("DefaultCacheDir() = %s, want /custom/ks-cache", got)
+	t.Setenv("XDG_CACHE_HOME", "/custom-xdg")
+	if got := DefaultRemoteCacheDir(); got != "/custom-xdg/fluxview/kustomize-remote" {
+		t.Errorf("DefaultRemoteCacheDir() = %s, want /custom-xdg/fluxview/kustomize-remote", got)
 	}
 
-	// An explicitly empty cache dir (e.g. --kustomize-cache-dir=) means
+	// An explicitly empty cache dir (e.g. --remote-cache-dir=) means
 	// "default", and a negative TTL is normalized to 0.
 	rc := newRemoteCache("", -time.Minute)
-	if rc.dir != "/custom/ks-cache" {
-		t.Errorf("newRemoteCache dir = %s, want default %s", rc.dir, "/custom/ks-cache")
+	if rc.dir != "/custom-xdg/fluxview/kustomize-remote" {
+		t.Errorf("newRemoteCache dir = %s, want default %s", rc.dir, "/custom-xdg/fluxview/kustomize-remote")
 	}
 	if rc.ttl != 0 {
 		t.Errorf("newRemoteCache ttl = %s, want 0 (negative normalized)", rc.ttl)

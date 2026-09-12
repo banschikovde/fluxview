@@ -26,17 +26,19 @@ var errAlreadyWarned = errors.New("build already warned")
 
 // DiffFlags holds flags for the diff command.
 type DiffFlags struct {
-	Path              string
-	Namespace         string
-	Color             string
-	BranchOrig        string
-	Unified           int
-	SkipCRDs          bool
-	StripAttrs        string
-	HelmCacheDir      string
-	HelmIndexTTL      time.Duration
-	KustomizeCacheDir string
-	KustomizeCacheTTL time.Duration
+	Path           string
+	Namespace      string
+	Color          string
+	BranchOrig     string
+	Unified        int
+	SkipCRDs       bool
+	StripAttrs     string
+	HelmCacheDir   string
+	HelmIndexTTL   time.Duration
+	RemoteCacheDir string
+	RemoteCacheTTL time.Duration
+	BuildCacheDir  string
+	BuildCacheTTL  time.Duration
 }
 
 func newDiffCmd() *cobra.Command {
@@ -72,7 +74,7 @@ Examples:
 	cmd.Flags().BoolVar(&flags.SkipCRDs, "skip-crds", false, "Skip CustomResourceDefinition resources in diff")
 	cmd.Flags().StringVar(&flags.StripAttrs, "strip-attrs", "", "Comma-separated keys to strip from diff (e.g. helm.sh/chart,status)")
 	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL)
-	registerKustomizeCacheFlags(cmd, &flags.KustomizeCacheDir, &flags.KustomizeCacheTTL)
+	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.BuildCacheDir, &flags.BuildCacheTTL)
 	return cmd
 }
 
@@ -145,7 +147,12 @@ func runDiff(ctx context.Context, args []string, flags *DiffFlags) error {
 }
 
 func runDiffKS(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, compareCommit string, flags *DiffFlags) error {
-	ksCache := kustomizeCacheOptions{dir: flags.KustomizeCacheDir, ttl: flags.KustomizeCacheTTL}
+	ksCache := kustomizeCacheOptions{
+		remoteDir:     flags.RemoteCacheDir,
+		remoteTtl:     flags.RemoteCacheTTL,
+		buildCacheDir: flags.BuildCacheDir,
+		buildCacheTTL: flags.BuildCacheTTL,
+	}
 	currentOutput, err := buildKSOutput(ctx, clusterPath, repoRoot, name, ksCache)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building current state: %w", err), ExitCodeError)
@@ -174,7 +181,12 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	// "added" (green) / "removed" (red) diff.
 	currentOutput, err := buildHRInflation(ctx, clusterPath, repoRoot, name, flags.Namespace, false, true,
 		helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL},
-		kustomizeCacheOptions{dir: flags.KustomizeCacheDir, ttl: flags.KustomizeCacheTTL})
+		kustomizeCacheOptions{
+			remoteDir:     flags.RemoteCacheDir,
+			remoteTtl:     flags.RemoteCacheTTL,
+			buildCacheDir: flags.BuildCacheDir,
+			buildCacheTTL: flags.BuildCacheTTL,
+		})
 	if err != nil {
 		return NewExitError(fmt.Errorf("building current state: %w", err), ExitCodeError)
 	}
@@ -197,7 +209,12 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	} else {
 		compareOutput, err := buildHRInflation(ctx, worktreeClusterPath, worktreePath, name, flags.Namespace, true, true,
 			helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL},
-			kustomizeCacheOptions{dir: flags.KustomizeCacheDir, ttl: flags.KustomizeCacheTTL})
+			kustomizeCacheOptions{
+				remoteDir:     flags.RemoteCacheDir,
+				remoteTtl:     flags.RemoteCacheTTL,
+				buildCacheDir: flags.BuildCacheDir,
+				buildCacheTTL: flags.BuildCacheTTL,
+			})
 		if err != nil {
 			// A HelmRelease selected by name may legitimately not exist at the
 			// comparison revision (added in this branch) — that's a valid

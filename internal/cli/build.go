@@ -21,14 +21,16 @@ import (
 
 // BuildFlags holds flags for the build command.
 type BuildFlags struct {
-	Path              string
-	Namespace         string
-	SkipCRDs          bool
-	StripAttrs        string
-	HelmCacheDir      string
-	HelmIndexTTL      time.Duration
-	KustomizeCacheDir string
-	KustomizeCacheTTL time.Duration
+	Path           string
+	Namespace      string
+	SkipCRDs       bool
+	StripAttrs     string
+	HelmCacheDir   string
+	HelmIndexTTL   time.Duration
+	RemoteCacheDir string
+	RemoteCacheTTL time.Duration
+	BuildCacheDir  string
+	BuildCacheTTL  time.Duration
 }
 
 func newBuildCmd() *cobra.Command {
@@ -60,7 +62,7 @@ Examples:
 	cmd.Flags().BoolVar(&flags.SkipCRDs, "skip-crds", false, "Skip CustomResourceDefinition resources in output")
 	cmd.Flags().StringVar(&flags.StripAttrs, "strip-attrs", "", "Comma-separated keys to strip from output (e.g. helm.sh/chart,status)")
 	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL)
-	registerKustomizeCacheFlags(cmd, &flags.KustomizeCacheDir, &flags.KustomizeCacheTTL)
+	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.BuildCacheDir, &flags.BuildCacheTTL)
 
 	return cmd
 }
@@ -122,7 +124,12 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return NewExitError(fmt.Errorf("parsing Kustomization resources: %w", err), ExitCodeError)
 	}
 
-	builder := kustomize.NewBuilder(repoRoot, kustomizeCacheOptions{dir: flags.KustomizeCacheDir, ttl: flags.KustomizeCacheTTL}.builderOptions()...)
+	builder := kustomize.NewBuilder(repoRoot, kustomizeCacheOptions{
+		remoteDir:     flags.RemoteCacheDir,
+		remoteTtl:     flags.RemoteCacheTTL,
+		buildCacheDir: flags.BuildCacheDir,
+		buildCacheTTL: flags.BuildCacheTTL,
+	}.builderOptions()...)
 	buildCache := make(buildCache)
 	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
 	secrets := resolveSecrets(ctx, clusterPath, builder, buildCache)
@@ -181,7 +188,12 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 
 	output, err := buildHRInflation(ctx, clusterPath, repoRoot, name, flags.Namespace, false, false,
 		helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL},
-		kustomizeCacheOptions{dir: flags.KustomizeCacheDir, ttl: flags.KustomizeCacheTTL})
+		kustomizeCacheOptions{
+			remoteDir:     flags.RemoteCacheDir,
+			remoteTtl:     flags.RemoteCacheTTL,
+			buildCacheDir: flags.BuildCacheDir,
+			buildCacheTTL: flags.BuildCacheTTL,
+		})
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}
