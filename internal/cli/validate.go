@@ -9,7 +9,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/banschikovde/fluxview/internal/flux"
 	"github.com/banschikovde/fluxview/internal/git"
 	"github.com/banschikovde/fluxview/internal/kustomize"
 	"github.com/banschikovde/fluxview/internal/validate"
@@ -93,7 +92,8 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 
 	fmt.Fprintf(os.Stderr, "Loaded %d CRD schemas from %s\n", validator.SchemaCount(), schemaDir)
 
-	parser := flux.NewParser(absClusterPath)
+	scans := newScanCache()
+	parser := scans.parserFor(absClusterPath)
 	kustomizations, err := parser.ParseKustomizations(ctx)
 	if err != nil {
 		return NewExitError(fmt.Errorf("parsing Kustomization resources: %w", err), ExitCodeError)
@@ -106,10 +106,10 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 		buildCacheTTL: flags.BuildCacheTTL,
 	}.builderOptions()...)
 	buildCache := make(buildCache)
-	configMaps := resolveConfigMaps(ctx, absClusterPath, builder, buildCache)
-	secrets := resolveSecrets(ctx, absClusterPath, builder, buildCache)
+	configMaps := resolveConfigMaps(ctx, scans, absClusterPath, builder, buildCache)
+	secrets := resolveSecrets(ctx, scans, absClusterPath, builder, buildCache)
 
-	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, absClusterPath, configMaps, secrets, false, buildCache)
+	output, err := buildKSContent(ctx, scans, builder, kustomizations, repoRoot, absClusterPath, configMaps, secrets, false, buildCache)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}

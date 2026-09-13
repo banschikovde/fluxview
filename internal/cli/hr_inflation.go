@@ -95,18 +95,18 @@ func registerKustomizeCacheFlags(cmd *cobra.Command, remoteDir *string, remoteTt
 // strict (diff mode) turns skip-worthy inflation failures into a returned
 // error instead of a warning + skip, so an unbuildable state never produces a
 // misleading partial diff.
-func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespace string, quiet, strict bool, helmCache helmCacheOptions, ksCache kustomizeCacheOptions) ([]byte, error) {
-	kustomizations, err := flux.NewParser(clusterPath).ParseKustomizations(ctx)
+func buildHRInflation(ctx context.Context, scans *scanCache, clusterPath, repoRoot, name, namespace string, quiet, strict bool, helmCache helmCacheOptions, ksCache kustomizeCacheOptions) ([]byte, error) {
+	kustomizations, err := scans.parserFor(clusterPath).ParseKustomizations(ctx)
 	if err != nil {
 		return nil, nil // no Flux KS — valid for diff
 	}
 
 	builder := kustomize.NewBuilder(repoRoot, ksCache.builderOptions()...)
 	buildCache := make(buildCache)
-	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
-	secrets := resolveSecrets(ctx, clusterPath, builder, buildCache)
+	configMaps := resolveConfigMaps(ctx, scans, clusterPath, builder, buildCache)
+	secrets := resolveSecrets(ctx, scans, clusterPath, builder, buildCache)
 
-	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, true, buildCache)
+	output, err := buildKSContent(ctx, scans, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, true, buildCache)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +163,7 @@ func buildHRInflation(ctx context.Context, clusterPath, repoRoot, name, namespac
 	buildOCI := flux.ParseOCIRepositoriesFromBytes(output)
 	buildCMs := flux.ParseConfigMapsFromBytes(output)
 	buildSecrets := flux.ParseSecretsFromBytes(output)
-	rawRepos, rawOCI, rawCMs, rawSecrets := resolveHelmInflationSources(ctx, clusterPath, repoRoot, quiet)
+	rawRepos, rawOCI, rawCMs, rawSecrets := resolveHelmInflationSources(ctx, scans, clusterPath, repoRoot, quiet)
 
 	// Merge: build-output versions are authoritative. Raw-parsed versions
 	// only fill in resources NOT present in build output (by name).
@@ -482,14 +482,17 @@ func resolveHelmRepoURL(hr flux.HelmRelease, helmRepos []flux.HelmRepository, se
 // type is first parsed from clusterPath; if none are found there, the search
 // falls back to repoRoot so that sources defined outside the cluster path
 // (e.g. a shared sources/ or flux-system/ directory) are still resolved.
-func resolveHelmInflationSources(ctx context.Context, clusterPath, repoRoot string, quiet bool) (helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository, configMaps []flux.ConfigMap, secrets []flux.Secret) {
+func resolveHelmInflationSources(ctx context.Context, scans *scanCache, clusterPath, repoRoot string, quiet bool) (helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository, configMaps []flux.ConfigMap, secrets []flux.Secret) {
 	stderr := func(format string, args ...any) {
 		if !quiet {
 			fmt.Fprintf(os.Stderr, format, args...)
 		}
 	}
 
-	parser := flux.NewParser(clusterPath)
+	// All four ParseXxx calls below share one cached snapshot per root: the
+	// clusterPath walk happens once (already done for ParseKustomizations by
+	// the caller), and the repoRoot fallback walk at most once.
+	parser := scans.parserFor(clusterPath)
 
 	helmRepos, err := parser.ParseHelmRepositories(ctx)
 	if err != nil {
@@ -497,7 +500,7 @@ func resolveHelmInflationSources(ctx context.Context, clusterPath, repoRoot stri
 		helmRepos = nil
 	}
 	if len(helmRepos) == 0 && repoRoot != "" && repoRoot != clusterPath {
-		if rootRepos, rErr := flux.NewParser(repoRoot).ParseHelmRepositories(ctx); rErr != nil {
+		if rootRepos, rErr := scans.parserFor(repoRoot).ParseHelmRepositories(ctx); rErr != nil {
 			stderr("Warning: could not parse HelmRepositories from %s: %v\n", repoRoot, rErr)
 		} else {
 			helmRepos = rootRepos
@@ -510,7 +513,7 @@ func resolveHelmInflationSources(ctx context.Context, clusterPath, repoRoot stri
 		ociRepos = nil
 	}
 	if len(ociRepos) == 0 && repoRoot != "" && repoRoot != clusterPath {
-		if rootOCI, rErr := flux.NewParser(repoRoot).ParseOCIRepositories(ctx); rErr != nil {
+		if rootOCI, rErr := scans.parserFor(repoRoot).ParseOCIRepositories(ctx); rErr != nil {
 			stderr("Warning: could not parse OCIRepositories from %s: %v\n", repoRoot, rErr)
 		} else {
 			ociRepos = rootOCI
@@ -523,7 +526,7 @@ func resolveHelmInflationSources(ctx context.Context, clusterPath, repoRoot stri
 		configMaps = nil
 	}
 	if len(configMaps) == 0 && repoRoot != "" && repoRoot != clusterPath {
-		if rootCMs, rErr := flux.NewParser(repoRoot).ParseConfigMaps(ctx); rErr != nil {
+		if rootCMs, rErr := scans.parserFor(repoRoot).ParseConfigMaps(ctx); rErr != nil {
 			stderr("Warning: could not parse ConfigMaps from %s: %v\n", repoRoot, rErr)
 		} else {
 			configMaps = rootCMs
@@ -536,7 +539,7 @@ func resolveHelmInflationSources(ctx context.Context, clusterPath, repoRoot stri
 		secrets = nil
 	}
 	if len(secrets) == 0 && repoRoot != "" && repoRoot != clusterPath {
-		if rootSecrets, rErr := flux.NewParser(repoRoot).ParseSecrets(ctx); rErr != nil {
+		if rootSecrets, rErr := scans.parserFor(repoRoot).ParseSecrets(ctx); rErr != nil {
 			stderr("Warning: could not parse Secrets from %s: %v\n", repoRoot, rErr)
 		} else {
 			secrets = rootSecrets

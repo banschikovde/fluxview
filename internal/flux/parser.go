@@ -16,14 +16,33 @@ import (
 )
 
 // Parser discovers and parses Flux resources from the local filesystem.
+//
+// The first ParseXxx call performs one tree walk and caches a
+// ResourceSnapshot covering every supported resource type; later ParseXxx
+// calls on the same Parser filter that snapshot instead of re-walking (and
+// re-reading + re-parsing) the tree. Share one Parser per root path within
+// a command to pay for exactly one walk. A Parser is not safe for
+// concurrent use.
 type Parser struct {
 	// RootPath is the root path of the git repository or cluster directory.
 	RootPath string
+
+	snapshot *ResourceSnapshot
+	snapErr  error
 }
 
 // NewParser creates a new Parser rooted at the given path.
 func NewParser(rootPath string) *Parser {
 	return &Parser{RootPath: rootPath}
+}
+
+// snapshotOf returns the cached all-types walk result, walking the root
+// lazily on the first call.
+func (p *Parser) snapshotOf(ctx context.Context) (*ResourceSnapshot, error) {
+	if p.snapshot == nil && p.snapErr == nil {
+		p.snapshot, p.snapErr = WalkResources(ctx, p.RootPath)
+	}
+	return p.snapshot, p.snapErr
 }
 
 // isChartRoot reports whether dir is the root of a Helm chart.
@@ -70,297 +89,183 @@ func walkYAMLFiles(ctx context.Context, rootPath string, fn func(path string) er
 	})
 }
 
-// ParseKustomizations discovers all Flux Kustomization resources under the root path.
-func (p *Parser) ParseKustomizations(ctx context.Context) ([]Kustomization, error) {
-	var result []Kustomization
-	var yamlFiles int
-	var parseErrors []string
-
-	err := walkYAMLFiles(ctx, p.RootPath, func(path string) error {
-		yamlFiles++
-
-		docs, err := p.parseFile(path)
-		if err != nil {
-			parseErrors = append(parseErrors, fmt.Sprintf("%s: %v", path, err))
-			return nil
-		}
-
-		for _, doc := range docs {
-			ks, ok := doc.(Kustomization)
-			if ok {
-				result = append(result, ks)
-			}
-		}
-		return nil
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("walking directory %s: %w", p.RootPath, err)
-	}
-
-	if len(result) == 0 {
-		msg := fmt.Sprintf("no Flux Kustomization resources found in %s (scanned %d YAML files)", p.RootPath, yamlFiles)
-		if len(parseErrors) > 0 {
-			msg += fmt.Sprintf(", %d parse errors: %s", len(parseErrors), strings.Join(parseErrors, "; "))
-		}
-		return nil, fmt.Errorf("%s", msg)
-	}
-
-	return result, nil
+// ResourceSnapshot holds every resource type discovered by a single tree
+// walk, so callers needing several types pay for one walk — and one read +
+// parse per file — instead of one walk per type.
+type ResourceSnapshot struct {
+	// Kustomizations are Flux Kustomization resources.
+	Kustomizations []Kustomization
+	// HelmReleases are Flux HelmRelease resources.
+	HelmReleases []HelmRelease
+	// HelmRepositories are Flux HelmRepository resources.
+	HelmRepositories []HelmRepository
+	// OCIRepositories are Flux OCIRepository resources.
+	OCIRepositories []OCIRepository
+	// ConfigMaps are plain v1 ConfigMap resources.
+	ConfigMaps []ConfigMap
+	// Secrets are plain v1 Secret resources.
+	Secrets []Secret
+	// YAMLFilesScanned is the number of YAML files the walk visited.
+	YAMLFilesScanned int
+	// ReadErrors lists per-file read failures as "<path>: reading file: <err>",
+	// used to compose the ParseKustomizations "no resources found" message.
+	ReadErrors []string
 }
 
-// ParseHelmRepositories discovers all Flux HelmRepository resources under the root path.
-func (p *Parser) ParseHelmRepositories(ctx context.Context) ([]HelmRepository, error) {
-	var result []HelmRepository
+// WalkResources walks rootPath once (skipping Helm chart subtrees), reads
+// each YAML file once, and dispatches every document by (apiVersion, kind)
+// into the returned snapshot.
+//
+// Failure handling mirrors the historic per-type parsers: a file that cannot
+// be read is warned on stderr and skipped (the walk continues); a v1
+// ConfigMap/Secret document that fails to decode is warned and skipped; other
+// unparseable documents are skipped silently. The returned error (wrapped as
+// "walking directory <root>") aborts the whole walk — a cancelled context or
+// an inaccessible root.
+func WalkResources(ctx context.Context, rootPath string) (*ResourceSnapshot, error) {
+	snap := &ResourceSnapshot{}
+	err := walkYAMLFiles(ctx, rootPath, func(path string) error {
+		snap.YAMLFilesScanned++
 
-	err := walkYAMLFiles(ctx, p.RootPath, func(path string) error {
-		docs, err := p.parseFile(path)
-		if err != nil {
-			return fmt.Errorf("parsing file %s: %w", path, err)
-		}
-
-		for _, doc := range docs {
-			repo, ok := doc.(HelmRepository)
-			if ok {
-				result = append(result, repo)
-			}
-		}
-		return nil
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("walking directory %s: %w", p.RootPath, err)
-	}
-
-	return result, nil
-}
-
-// ParseOCIRepositories discovers all Flux OCIRepository resources under the root path.
-func (p *Parser) ParseOCIRepositories(ctx context.Context) ([]OCIRepository, error) {
-	var result []OCIRepository
-
-	err := walkYAMLFiles(ctx, p.RootPath, func(path string) error {
-		docs, err := p.parseFile(path)
-		if err != nil {
-			return fmt.Errorf("parsing file %s: %w", path, err)
-		}
-
-		for _, doc := range docs {
-			repo, ok := doc.(OCIRepository)
-			if ok {
-				result = append(result, repo)
-			}
-		}
-		return nil
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("walking directory %s: %w", p.RootPath, err)
-	}
-
-	return result, nil
-}
-
-// ParseConfigMaps discovers all Kubernetes ConfigMap resources under the root path.
-func (p *Parser) ParseConfigMaps(ctx context.Context) ([]ConfigMap, error) {
-	var result []ConfigMap
-
-	err := walkYAMLFiles(ctx, p.RootPath, func(path string) error {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not read %s: %v\n", path, err)
+			snap.ReadErrors = append(snap.ReadErrors, fmt.Sprintf("%s: %v", path, fmt.Errorf("reading file: %w", err)))
 			return nil
 		}
 
-		docs := SplitYAMLDocuments(data)
-		for _, doc := range docs {
-			trimmed := strings.TrimSpace(doc)
-			if trimmed == "" {
-				continue
+		decoder := yaml.NewDecoder(bytes.NewReader(data))
+		for {
+			var node yaml.Node
+			if err := decoder.Decode(&node); err != nil {
+				if err != io.EOF {
+					fmt.Fprintf(os.Stderr, "Warning: YAML parse error in %s: %v\n", path, err)
+				}
+				return nil
 			}
-			cm, err := parseConfigMapDoc([]byte(trimmed))
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMap document in %s: %v\n", path, err)
-				continue
-			}
-			if cm != nil {
-				result = append(result, *cm)
-			}
+			snap.dispatch(path, &node)
 		}
-		return nil
 	})
-
 	if err != nil {
-		return nil, fmt.Errorf("walking directory %s: %w", p.RootPath, err)
+		return nil, fmt.Errorf("walking directory %s: %w", rootPath, err)
 	}
-
-	return result, nil
+	return snap, nil
 }
 
-// ParseSecrets discovers all Kubernetes Secret resources under the root path.
-func (p *Parser) ParseSecrets(ctx context.Context) ([]Secret, error) {
-	var result []Secret
-
-	err := walkYAMLFiles(ctx, p.RootPath, func(path string) error {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not read %s: %v\n", path, err)
-			return nil
-		}
-
-		docs := SplitYAMLDocuments(data)
-		for _, doc := range docs {
-			trimmed := strings.TrimSpace(doc)
-			if trimmed == "" {
-				continue
-			}
-			secret, err := parseSecretDoc([]byte(trimmed))
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: could not parse Secret document in %s: %v\n", path, err)
-				continue
-			}
-			if secret != nil {
-				result = append(result, *secret)
-			}
-		}
-		return nil
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("walking directory %s: %w", p.RootPath, err)
-	}
-
-	return result, nil
-}
-
-// parseConfigMapDoc parses a single YAML document as a ConfigMap.
-// The document is parsed into a yaml.Node once; apiVersion/kind are read from
-// the node to dispatch, then the same node is decoded into the target — this
-// avoids a second byte-for-byte parse of the document.
-func parseConfigMapDoc(data []byte) (*ConfigMap, error) {
-	var node yaml.Node
-	if err := yaml.Unmarshal(data, &node); err != nil {
-		return nil, err
-	}
-	mapping := mappingFor(&node)
+// dispatch decodes one document node into the snapshot by (apiVersion, kind).
+// The node has been parsed once by the caller; the target-type decode reuses
+// it, so each document is parsed exactly once no matter how many types the
+// snapshot carries.
+func (s *ResourceSnapshot) dispatch(path string, node *yaml.Node) {
+	mapping := mappingFor(node)
 	if mapping == nil {
-		return nil, nil
-	}
-	if mapScalar(mapping, "apiVersion") != "v1" || mapScalar(mapping, "kind") != "ConfigMap" {
-		return nil, nil
-	}
-	var cm ConfigMap
-	if err := node.Decode(&cm); err != nil {
-		return nil, err
-	}
-	return &cm, nil
-}
-
-// parseSecretDoc parses a single YAML document as a Secret (single-parse, see parseConfigMapDoc).
-func parseSecretDoc(data []byte) (*Secret, error) {
-	var node yaml.Node
-	if err := yaml.Unmarshal(data, &node); err != nil {
-		return nil, err
-	}
-	mapping := mappingFor(&node)
-	if mapping == nil {
-		return nil, nil
-	}
-	if mapScalar(mapping, "apiVersion") != "v1" || mapScalar(mapping, "kind") != "Secret" {
-		return nil, nil
-	}
-	var secret Secret
-	if err := node.Decode(&secret); err != nil {
-		return nil, err
-	}
-	return &secret, nil
-}
-
-// parseFile reads a YAML file and splits it into individual documents,
-// attempting to parse each one into a Flux resource type.
-func (p *Parser) parseFile(path string) ([]interface{}, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading file: %w", err)
-	}
-
-	return parseYAMLDocuments(data)
-}
-
-// parseYAMLDocuments splits a multi-document YAML and parses each document.
-func parseYAMLDocuments(data []byte) ([]interface{}, error) {
-	var results []interface{}
-
-	// Split on YAML document separator `---`
-	docs := SplitYAMLDocuments(data)
-
-	for _, doc := range docs {
-		trimmed := strings.TrimSpace(doc)
-		if trimmed == "" {
-			continue
-		}
-
-		parsed, err := parseSingleDocument([]byte(trimmed))
-		if err != nil {
-			// Skip documents we can't parse — they may not be Flux resources.
-			continue
-		}
-		if parsed != nil {
-			results = append(results, parsed)
-		}
-	}
-
-	return results, nil
-}
-
-// parseSingleDocument parses a single YAML document into the appropriate Flux type.
-// The document is parsed into a yaml.Node once; apiVersion/kind are read from the
-// node to dispatch, then the same node is decoded into the target type — this
-// avoids a second byte-for-byte parse of the document.
-func parseSingleDocument(data []byte) (interface{}, error) {
-	var node yaml.Node
-	if err := yaml.Unmarshal(data, &node); err != nil {
-		return nil, fmt.Errorf("unmarshaling metadata: %w", err)
-	}
-	mapping := mappingFor(&node)
-	if mapping == nil {
-		return nil, nil
+		return
 	}
 	apiVersion := mapScalar(mapping, "apiVersion")
 	kind := mapScalar(mapping, "kind")
 	if apiVersion == "" || kind == "" {
-		return nil, nil
+		return
 	}
 
-	// Determine the resource type and decode the same node into it.
-	switch kind {
-	case KindKustomization:
-		if isKustomizeAPI(apiVersion) {
-			var ks Kustomization
-			if err := node.Decode(&ks); err != nil {
-				return nil, fmt.Errorf("unmarshaling Kustomization: %w", err)
-			}
-			return ks, nil
+	switch {
+	case kind == KindKustomization && isKustomizeAPI(apiVersion):
+		var ks Kustomization
+		if err := node.Decode(&ks); err == nil {
+			s.Kustomizations = append(s.Kustomizations, ks)
 		}
-	case KindHelmRepository:
-		if isSourceAPI(apiVersion) {
-			var repo HelmRepository
-			if err := node.Decode(&repo); err != nil {
-				return nil, fmt.Errorf("unmarshaling HelmRepository: %w", err)
-			}
-			return repo, nil
+	case kind == KindHelmRelease && isHelmAPI(apiVersion):
+		var hr HelmRelease
+		if err := node.Decode(&hr); err == nil {
+			s.HelmReleases = append(s.HelmReleases, hr)
 		}
-	case KindOCIRepository:
-		if isSourceAPI(apiVersion) {
-			var repo OCIRepository
-			if err := node.Decode(&repo); err != nil {
-				return nil, fmt.Errorf("unmarshaling OCIRepository: %w", err)
-			}
-			return repo, nil
+	case kind == KindHelmRepository && isSourceAPI(apiVersion):
+		var repo HelmRepository
+		if err := node.Decode(&repo); err == nil {
+			s.HelmRepositories = append(s.HelmRepositories, repo)
+		}
+	case kind == KindOCIRepository && isSourceAPI(apiVersion):
+		var repo OCIRepository
+		if err := node.Decode(&repo); err == nil {
+			s.OCIRepositories = append(s.OCIRepositories, repo)
+		}
+	case kind == "ConfigMap" && apiVersion == "v1":
+		var cm ConfigMap
+		if err := node.Decode(&cm); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMap document in %s: %v\n", path, err)
+		} else {
+			s.ConfigMaps = append(s.ConfigMaps, cm)
+		}
+	case kind == "Secret" && apiVersion == "v1":
+		var secret Secret
+		if err := node.Decode(&secret); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not parse Secret document in %s: %v\n", path, err)
+		} else {
+			s.Secrets = append(s.Secrets, secret)
 		}
 	}
+}
 
-	return nil, nil
+// ParseKustomizations discovers all Flux Kustomization resources under the root path.
+func (p *Parser) ParseKustomizations(ctx context.Context) ([]Kustomization, error) {
+	snap, err := p.snapshotOf(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(snap.Kustomizations) == 0 {
+		msg := fmt.Sprintf("no Flux Kustomization resources found in %s (scanned %d YAML files)", p.RootPath, snap.YAMLFilesScanned)
+		if len(snap.ReadErrors) > 0 {
+			msg += fmt.Sprintf(", %d parse errors: %s", len(snap.ReadErrors), strings.Join(snap.ReadErrors, "; "))
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
+
+	return snap.Kustomizations, nil
+}
+
+// ParseHelmReleases discovers all Flux HelmRelease resources under the root path.
+func (p *Parser) ParseHelmReleases(ctx context.Context) ([]HelmRelease, error) {
+	snap, err := p.snapshotOf(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return snap.HelmReleases, nil
+}
+
+// ParseHelmRepositories discovers all Flux HelmRepository resources under the root path.
+func (p *Parser) ParseHelmRepositories(ctx context.Context) ([]HelmRepository, error) {
+	snap, err := p.snapshotOf(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return snap.HelmRepositories, nil
+}
+
+// ParseOCIRepositories discovers all Flux OCIRepository resources under the root path.
+func (p *Parser) ParseOCIRepositories(ctx context.Context) ([]OCIRepository, error) {
+	snap, err := p.snapshotOf(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return snap.OCIRepositories, nil
+}
+
+// ParseConfigMaps discovers all Kubernetes ConfigMap resources under the root path.
+func (p *Parser) ParseConfigMaps(ctx context.Context) ([]ConfigMap, error) {
+	snap, err := p.snapshotOf(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return snap.ConfigMaps, nil
+}
+
+// ParseSecrets discovers all Kubernetes Secret resources under the root path.
+func (p *Parser) ParseSecrets(ctx context.Context) ([]Secret, error) {
+	snap, err := p.snapshotOf(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return snap.Secrets, nil
 }
 
 // mappingFor returns the top-level mapping node of a parsed YAML document, or

@@ -147,18 +147,19 @@ func runDiff(ctx context.Context, args []string, flags *DiffFlags) error {
 }
 
 func runDiffKS(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, compareCommit string, flags *DiffFlags) error {
+	scans := newScanCache()
 	ksCache := kustomizeCacheOptions{
 		remoteDir:     flags.RemoteCacheDir,
 		remoteTtl:     flags.RemoteCacheTTL,
 		buildCacheDir: flags.BuildCacheDir,
 		buildCacheTTL: flags.BuildCacheTTL,
 	}
-	currentOutput, err := buildKSOutput(ctx, clusterPath, repoRoot, name, ksCache)
+	currentOutput, err := buildKSOutput(ctx, scans, clusterPath, repoRoot, name, ksCache)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building current state: %w", err), ExitCodeError)
 	}
 
-	compareOutput, err := buildKSOutputAtRevision(ctx, gitOps, clusterPath, repoRoot, name, compareCommit, ksCache)
+	compareOutput, err := buildKSOutputAtRevision(ctx, scans, gitOps, clusterPath, repoRoot, name, compareCommit, ksCache)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, err), ExitCodeError)
 	}
@@ -179,7 +180,8 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	// download impossible) on either side must fail the diff — otherwise the
 	// side silently missing its resources would show up as a false
 	// "added" (green) / "removed" (red) diff.
-	currentOutput, err := buildHRInflation(ctx, clusterPath, repoRoot, name, flags.Namespace, false, true,
+	scans := newScanCache()
+	currentOutput, err := buildHRInflation(ctx, scans, clusterPath, repoRoot, name, flags.Namespace, false, true,
 		helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL},
 		kustomizeCacheOptions{
 			remoteDir:     flags.RemoteCacheDir,
@@ -207,7 +209,7 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	if _, err := os.Stat(worktreeClusterPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Warning: path %s does not exist at revision %s\n", relPath, compareCommit)
 	} else {
-		compareOutput, err := buildHRInflation(ctx, worktreeClusterPath, worktreePath, name, flags.Namespace, true, true,
+		compareOutput, err := buildHRInflation(ctx, scans, worktreeClusterPath, worktreePath, name, flags.Namespace, true, true,
 			helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL},
 			kustomizeCacheOptions{
 				remoteDir:     flags.RemoteCacheDir,
@@ -234,7 +236,7 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 }
 
 // buildKSOutput builds the Kustomization output for the current working tree.
-func buildKSOutput(ctx context.Context, clusterPath, repoRoot, name string, ksCache kustomizeCacheOptions) ([]byte, error) {
+func buildKSOutput(ctx context.Context, scans *scanCache, clusterPath, repoRoot, name string, ksCache kustomizeCacheOptions) ([]byte, error) {
 	// Check that the path contains Kustomization files directly (not just in subdirectories)
 	hasDirectKS, err := hasDirectKustomizations(clusterPath)
 	if err != nil {
@@ -244,7 +246,7 @@ func buildKSOutput(ctx context.Context, clusterPath, repoRoot, name string, ksCa
 		return nil, fmt.Errorf("no Kustomization files found in %s", clusterPath)
 	}
 
-	parser := flux.NewParser(clusterPath)
+	parser := scans.parserFor(clusterPath)
 	kustomizations, err := parser.ParseKustomizations(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("parsing Kustomization resources: %w", err)
@@ -260,14 +262,14 @@ func buildKSOutput(ctx context.Context, clusterPath, repoRoot, name string, ksCa
 	builder := kustomize.NewBuilder(repoRoot, ksCache.builderOptions()...)
 	buildCache := make(buildCache)
 	// Resolve ConfigMaps and Secrets for postBuild substitution.
-	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
-	secrets := resolveSecrets(ctx, clusterPath, builder, buildCache)
+	configMaps := resolveConfigMaps(ctx, scans, clusterPath, builder, buildCache)
+	secrets := resolveSecrets(ctx, scans, clusterPath, builder, buildCache)
 
-	return buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, false, buildCache)
+	return buildKSContent(ctx, scans, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, false, buildCache)
 }
 
 // buildKSOutputAtRevision builds the Kustomization output at a specific git revision.
-func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, revision string, ksCache kustomizeCacheOptions) ([]byte, error) {
+func buildKSOutputAtRevision(ctx context.Context, scans *scanCache, gitOps *git.Operations, clusterPath, repoRoot, name, revision string, ksCache kustomizeCacheOptions) ([]byte, error) {
 	// Create a git worktree at the target revision.
 	worktreePath, err := gitOps.CloneToDir(ctx, revision)
 	if err != nil {
@@ -297,7 +299,7 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 		return nil, fmt.Errorf("no Kustomization files found in %s at revision %s", worktreeClusterPath, revision)
 	}
 
-	parser := flux.NewParser(worktreeClusterPath)
+	parser := scans.parserFor(worktreeClusterPath)
 	kustomizations, err := parser.ParseKustomizations(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("parsing Kustomization resources at %s: %w", revision, err)
@@ -313,13 +315,13 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 	builder := kustomize.NewBuilder(worktreePath, ksCache.builderOptions()...)
 	buildCache := make(buildCache)
 	// Resolve ConfigMaps and Secrets for postBuild substitution from the worktree.
-	configMaps := resolveConfigMaps(ctx, worktreeClusterPath, builder, buildCache)
-	secrets := resolveSecrets(ctx, worktreeClusterPath, builder, buildCache)
+	configMaps := resolveConfigMaps(ctx, scans, worktreeClusterPath, builder, buildCache)
+	secrets := resolveSecrets(ctx, scans, worktreeClusterPath, builder, buildCache)
 
 	// Use worktreePath as repoRoot so that recursive discovery and postBuild
 	// substitution work identically to the current state. External GitRepository
 	// resolution is disabled for diff (too expensive — clones remote repos).
-	return buildKSContent(ctx, builder, kustomizations, worktreePath, worktreeClusterPath, configMaps, secrets, true, buildCache)
+	return buildKSContent(ctx, scans, builder, kustomizations, worktreePath, worktreeClusterPath, configMaps, secrets, true, buildCache)
 }
 
 // buildKSContent is the shared build logic for Flux Kustomization resources,
@@ -327,8 +329,8 @@ func buildKSOutputAtRevision(ctx context.Context, gitOps *git.Operations, cluste
 // follows Flux controller behavior: recursive discovery, postBuild substitution,
 // optional external GitRepository resolution) and then appends native kustomize
 // overlay outputs.
-func buildKSContent(ctx context.Context, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot, clusterPath string, configMaps []flux.ConfigMap, secrets []flux.Secret, quiet bool, cache buildCache) ([]byte, error) {
-	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, configMaps, secrets, quiet, cache)
+func buildKSContent(ctx context.Context, scans *scanCache, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot, clusterPath string, configMaps []flux.ConfigMap, secrets []flux.Secret, quiet bool, cache buildCache) ([]byte, error) {
+	output, err := buildAllKustomizations(ctx, scans, builder, kustomizations, repoRoot, configMaps, secrets, quiet, cache)
 	if err != nil {
 		return nil, err
 	}
@@ -337,7 +339,7 @@ func buildKSContent(ctx context.Context, builder *kustomize.Builder, kustomizati
 	// Skip overlays when no KS are selected (name filter returned empty).
 	if len(kustomizations) > 0 {
 		ksPaths := collectKustomizationPaths(repoRoot, kustomizations)
-		overlayOutputs := buildKustomizeOverlays(ctx, builder, clusterPath, ksPaths, cache)
+		overlayOutputs := buildKustomizeOverlays(ctx, scans, builder, clusterPath, ksPaths, cache)
 		for _, overlay := range overlayOutputs {
 			if len(output) > 0 {
 				output = append(output, []byte("\n---\n")...)
@@ -356,7 +358,7 @@ func buildKSContent(ctx context.Context, builder *kustomize.Builder, kustomizati
 // applies postBuild variable substitution from configMaps and secrets, and
 // recursively discovers and builds new Kustomization resources found in the
 // output (following Flux Kustomize controller behavior).
-func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot string, configMaps []flux.ConfigMap, secrets []flux.Secret, quiet bool, cache buildCache) ([]byte, error) {
+func buildAllKustomizations(ctx context.Context, scans *scanCache, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot string, configMaps []flux.ConfigMap, secrets []flux.Secret, quiet bool, cache buildCache) ([]byte, error) {
 	// Track already-processed KS by "namespace/name" to prevent duplicates.
 	seen := make(map[string]bool)
 	var results []string
@@ -418,7 +420,7 @@ func buildAllKustomizations(ctx context.Context, builder *kustomize.Builder, kus
 					ks.Metadata.Namespace, ks.Metadata.Name)
 			}
 
-			output, err := buildSourcePath(ctx, builder, sourcePath, repoRoot, cache)
+			output, err := buildSourcePath(ctx, scans, builder, sourcePath, repoRoot, cache)
 			if err != nil {
 				if !errors.Is(err, errAlreadyWarned) {
 					fmt.Fprintf(os.Stderr, "Warning: build failed for %s/%s: %v\n",
@@ -607,7 +609,7 @@ func discoverResourcesFromOutput(data []byte, seen map[string]bool) []flux.Kusto
 //  3. If path is a directory without kustomization.yaml → discover and build
 //     subdirectories that have their own kustomization.yaml (applies namespace
 //     and other transformers), then read any remaining loose YAML files
-func buildSourcePath(ctx context.Context, builder *kustomize.Builder, sourcePath, repoRoot string, cache buildCache) ([]byte, error) {
+func buildSourcePath(ctx context.Context, scans *scanCache, builder *kustomize.Builder, sourcePath, repoRoot string, cache buildCache) ([]byte, error) {
 	info, err := os.Stat(sourcePath)
 	if err != nil {
 		return nil, fmt.Errorf("source path %s: %w", sourcePath, err)
@@ -629,17 +631,18 @@ func buildSourcePath(ctx context.Context, builder *kustomize.Builder, sourcePath
 	}
 
 	// Case 3: Directory without kustomization.yaml — discover subdirectories
-	return buildSubdirectoriesAndLooseFiles(ctx, builder, sourcePath, repoRoot, cache)
+	return buildSubdirectoriesAndLooseFiles(ctx, scans, builder, sourcePath, repoRoot, cache)
 }
 
 // buildSubdirectoriesAndLooseFiles discovers native kustomize directories under
 // sourcePath, builds each one via kustomize (applying namespace/transformers),
 // then reads any loose YAML files not covered by a kustomization.
-func buildSubdirectoriesAndLooseFiles(ctx context.Context, builder *kustomize.Builder, sourcePath, repoRoot string, cache buildCache) ([]byte, error) {
+func buildSubdirectoriesAndLooseFiles(ctx context.Context, scans *scanCache, builder *kustomize.Builder, sourcePath, repoRoot string, cache buildCache) ([]byte, error) {
 	// Single tree walk returns both the native overlays to build and every
 	// kustomization-file directory (any kind) to keep the loose-file walker
-	// out of.
-	kustomizeDirs, allKustFileDirs, err := flux.DiscoverKustomizeDirsAndFiles(ctx, sourcePath)
+	// out of. Memoized per sourcePath — several Flux Kustomizations pointing
+	// at the same (or overlapping) spec.path used to re-walk each time.
+	kustomizeDirs, allKustFileDirs, err := scans.kustDirsAndFiles(ctx, sourcePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: kustomize directory discovery failed for %s: %v\n", sourcePath, err)
 		return readYAMLFilesRecursive(ctx, sourcePath, repoRoot)

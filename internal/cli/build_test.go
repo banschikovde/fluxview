@@ -452,7 +452,7 @@ spec:
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, nil, nil, true, buildCache)
+	output, err := buildKSContent(ctx, newScanCache(), builder, kustomizations, repoRoot, clusterPath, nil, nil, true, buildCache)
 	if err != nil {
 		t.Fatalf("buildKSContent: %v", err)
 	}
@@ -524,7 +524,7 @@ spec:
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, nil, true, buildCache)
+	output, err := buildAllKustomizations(ctx, newScanCache(), builder, kustomizations, repoRoot, nil, nil, true, buildCache)
 	if err != nil {
 		t.Fatalf("buildAllKustomizations: %v", err)
 	}
@@ -610,7 +610,7 @@ spec:
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, nil, true, buildCache)
+	output, err := buildAllKustomizations(ctx, newScanCache(), builder, kustomizations, repoRoot, nil, nil, true, buildCache)
 	if err != nil {
 		t.Fatalf("buildAllKustomizations: %v", err)
 	}
@@ -678,7 +678,7 @@ spec:
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	output, err := buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, nil, true, buildCache)
+	output, err := buildAllKustomizations(ctx, newScanCache(), builder, kustomizations, repoRoot, nil, nil, true, buildCache)
 	if err != nil {
 		t.Fatalf("buildAllKustomizations: %v", err)
 	}
@@ -770,7 +770,7 @@ spec:
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	output, err := buildKSContent(ctx, builder, kustomizations, repoRoot, clusterPath, nil, nil, true, buildCache)
+	output, err := buildKSContent(ctx, newScanCache(), builder, kustomizations, repoRoot, clusterPath, nil, nil, true, buildCache)
 	if err != nil {
 		t.Fatalf("buildKSContent: %v", err)
 	}
@@ -1022,7 +1022,7 @@ metadata:
   name: placeholder
 `)
 
-	helmRepos, ociRepos, _, _ := resolveHelmInflationSources(context.Background(), clusterPath, repoRoot, false)
+	helmRepos, ociRepos, _, _ := resolveHelmInflationSources(context.Background(), newScanCache(), clusterPath, repoRoot, false)
 	if len(helmRepos) != 1 {
 		t.Fatalf("expected 1 HelmRepository from repoRoot fallback, got %d", len(helmRepos))
 	}
@@ -1641,7 +1641,7 @@ spec:
 `)
 
 	builder := kustomize.NewBuilder(repoRoot)
-	output, err := buildSourcePath(context.Background(), builder, sourcePath, repoRoot, make(buildCache))
+	output, err := buildSourcePath(context.Background(), newScanCache(), builder, sourcePath, repoRoot, make(buildCache))
 	if err != nil {
 		t.Fatalf("buildSourcePath: %v", err)
 	}
@@ -1690,7 +1690,7 @@ metadata:
 `)
 
 	builder := kustomize.NewBuilder(repoRoot)
-	output, err := buildSourcePath(context.Background(), builder, sourcePath, repoRoot, make(buildCache))
+	output, err := buildSourcePath(context.Background(), newScanCache(), builder, sourcePath, repoRoot, make(buildCache))
 	if err != nil {
 		t.Fatalf("buildSourcePath: %v", err)
 	}
@@ -1944,7 +1944,7 @@ resources:
 	builder := kustomize.NewBuilder(repoRoot)
 	cache := make(buildCache)
 
-	_, err := buildSourcePath(context.Background(), builder, failDir, repoRoot, cache)
+	_, err := buildSourcePath(context.Background(), newScanCache(), builder, failDir, repoRoot, cache)
 	if err == nil {
 		t.Fatal("expected error for broken kustomization")
 	}
@@ -1953,7 +1953,7 @@ resources:
 	}
 
 	// Second call should NOT re-build or re-warn (cached failure).
-	_, err = buildSourcePath(context.Background(), builder, failDir, repoRoot, cache)
+	_, err = buildSourcePath(context.Background(), newScanCache(), builder, failDir, repoRoot, cache)
 	if !errors.Is(err, errAlreadyWarned) {
 		t.Errorf("second call should also return errAlreadyWarned (cached), got: %v", err)
 	}
@@ -1998,7 +1998,7 @@ spec:
 	cache := make(buildCache)
 
 	stderr := captureStderr(func() {
-		_, _ = buildAllKustomizations(ctx, builder, kustomizations, repoRoot, nil, nil, true, cache)
+		_, _ = buildAllKustomizations(ctx, newScanCache(), builder, kustomizations, repoRoot, nil, nil, true, cache)
 	})
 
 	// Count "Warning:" lines — should be exactly 1.
@@ -2038,7 +2038,7 @@ data:
   CLUSTER_NAME: test
 `)
 
-	outputs := buildKustomizeOverlays(context.Background(), kustomize.NewBuilder(clusterPath), clusterPath, map[string]bool{}, make(buildCache))
+	outputs := buildKustomizeOverlays(context.Background(), newScanCache(), kustomize.NewBuilder(clusterPath), clusterPath, map[string]bool{}, make(buildCache))
 	combined := ""
 	for _, o := range outputs {
 		if len(combined) > 0 {
@@ -2079,7 +2079,7 @@ data:
   CLUSTER_NAME: test
 `)
 
-	outputs := buildKustomizeOverlays(context.Background(), kustomize.NewBuilder(clusterPath), clusterPath, map[string]bool{}, make(buildCache))
+	outputs := buildKustomizeOverlays(context.Background(), newScanCache(), kustomize.NewBuilder(clusterPath), clusterPath, map[string]bool{}, make(buildCache))
 	combined := ""
 	for _, o := range outputs {
 		if len(combined) > 0 {
@@ -2119,7 +2119,7 @@ title: Not a k8s document
 description: Should be filtered out
 `)
 
-	outputs := buildKustomizeOverlays(context.Background(), kustomize.NewBuilder(clusterPath), clusterPath, map[string]bool{}, make(buildCache))
+	outputs := buildKustomizeOverlays(context.Background(), newScanCache(), kustomize.NewBuilder(clusterPath), clusterPath, map[string]bool{}, make(buildCache))
 	combined := ""
 	for _, o := range outputs {
 		combined += string(o)
@@ -2297,7 +2297,7 @@ metadata:
   name: real-cm
 `)
 
-	outputs := buildKustomizeOverlays(context.Background(), kustomize.NewBuilder(clusterPath), clusterPath, map[string]bool{}, make(buildCache))
+	outputs := buildKustomizeOverlays(context.Background(), newScanCache(), kustomize.NewBuilder(clusterPath), clusterPath, map[string]bool{}, make(buildCache))
 	combined := ""
 	for _, o := range outputs {
 		if len(combined) > 0 {
@@ -2351,7 +2351,7 @@ metadata:
 `)
 
 	builder := kustomize.NewBuilder(sourcePath)
-	output, err := buildSubdirectoriesAndLooseFiles(context.Background(), builder, sourcePath, sourcePath, make(buildCache))
+	output, err := buildSubdirectoriesAndLooseFiles(context.Background(), newScanCache(), builder, sourcePath, sourcePath, make(buildCache))
 	if err != nil {
 		t.Fatalf("buildSubdirectoriesAndLooseFiles: %v", err)
 	}
@@ -2416,7 +2416,7 @@ metadata:
 	var output []byte
 	stderr := captureStderr(func() {
 		var err error
-		output, err = buildSubdirectoriesAndLooseFiles(context.Background(), builder, sourcePath, repoRoot, make(buildCache))
+		output, err = buildSubdirectoriesAndLooseFiles(context.Background(), newScanCache(), builder, sourcePath, repoRoot, make(buildCache))
 		if err != nil {
 			t.Fatalf("buildSubdirectoriesAndLooseFiles: %v", err)
 		}
@@ -2453,7 +2453,7 @@ metadata:
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs = buildKustomizeOverlays(context.Background(), kustomize.NewBuilder(repoRoot), clusterPath, nil, make(buildCache))
+		outputs = buildKustomizeOverlays(context.Background(), newScanCache(), kustomize.NewBuilder(repoRoot), clusterPath, nil, make(buildCache))
 	})
 
 	if !strings.Contains(stderr, "Warning: could not read") || !strings.Contains(stderr, bad) {
@@ -2509,7 +2509,7 @@ metadata:
 	var output []byte
 	stderr := captureStderr(func() {
 		var err error
-		output, err = buildSubdirectoriesAndLooseFiles(context.Background(), builder, sourcePath, repoRoot, make(buildCache))
+		output, err = buildSubdirectoriesAndLooseFiles(context.Background(), newScanCache(), builder, sourcePath, repoRoot, make(buildCache))
 		if err != nil {
 			t.Fatalf("buildSubdirectoriesAndLooseFiles: %v", err)
 		}
@@ -2543,7 +2543,7 @@ func TestResolveHelmInflationSources_QuietSuppressesWarnings(t *testing.T) {
 
 	// quiet=true → silent stderr.
 	stderrQuiet := captureStderr(func() {
-		resolveHelmInflationSources(context.Background(), clusterPath, repoRoot, true)
+		resolveHelmInflationSources(context.Background(), newScanCache(), clusterPath, repoRoot, true)
 	})
 	if stderrQuiet != "" {
 		t.Errorf("expected silent stderr in quiet mode, got:\n%s", stderrQuiet)
@@ -2551,7 +2551,7 @@ func TestResolveHelmInflationSources_QuietSuppressesWarnings(t *testing.T) {
 
 	// quiet=false → at least one Warning: line in stderr.
 	stderrVerbose := captureStderr(func() {
-		resolveHelmInflationSources(context.Background(), clusterPath, repoRoot, false)
+		resolveHelmInflationSources(context.Background(), newScanCache(), clusterPath, repoRoot, false)
 	})
 	if !strings.Contains(stderrVerbose, "Warning:") {
 		t.Errorf("expected at least one warning in non-quiet mode, got:\n%s", stderrVerbose)

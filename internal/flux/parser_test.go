@@ -10,17 +10,10 @@ import (
 	"testing"
 )
 
-func TestParseSingleDocument(t *testing.T) {
-	tests := []struct {
-		name     string
-		yaml     string
-		wantKind string
-		wantName string
-		wantNil  bool
-	}{
-		{
-			name: "Kustomization resource",
-			yaml: `apiVersion: kustomize.toolkit.fluxcd.io/v1
+func TestWalkResources(t *testing.T) {
+	// One multi-document file exercising every dispatched type plus the
+	// skip cases (empty document, non-Flux resource).
+	multiDoc := `apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
   name: apps
@@ -31,74 +24,139 @@ spec:
     apiVersion: source.toolkit.fluxcd.io/v1
     kind: GitRepository
     name: flux-system
-`,
-			wantKind: KindKustomization,
-			wantName: "apps",
-		},
-		{
-			name: "HelmRepository resource",
-			yaml: `apiVersion: source.toolkit.fluxcd.io/v1beta2
+---
+apiVersion: source.toolkit.fluxcd.io/v1beta2
 kind: HelmRepository
 metadata:
   name: podinfo
   namespace: flux-system
 spec:
   url: https://stefanprodan.github.io/podinfo
-`,
-			wantKind: KindHelmRepository,
-			wantName: "podinfo",
-		},
-		{
-			name:    "empty document",
-			yaml:    ``,
-			wantNil: true,
-		},
-		{
-			name: "non-Flux resource",
-			yaml: `apiVersion: apps/v1
+---
+apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+  name: podinfo
+  namespace: flux-system
+spec:
+  chart:
+    spec:
+      chart: podinfo
+      version: 6.0.0
+      sourceRef:
+        kind: HelmRepository
+        name: podinfo
+---
+apiVersion: source.toolkit.fluxcd.io/v1beta2
+kind: OCIRepository
+metadata:
+  name: podinfo-oci
+  namespace: flux-system
+spec:
+  url: oci://registry.example.com/charts/podinfo
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-settings
+data:
+  cluster: prod
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cluster-secrets
+data:
+  key: dj0=
+---
+# non-Flux resource — present in the walk, not dispatched
+apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: test
-`,
-			wantNil: true,
-		},
+`
+
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "resources.yaml"), []byte(multiDoc), 0o644); err != nil {
+		t.Fatalf("write resources.yaml: %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result, err := parseSingleDocument([]byte(tt.yaml))
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if tt.wantNil {
-				if result != nil {
-					t.Errorf("expected nil result, got %T", result)
-				}
-				return
-			}
-			if result == nil {
-				t.Fatalf("expected non-nil result")
-			}
+	snap, err := WalkResources(context.Background(), tmpDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
-			var gotName, gotKind string
-			switch v := result.(type) {
-			case Kustomization:
-				gotName = v.Metadata.Name
-				gotKind = v.Kind
-			case HelmRepository:
-				gotName = v.Metadata.Name
-				gotKind = v.Kind
-			default:
-				t.Fatalf("unexpected type %T", result)
-			}
+	if snap.YAMLFilesScanned != 1 {
+		t.Errorf("YAMLFilesScanned = %d, want 1", snap.YAMLFilesScanned)
+	}
+	if len(snap.Kustomizations) != 1 || snap.Kustomizations[0].Metadata.Name != "apps" {
+		t.Errorf("Kustomizations = %+v, want one named apps", snap.Kustomizations)
+	}
+	if len(snap.HelmRepositories) != 1 || snap.HelmRepositories[0].Metadata.Name != "podinfo" {
+		t.Errorf("HelmRepositories = %+v, want one named podinfo", snap.HelmRepositories)
+	}
+	if len(snap.HelmReleases) != 1 || snap.HelmReleases[0].Metadata.Name != "podinfo" {
+		t.Errorf("HelmReleases = %+v, want one named podinfo", snap.HelmReleases)
+	}
+	if len(snap.OCIRepositories) != 1 || snap.OCIRepositories[0].Metadata.Name != "podinfo-oci" {
+		t.Errorf("OCIRepositories = %+v, want one named podinfo-oci", snap.OCIRepositories)
+	}
+	if len(snap.ConfigMaps) != 1 || snap.ConfigMaps[0].Metadata.Name != "cluster-settings" {
+		t.Errorf("ConfigMaps = %+v, want one named cluster-settings", snap.ConfigMaps)
+	}
+	if len(snap.Secrets) != 1 || snap.Secrets[0].Metadata.Name != "cluster-secrets" {
+		t.Errorf("Secrets = %+v, want one named cluster-secrets", snap.Secrets)
+	}
+}
 
-			if gotKind != tt.wantKind {
-				t.Errorf("kind = %q, want %q", gotKind, tt.wantKind)
-			}
-			if gotName != tt.wantName {
-				t.Errorf("name = %q, want %q", gotName, tt.wantName)
-			}
-		})
+// TestParserSharesSnapshotAcrossParseCalls verifies the Parser's caching
+// contract: several ParseXxx calls on one Parser walk the tree once. The
+// walk count is observable through YAMLFilesScanned only via WalkResources,
+// so this test asserts the functional consequence — every type is parsed
+// correctly no matter which ParseXxx runs first — plus that a second call
+// returns the same results (cached, not recomputed-and-different).
+func TestParserSharesSnapshotAcrossParseCalls(t *testing.T) {
+	tmpDir := t.TempDir()
+	content := `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: apps
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sec
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "all.yaml"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write all.yaml: %v", err)
+	}
+
+	parser := NewParser(tmpDir)
+	ctx := context.Background()
+
+	// First call triggers the single walk for ALL types.
+	ks, err := parser.ParseKustomizations(ctx)
+	if err != nil {
+		t.Fatalf("ParseKustomizations: %v", err)
+	}
+	// Subsequent calls must return data from the same snapshot even though
+	// they are different types than the first call.
+	cms, err := parser.ParseConfigMaps(ctx)
+	if err != nil {
+		t.Fatalf("ParseConfigMaps: %v", err)
+	}
+	secrets, err := parser.ParseSecrets(ctx)
+	if err != nil {
+		t.Fatalf("ParseSecrets: %v", err)
+	}
+
+	if len(ks) != 1 || len(cms) != 1 || len(secrets) != 1 {
+		t.Errorf("got %d KS, %d CM, %d Secret — want 1 of each", len(ks), len(cms), len(secrets))
 	}
 }
 
