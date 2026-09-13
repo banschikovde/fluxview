@@ -145,7 +145,7 @@ func ApplyImages(resources []byte, images []ImageOverride) ([]byte, error) {
 func runInMemoryBuild(resources []byte, kust types.Kustomization) ([]byte, error) {
 	// Deduplicate input resources — kustomize rejects duplicate resource IDs.
 	// Last occurrence wins (matches kustomize ResMap behavior).
-	resources = dedupInputDocs(resources)
+	resources = yamlutil.DedupDocs(resources)
 
 	fsys := filesys.MakeFsInMemory()
 
@@ -181,43 +181,4 @@ func runInMemoryBuild(resources []byte, kust types.Kustomization) ([]byte, error
 	}
 
 	return resMap.AsYaml()
-}
-
-// dedupInputDocs removes duplicate YAML documents by apiVersion/kind/namespace/name.
-// Last occurrence wins. Required because kustomize's resource accumulator rejects
-// duplicate IDs even across separate files.
-func dedupInputDocs(data []byte) []byte {
-	type key struct {
-		group, kind, ns, name string
-	}
-	seen := make(map[key]int)
-	var result []string
-
-	for _, doc := range yamlutil.SplitYAMLText(data) {
-		var meta struct {
-			APIVersion string `yaml:"apiVersion"`
-			Kind       string `yaml:"kind"`
-			Metadata   struct {
-				Name      string `yaml:"name"`
-				Namespace string `yaml:"namespace"`
-			} `yaml:"metadata"`
-		}
-		if err := yaml.Unmarshal([]byte(doc), &meta); err != nil || meta.Kind == "" || meta.Metadata.Name == "" {
-			result = append(result, doc)
-			continue
-		}
-		group := ""
-		if idx := strings.Index(meta.APIVersion, "/"); idx > 0 {
-			group = meta.APIVersion[:idx]
-		}
-		k := key{group, meta.Kind, meta.Metadata.Namespace, meta.Metadata.Name}
-		if i, ok := seen[k]; ok {
-			result[i] = doc // replace
-		} else {
-			seen[k] = len(result)
-			result = append(result, doc)
-		}
-	}
-
-	return []byte(strings.Join(result, "\n---\n"))
 }
