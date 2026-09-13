@@ -95,8 +95,6 @@ func walkYAMLFiles(ctx context.Context, rootPath string, fn func(path string) er
 type ResourceSnapshot struct {
 	// Kustomizations are Flux Kustomization resources.
 	Kustomizations []Kustomization
-	// HelmReleases are Flux HelmRelease resources.
-	HelmReleases []HelmRelease
 	// HelmRepositories are Flux HelmRepository resources.
 	HelmRepositories []HelmRepository
 	// OCIRepositories are Flux OCIRepository resources.
@@ -130,7 +128,7 @@ func WalkResources(ctx context.Context, rootPath string) (*ResourceSnapshot, err
 		data, err := os.ReadFile(path)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not read %s: %v\n", path, err)
-			snap.ReadErrors = append(snap.ReadErrors, fmt.Sprintf("%s: %v", path, fmt.Errorf("reading file: %w", err)))
+			snap.ReadErrors = append(snap.ReadErrors, fmt.Sprintf("%s: reading file: %v", path, err))
 			return nil
 		}
 
@@ -156,6 +154,10 @@ func WalkResources(ctx context.Context, rootPath string) (*ResourceSnapshot, err
 // The node has been parsed once by the caller; the target-type decode reuses
 // it, so each document is parsed exactly once no matter how many types the
 // snapshot carries.
+//
+// HelmRelease documents are deliberately not dispatched: the HR pipeline
+// inflates HelmReleases from kustomize build output (raw-parsed ones carry
+// stale pre-transform namespaces — see buildHRInflation in internal/cli).
 func (s *ResourceSnapshot) dispatch(path string, node *yaml.Node) {
 	mapping := mappingFor(node)
 	if mapping == nil {
@@ -172,11 +174,6 @@ func (s *ResourceSnapshot) dispatch(path string, node *yaml.Node) {
 		var ks Kustomization
 		if err := node.Decode(&ks); err == nil {
 			s.Kustomizations = append(s.Kustomizations, ks)
-		}
-	case kind == KindHelmRelease && isHelmAPI(apiVersion):
-		var hr HelmRelease
-		if err := node.Decode(&hr); err == nil {
-			s.HelmReleases = append(s.HelmReleases, hr)
 		}
 	case kind == KindHelmRepository && isSourceAPI(apiVersion):
 		var repo HelmRepository
@@ -221,15 +218,6 @@ func (p *Parser) ParseKustomizations(ctx context.Context) ([]Kustomization, erro
 	}
 
 	return snap.Kustomizations, nil
-}
-
-// ParseHelmReleases discovers all Flux HelmRelease resources under the root path.
-func (p *Parser) ParseHelmReleases(ctx context.Context) ([]HelmRelease, error) {
-	snap, err := p.snapshotOf(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return snap.HelmReleases, nil
 }
 
 // ParseHelmRepositories discovers all Flux HelmRepository resources under the root path.

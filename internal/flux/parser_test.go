@@ -12,7 +12,8 @@ import (
 
 func TestWalkResources(t *testing.T) {
 	// One multi-document file exercising every dispatched type plus the
-	// skip cases (empty document, non-Flux resource).
+	// skip cases (empty document, non-Flux resource, HelmRelease — which is
+	// deliberately NOT dispatched, see ResourceSnapshot docs).
 	multiDoc := `apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
@@ -94,9 +95,6 @@ metadata:
 	}
 	if len(snap.HelmRepositories) != 1 || snap.HelmRepositories[0].Metadata.Name != "podinfo" {
 		t.Errorf("HelmRepositories = %+v, want one named podinfo", snap.HelmRepositories)
-	}
-	if len(snap.HelmReleases) != 1 || snap.HelmReleases[0].Metadata.Name != "podinfo" {
-		t.Errorf("HelmReleases = %+v, want one named podinfo", snap.HelmReleases)
 	}
 	if len(snap.OCIRepositories) != 1 || snap.OCIRepositories[0].Metadata.Name != "podinfo-oci" {
 		t.Errorf("OCIRepositories = %+v, want one named podinfo-oci", snap.OCIRepositories)
