@@ -778,6 +778,13 @@ func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, helmRe
 // Processing (redact, strip-attrs, skip-crds, resource split) is done in a
 // single pass per state to avoid redundant YAML round-trips.
 func computeAndOutputDiff(ctx context.Context, original, modified []byte, flags *DiffFlags) error {
+	// Bail out before the first potentially heavy work (namespace filter +
+	// per-document parsing of both states) if the command is already
+	// cancelled; a second checkpoint follows after the parsing.
+	if err := CheckInterrupted(ctx); err != nil {
+		return err
+	}
+
 	if flags.Namespace != "" {
 		original = filterByNamespace(original, flags.Namespace)
 		modified = filterByNamespace(modified, flags.Namespace)
