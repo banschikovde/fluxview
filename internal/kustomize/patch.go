@@ -69,13 +69,21 @@ func ApplyPatches(resources []byte, patches []PatchSpec, baseDir string) ([]byte
 // resources in ONE in-memory kustomize build. All three live as fields of a
 // single types.Kustomization, so the old ApplyPatches → ApplyImages →
 // ApplyTargetNamespace chain cost three full parse → build → serialize
-// cycles for what one build produces. Transformer order inside the build —
-// patches, then images, then namespace — matches that chain (and the Flux
-// controller, which also applies all three in one kustomization); the order
-// is locked by TestApplyTransformations_Ordering_*. baseDir restricts
-// patches[].path resolution (path traversal protection). Empty
-// patches/images/namespace parts are simply skipped; with nothing to apply
-// the input is returned unchanged.
+// cycles for what one build produces.
+//
+// Transformer order inside the build (kustomize api v0.21.1,
+// kusttarget_configplugin.go configureBuiltinTransformers):
+// PatchTransformer (#2) → NamespaceTransformer (#3) → ImageTagTransformer
+// (#10) — patches, then namespace, then images. The old sequential chain
+// applied images BEFORE the namespace; the swap is behaviorally
+// unobservable — the two transformers touch disjoint fields and neither's
+// matching depends on the other's output. The observable contracts (patches
+// run first: patch selectors match pre-namespace namespaces, and
+// patch-rewritten images are subject to image overrides) are locked by
+// TestApplyTransformations_Ordering_*. baseDir restricts patches[].path
+// resolution (path traversal protection). Empty patches/images/namespace
+// parts are simply skipped; with nothing to apply the input is returned
+// unchanged.
 func ApplyTransformations(resources []byte, patches []PatchSpec, images []ImageOverride, namespace, baseDir string) ([]byte, error) {
 	if len(patches) == 0 && len(images) == 0 && namespace == "" {
 		return resources, nil

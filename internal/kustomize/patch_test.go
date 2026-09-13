@@ -499,11 +499,10 @@ metadata:
 	}
 }
 
-// TestApplyTransformations_Ordering_ImagesAfterPatches locks the transformer
-// order inside the single in-memory build: patches run BEFORE the image
-// transformer (a patch rewriting an image is itself subject to image
-// overrides). This matches the former ApplyPatches → ApplyImages sequential
-// chain and the Flux controller, which applies all three in one kustomization.
+// TestApplyTransformations_Ordering_ImagesAfterPatches locks the observable
+// part of the transformer order inside the single in-memory build: patches
+// (PatchTransformer, #2) run BEFORE the image transformer (ImageTagTransformer,
+// #10) — a patch rewriting an image is itself subject to image overrides.
 func TestApplyTransformations_Ordering_ImagesAfterPatches(t *testing.T) {
 	resources := []byte(`apiVersion: apps/v1
 kind: Deployment
@@ -536,9 +535,10 @@ spec:
 }
 
 // TestApplyTransformations_Ordering_NamespaceAfterPatches locks the second
-// half of the order: the namespace transformer runs AFTER patches, so a patch
-// selector by namespace matches the PRE-namespace namespace — same as the
-// former ApplyPatches → ApplyTargetNamespace sequential chain.
+// observable contract: the namespace transformer (NamespaceTransformer, #3)
+// runs AFTER patches (#2), so a patch selector by namespace matches the
+// PRE-namespace namespace. The namespace↔images relative order is not
+// observable (disjoint fields) and is therefore not tested.
 func TestApplyTransformations_Ordering_NamespaceAfterPatches(t *testing.T) {
 	resources := []byte(`apiVersion: apps/v1
 kind: Deployment
