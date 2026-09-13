@@ -434,39 +434,18 @@ func buildAllKustomizations(ctx context.Context, scans *scanCache, builder *kust
 				continue
 			}
 
-			// Apply Kustomization.spec.patches (JSON6902).
-			if len(ks.Spec.Patches) > 0 {
-				patched, err := kustomize.ApplyPatches(output, ks.Spec.Patches, sourcePath)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to apply patches for %s/%s: %v\n",
-						ks.Metadata.Namespace, ks.Metadata.Name, err)
-				} else {
-					output = patched
-				}
-			}
-
-			// Apply Kustomization.spec.images — rewrites container image
-			// references (kustomize image transformer).
-			if len(ks.Spec.Images) > 0 {
-				rewritten, err := kustomize.ApplyImages(output, ks.Spec.Images)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to apply images for %s/%s: %v\n",
-						ks.Metadata.Namespace, ks.Metadata.Name, err)
-				} else {
-					output = rewritten
-				}
-			}
-
-			// Apply Kustomization.spec.targetNamespace — sets metadata.namespace
-			// on all namespaced resources (Flux controller behavior).
-			if ks.Spec.TargetNamespace != "" {
-				namespaced, err := kustomize.ApplyTargetNamespace(output, ks.Spec.TargetNamespace)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to apply targetNamespace %q for %s/%s: %v\n",
-						ks.Spec.TargetNamespace, ks.Metadata.Namespace, ks.Metadata.Name, err)
-				} else {
-					output = namespaced
-				}
+			// Apply Kustomization.spec.patches (JSON6902), spec.images,
+			// and spec.targetNamespace — one in-memory kustomize build for
+			// all three (the former ApplyPatches → ApplyImages →
+			// ApplyTargetNamespace chain cost three full
+			// parse → build → serialize cycles). On failure the
+			// untransformed output is kept (warn + continue).
+			transformed, err := kustomize.ApplyTransformations(output, ks.Spec.Patches, ks.Spec.Images, ks.Spec.TargetNamespace, sourcePath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to apply transformations (patches/images/targetNamespace) for %s/%s: %v\n",
+					ks.Metadata.Namespace, ks.Metadata.Name, err)
+			} else {
+				output = transformed
 			}
 
 			// Apply postBuild variable substitution LAST, as in real Flux — right

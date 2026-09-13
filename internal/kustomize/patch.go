@@ -55,7 +55,59 @@ func ApplyPatches(resources []byte, patches []PatchSpec, baseDir string) ([]byte
 		return resources, nil
 	}
 
-	kust := types.Kustomization{}
+	kp, err := collectPatches(patches, baseDir)
+	if err != nil {
+		return nil, err
+	}
+
+	kust := types.Kustomization{Patches: kp}
+	return runInMemoryBuild(resources, kust)
+}
+
+// ApplyTransformations applies kustomize-style patches (JSON6902), image
+// overrides, and the target namespace to an already materialized set of
+// resources in ONE in-memory kustomize build. All three live as fields of a
+// single types.Kustomization, so the old ApplyPatches → ApplyImages →
+// ApplyTargetNamespace chain cost three full parse → build → serialize
+// cycles for what one build produces. Transformer order inside the build —
+// patches, then images, then namespace — matches that chain (and the Flux
+// controller, which also applies all three in one kustomization); the order
+// is locked by TestApplyTransformations_Ordering_*. baseDir restricts
+// patches[].path resolution (path traversal protection). Empty
+// patches/images/namespace parts are simply skipped; with nothing to apply
+// the input is returned unchanged.
+func ApplyTransformations(resources []byte, patches []PatchSpec, images []ImageOverride, namespace, baseDir string) ([]byte, error) {
+	if len(patches) == 0 && len(images) == 0 && namespace == "" {
+		return resources, nil
+	}
+
+	kust := types.Kustomization{Namespace: namespace}
+
+	kp, err := collectPatches(patches, baseDir)
+	if err != nil {
+		return nil, err
+	}
+	kust.Patches = kp
+
+	for _, img := range images {
+		kust.Images = append(kust.Images, types.Image{
+			Name:      img.Name,
+			NewName:   img.NewName,
+			NewTag:    img.NewTag,
+			TagSuffix: img.TagSuffix,
+			Digest:    img.Digest,
+		})
+	}
+
+	return runInMemoryBuild(resources, kust)
+}
+
+// collectPatches resolves PatchSpec entries into kustomize patches. Patch
+// content comes from the inline Patch field or is read from Path (resolved
+// under baseDir — any path escaping it is rejected, preventing path
+// traversal from untrusted repo content).
+func collectPatches(patches []PatchSpec, baseDir string) ([]types.Patch, error) {
+	var collected []types.Patch
 	for _, p := range patches {
 		// If Path is set, read patch content from file (with path traversal protection).
 		patchContent := p.Patch
@@ -95,10 +147,9 @@ func ApplyPatches(resources []byte, patches []PatchSpec, baseDir string) ([]byte
 				kp.Target.AnnotationSelector = p.Target.AnnotationSelector
 			}
 		}
-		kust.Patches = append(kust.Patches, kp)
+		collected = append(collected, kp)
 	}
-
-	return runInMemoryBuild(resources, kust)
+	return collected, nil
 }
 
 // ApplyTargetNamespace sets metadata.namespace on all namespaced resources to
@@ -116,32 +167,18 @@ func ApplyTargetNamespace(resources []byte, namespace string) ([]byte, error) {
 	return runInMemoryBuild(resources, kust)
 }
 
-// ApplyImages applies kustomize image overrides (newName/newTag/tagSuffix/digest)
-// to an already materialized set of resources, in memory. Mirrors kustomize's
-// image transformer, which rewrites container image references in workload
-// manifests (Deployment, StatefulSet, CronJob, etc.). If images is empty the
-// input is returned unchanged.
-func ApplyImages(resources []byte, images []ImageOverride) ([]byte, error) {
-	if len(images) == 0 {
-		return resources, nil
-	}
-	kust := types.Kustomization{}
-	for _, img := range images {
-		kust.Images = append(kust.Images, types.Image{
-			Name:      img.Name,
-			NewName:   img.NewName,
-			NewTag:    img.NewTag,
-			TagSuffix: img.TagSuffix,
-			Digest:    img.Digest,
-		})
-	}
-	return runInMemoryBuild(resources, kust)
-}
+// inMemoryKustomizer is the shared kustomizer for all in-memory builds.
+// Constructing a kustomizer builds the whole transformer pipeline, so it is
+// done once at package init. Run is safe for the CLI's sequential builds;
+// if builds ever become concurrent, guard Run calls with a mutex —
+// krusty.Kustomizer does not guarantee parallel-Run safety.
+var inMemoryKustomizer = krusty.MakeKustomizer(krusty.MakeDefaultOptions())
 
 // runInMemoryBuild runs an in-memory kustomize build over the given resources.
 // Resources are deduplicated and written to an in-memory filesystem, then built
 // with the additional kustomization fields set in kust (Resources is filled
-// automatically). Shared by ApplyPatches and ApplyTargetNamespace.
+// automatically). Shared by ApplyPatches, ApplyTransformations and
+// ApplyTargetNamespace.
 func runInMemoryBuild(resources []byte, kust types.Kustomization) ([]byte, error) {
 	// Deduplicate input resources — kustomize rejects duplicate resource IDs.
 	// Last occurrence wins (matches kustomize ResMap behavior).
@@ -173,9 +210,7 @@ func runInMemoryBuild(resources []byte, kust types.Kustomization) ([]byte, error
 		return nil, fmt.Errorf("writing kustomization: %w", err)
 	}
 
-	opts := krusty.MakeDefaultOptions()
-	kustomizer := krusty.MakeKustomizer(opts)
-	resMap, err := kustomizer.Run(fsys, "/")
+	resMap, err := inMemoryKustomizer.Run(fsys, "/")
 	if err != nil {
 		return nil, fmt.Errorf("running in-memory kustomize build: %w", err)
 	}

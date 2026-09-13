@@ -339,7 +339,7 @@ func firstContainerImage(t *testing.T, data []byte) string {
 	return ""
 }
 
-func TestApplyImages_NewTag(t *testing.T) {
+func TestApplyTransformations_Images_NewTag(t *testing.T) {
 	resources := []byte(`apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -354,9 +354,9 @@ spec:
 	images := []ImageOverride{
 		{Name: "ghcr.io/stefanprodan/podinfo", NewTag: "6.0.0"},
 	}
-	result, err := ApplyImages(resources, images)
+	result, err := ApplyTransformations(resources, nil, images, "", "/")
 	if err != nil {
-		t.Fatalf("ApplyImages: %v", err)
+		t.Fatalf("ApplyTransformations: %v", err)
 	}
 	got := firstContainerImage(t, result)
 	want := "ghcr.io/stefanprodan/podinfo:6.0.0"
@@ -365,7 +365,7 @@ spec:
 	}
 }
 
-func TestApplyImages_NewName(t *testing.T) {
+func TestApplyTransformations_Images_NewName(t *testing.T) {
 	resources := []byte(`apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -380,9 +380,9 @@ spec:
 	images := []ImageOverride{
 		{Name: "podinfo", NewName: "ghcr.io/stefanprodan/podinfo", NewTag: "6.0.0"},
 	}
-	result, err := ApplyImages(resources, images)
+	result, err := ApplyTransformations(resources, nil, images, "", "/")
 	if err != nil {
-		t.Fatalf("ApplyImages: %v", err)
+		t.Fatalf("ApplyTransformations: %v", err)
 	}
 	got := firstContainerImage(t, result)
 	want := "ghcr.io/stefanprodan/podinfo:6.0.0"
@@ -391,7 +391,7 @@ spec:
 	}
 }
 
-func TestApplyImages_Digest(t *testing.T) {
+func TestApplyTransformations_Images_Digest(t *testing.T) {
 	resources := []byte(`apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -407,9 +407,9 @@ spec:
 	images := []ImageOverride{
 		{Name: "podinfo", Digest: digest},
 	}
-	result, err := ApplyImages(resources, images)
+	result, err := ApplyTransformations(resources, nil, images, "", "/")
 	if err != nil {
-		t.Fatalf("ApplyImages: %v", err)
+		t.Fatalf("ApplyTransformations: %v", err)
 	}
 	got := firstContainerImage(t, result)
 	want := "podinfo@" + digest
@@ -418,17 +418,160 @@ spec:
 	}
 }
 
-func TestApplyImages_Empty(t *testing.T) {
+func TestApplyTransformations_Images_Empty(t *testing.T) {
 	resources := []byte(`apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: app
 `)
-	result, err := ApplyImages(resources, nil)
+	result, err := ApplyTransformations(resources, nil, nil, "", "/")
 	if err != nil {
-		t.Fatalf("ApplyImages with nil images: %v", err)
+		t.Fatalf("ApplyTransformations with nil images: %v", err)
 	}
 	if string(result) != string(resources) {
 		t.Error("empty images should return resources unchanged")
+	}
+}
+
+// TestApplyTransformations_Combined verifies patches, images, and the target
+// namespace applied together in a single in-memory build — the main path
+// replacing the former three-call chain in buildAllKustomizations.
+func TestApplyTransformations_Combined(t *testing.T) {
+	resources := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: app
+    spec:
+      containers:
+        - name: app
+          image: podinfo:5.0.0
+`)
+	patches := []PatchSpec{
+		{
+			Target: &PatchTarget{Group: "apps", Version: "v1", Kind: "Deployment", Name: "app"},
+			Patch: `- op: replace
+  path: /spec/replicas
+  value: 3
+`,
+		},
+	}
+	images := []ImageOverride{
+		{Name: "podinfo", NewTag: "6.0.0"},
+	}
+
+	result, err := ApplyTransformations(resources, patches, images, "team-a", "/")
+	if err != nil {
+		t.Fatalf("ApplyTransformations: %v", err)
+	}
+
+	resultStr := string(result)
+	if got := firstContainerImage(t, result); got != "podinfo:6.0.0" {
+		t.Errorf("image = %q, want podinfo:6.0.0 (image transformer)", got)
+	}
+	if !strings.Contains(resultStr, "namespace: team-a") {
+		t.Errorf("expected namespace team-a on the Deployment:\n%s", resultStr)
+	}
+	if !strings.Contains(resultStr, "replicas: 3") {
+		t.Errorf("expected patched replicas=3:\n%s", resultStr)
+	}
+}
+
+// TestApplyTransformations_NothingToDo verifies the input is returned
+// unchanged when patches, images, and namespace are all empty.
+func TestApplyTransformations_NothingToDo(t *testing.T) {
+	resources := []byte(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm
+`)
+	result, err := ApplyTransformations(resources, nil, nil, "", "/")
+	if err != nil {
+		t.Fatalf("ApplyTransformations: %v", err)
+	}
+	if string(result) != string(resources) {
+		t.Error("empty transformations should return resources unchanged")
+	}
+}
+
+// TestApplyTransformations_Ordering_ImagesAfterPatches locks the transformer
+// order inside the single in-memory build: patches run BEFORE the image
+// transformer (a patch rewriting an image is itself subject to image
+// overrides). This matches the former ApplyPatches → ApplyImages sequential
+// chain and the Flux controller, which applies all three in one kustomization.
+func TestApplyTransformations_Ordering_ImagesAfterPatches(t *testing.T) {
+	resources := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  template:
+    spec:
+      containers:
+        - name: main
+          image: podinfo:5.0.0
+`)
+	patches := []PatchSpec{{
+		Target: &PatchTarget{Group: "apps", Version: "v1", Kind: "Deployment", Name: "app"},
+		Patch: `- op: replace
+  path: /spec/template/spec/containers/0/image
+  value: podinfo:9.9.9
+`,
+	}}
+	images := []ImageOverride{{Name: "podinfo", NewTag: "6.0.0"}}
+
+	out, err := ApplyTransformations(resources, patches, images, "", "/")
+	if err != nil {
+		t.Fatalf("ApplyTransformations: %v", err)
+	}
+	// Patches run first (image becomes 9.9.9), then the override rewrites it.
+	if got := firstContainerImage(t, out); got != "podinfo:6.0.0" {
+		t.Errorf("image = %q, want podinfo:6.0.0 (images apply after patches)", got)
+	}
+}
+
+// TestApplyTransformations_Ordering_NamespaceAfterPatches locks the second
+// half of the order: the namespace transformer runs AFTER patches, so a patch
+// selector by namespace matches the PRE-namespace namespace — same as the
+// former ApplyPatches → ApplyTargetNamespace sequential chain.
+func TestApplyTransformations_Ordering_NamespaceAfterPatches(t *testing.T) {
+	resources := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  labels:
+    touched: "no"
+spec:
+  template:
+    spec:
+      containers:
+        - name: main
+          image: nginx:1.25
+`)
+	// Selector requires namespace team-a, which is only set by the target
+	// namespace — so the patch must NOT match (patches see the original ns).
+	patches := []PatchSpec{{
+		Target: &PatchTarget{Group: "apps", Version: "v1", Kind: "Deployment", Name: "app", Namespace: "team-a"},
+		Patch: `- op: replace
+  path: /metadata/labels/touched
+  value: "yes"
+`,
+	}}
+
+	out, err := ApplyTransformations(resources, patches, nil, "team-a", "/")
+	if err != nil {
+		t.Fatalf("ApplyTransformations: %v", err)
+	}
+	outStr := string(out)
+	if !strings.Contains(outStr, "namespace: team-a") {
+		t.Fatalf("target namespace not applied:\n%s", outStr)
+	}
+	if strings.Contains(outStr, `touched: "yes"`) {
+		t.Error("patch matched the post-namespace namespace — order regressed (patches must run before the namespace transformer)")
 	}
 }
