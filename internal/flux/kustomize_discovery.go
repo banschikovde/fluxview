@@ -1,7 +1,10 @@
 package flux
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -205,37 +208,106 @@ func isNativeKustomize(kust nativeKustomization) bool {
 // in kustomization.yaml) are reflected, unlike parsing the raw HelmRelease
 // file directly from disk.
 // parseResourcesFromBytes is the generic implementation behind all
-// ParseXxxFromBytes functions: split YAML → filter by kind/apiVersion → unmarshal.
-// Documents that fail to unmarshal are silently skipped (they may not be the
+// ParseXxxFromBytes functions: decode each document into a yaml.Node once,
+// match by kind/apiVersion, then decode the same node into the target type.
+// Documents that fail to decode are silently skipped (they may not be the
 // target type); the function always succeeds.
 func parseResourcesFromBytes[T any](data []byte, match func(kind, apiVersion string) bool) []T {
 	var results []T
 
-	for _, doc := range SplitYAMLDocuments(data) {
-		trimmed := strings.TrimSpace(doc)
-		if trimmed == "" {
-			continue
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	for {
+		var node yaml.Node
+		if err := decoder.Decode(&node); err != nil {
+			if err != io.EOF {
+				fmt.Fprintf(os.Stderr, "Warning: YAML parse error in parseResourcesFromBytes: %v\n", err)
+			}
+			return results
 		}
 
-		var meta struct {
-			APIVersion string `yaml:"apiVersion"`
-			Kind       string `yaml:"kind"`
-		}
-		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
+		mapping := mappingFor(&node)
+		if mapping == nil {
 			continue
 		}
-		if !match(meta.Kind, meta.APIVersion) {
+		if !match(mapScalar(mapping, "kind"), mapScalar(mapping, "apiVersion")) {
 			continue
 		}
 
 		var item T
-		if err := yaml.Unmarshal([]byte(trimmed), &item); err != nil {
+		if err := node.Decode(&item); err != nil {
 			continue
 		}
 		results = append(results, item)
 	}
+}
 
-	return results
+// ParsedResources holds the Flux source types extracted from kustomize build
+// output bytes in a single pass. Unlike calling the per-type
+// ParseXxxFromBytes functions one by one (one full pass over the output per
+// type), ParseAllFromBytes parses each document once.
+type ParsedResources struct {
+	HelmReleases     []HelmRelease
+	HelmRepositories []HelmRepository
+	OCIRepositories  []OCIRepository
+	ConfigMaps       []ConfigMap
+	Secrets          []Secret
+}
+
+// ParseAllFromBytes extracts every supported Flux source type from YAML
+// output bytes in one pass: each document is decoded into a yaml.Node once
+// and dispatched by (apiVersion, kind). Documents that fail to decode are
+// silently skipped; the function always succeeds.
+func ParseAllFromBytes(data []byte) *ParsedResources {
+	res := &ParsedResources{}
+
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	for {
+		var node yaml.Node
+		if err := decoder.Decode(&node); err != nil {
+			if err != io.EOF {
+				fmt.Fprintf(os.Stderr, "Warning: YAML parse error in ParseAllFromBytes: %v\n", err)
+			}
+			return res
+		}
+
+		mapping := mappingFor(&node)
+		if mapping == nil {
+			continue
+		}
+		res.dispatch(mapScalar(mapping, "kind"), mapScalar(mapping, "apiVersion"), &node)
+	}
+}
+
+// dispatch decodes one document node into the matching field. The node has
+// been parsed once by the caller; the target-type decode reuses it.
+func (r *ParsedResources) dispatch(kind, apiVersion string, node *yaml.Node) {
+	switch {
+	case kind == KindHelmRelease && isHelmAPI(apiVersion):
+		var hr HelmRelease
+		if err := node.Decode(&hr); err == nil {
+			r.HelmReleases = append(r.HelmReleases, hr)
+		}
+	case kind == KindHelmRepository && isSourceAPI(apiVersion):
+		var repo HelmRepository
+		if err := node.Decode(&repo); err == nil {
+			r.HelmRepositories = append(r.HelmRepositories, repo)
+		}
+	case kind == KindOCIRepository && isSourceAPI(apiVersion):
+		var repo OCIRepository
+		if err := node.Decode(&repo); err == nil {
+			r.OCIRepositories = append(r.OCIRepositories, repo)
+		}
+	case kind == "ConfigMap" && apiVersion == "v1":
+		var cm ConfigMap
+		if err := node.Decode(&cm); err == nil {
+			r.ConfigMaps = append(r.ConfigMaps, cm)
+		}
+	case kind == "Secret" && apiVersion == "v1":
+		var secret Secret
+		if err := node.Decode(&secret); err == nil {
+			r.Secrets = append(r.Secrets, secret)
+		}
+	}
 }
 
 func ParseHelmReleasesFromBytes(data []byte) []HelmRelease {

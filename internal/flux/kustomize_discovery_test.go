@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -222,6 +223,96 @@ func TestParseConfigMapsFromBytes_Empty(t *testing.T) {
 	cms := ParseConfigMapsFromBytes([]byte(""))
 	if len(cms) != 0 {
 		t.Errorf("expected 0 ConfigMaps, got %d", len(cms))
+	}
+}
+
+// TestParseAllFromBytes_ParityWithPerTypeParsers verifies that one
+// ParseAllFromBytes pass returns exactly the same resources (values and
+// order) as the per-type ParseXxxFromBytes functions it replaces in
+// buildHRInflation.
+func TestParseAllFromBytes_ParityWithPerTypeParsers(t *testing.T) {
+	input := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-settings
+  namespace: flux-system
+data:
+  CLUSTER_NAME: prod
+---
+apiVersion: source.toolkit.fluxcd.io/v1beta2
+kind: HelmRepository
+metadata:
+  name: podinfo
+  namespace: flux-system
+spec:
+  url: https://stefanprodan.github.io/podinfo
+---
+apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+  name: podinfo
+  namespace: default
+spec:
+  chart:
+    spec:
+      chart: podinfo
+      version: 6.0.0
+      sourceRef:
+        kind: HelmRepository
+        name: podinfo
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cluster-secrets
+type: Opaque
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unrelated
+---
+# comment-only document
+---
+apiVersion: source.toolkit.fluxcd.io/v1beta2
+kind: OCIRepository
+metadata:
+  name: podinfo-oci
+  namespace: flux-system
+spec:
+  url: oci://registry.example.com/charts/podinfo
+`
+	data := []byte(input)
+	all := ParseAllFromBytes(data)
+
+	hrs := ParseHelmReleasesFromBytes(data)
+	repos := ParseHelmRepositoriesFromBytes(data)
+	ocis := ParseOCIRepositoriesFromBytes(data)
+	cms := ParseConfigMapsFromBytes(data)
+	secrets := ParseSecretsFromBytes(data)
+
+	if !reflect.DeepEqual(all.HelmReleases, hrs) {
+		t.Errorf("HelmReleases mismatch: %+v vs %+v", all.HelmReleases, hrs)
+	}
+	if !reflect.DeepEqual(all.HelmRepositories, repos) {
+		t.Errorf("HelmRepositories mismatch: %+v vs %+v", all.HelmRepositories, repos)
+	}
+	if !reflect.DeepEqual(all.OCIRepositories, ocis) {
+		t.Errorf("OCIRepositories mismatch: %+v vs %+v", all.OCIRepositories, ocis)
+	}
+	if !reflect.DeepEqual(all.ConfigMaps, cms) {
+		t.Errorf("ConfigMaps mismatch: %+v vs %+v", all.ConfigMaps, cms)
+	}
+	if !reflect.DeepEqual(all.Secrets, secrets) {
+		t.Errorf("Secrets mismatch: %+v vs %+v", all.Secrets, secrets)
+	}
+
+	// Spot-check the extracted values themselves.
+	if len(all.HelmReleases) != 1 || all.HelmReleases[0].Metadata.Namespace != "default" {
+		t.Errorf("HelmReleases = %+v, want one podinfo HR in default namespace", all.HelmReleases)
+	}
+	if len(all.ConfigMaps) != 1 || all.ConfigMaps[0].Data["CLUSTER_NAME"] != "prod" {
+		t.Errorf("ConfigMaps = %+v, want one with CLUSTER_NAME=prod", all.ConfigMaps)
 	}
 }
 

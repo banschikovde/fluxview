@@ -111,8 +111,13 @@ func buildHRInflation(ctx context.Context, scans *scanCache, clusterPath, repoRo
 		return nil, err
 	}
 
+	// One pass over the build output extracts everything the rest of this
+	// function needs: HelmReleases below, and the inflation sources further
+	// down (used to be 5 separate full passes over the same bytes).
+	parsed := flux.ParseAllFromBytes(output)
+
 	// Extract + dedup HelmReleases from the build output.
-	allHRs := flux.ParseHelmReleasesFromBytes(output)
+	allHRs := parsed.HelmReleases
 	seen := make(map[string]bool)
 	// In-place dedup reusing allHRs's backing array (allHRs[:0] aliases the
 	// same storage). Safe because we only append values already read from
@@ -159,10 +164,10 @@ func buildHRInflation(ctx context.Context, scans *scanCache, clusterPath, repoRo
 	// stale literal namespaces from the source file that kustomize would
 	// overwrite during build — including them as-is causes false exact-match
 	// in ResolveValuesFrom when valuesFrom references the pre-transform namespace.
-	buildRepos := flux.ParseHelmRepositoriesFromBytes(output)
-	buildOCI := flux.ParseOCIRepositoriesFromBytes(output)
-	buildCMs := flux.ParseConfigMapsFromBytes(output)
-	buildSecrets := flux.ParseSecretsFromBytes(output)
+	buildRepos := parsed.HelmRepositories
+	buildOCI := parsed.OCIRepositories
+	buildCMs := parsed.ConfigMaps
+	buildSecrets := parsed.Secrets
 	rawRepos, rawOCI, rawCMs, rawSecrets := resolveHelmInflationSources(ctx, scans, clusterPath, repoRoot, quiet)
 
 	// Merge: build-output versions are authoritative. Raw-parsed versions
