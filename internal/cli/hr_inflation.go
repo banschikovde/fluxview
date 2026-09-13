@@ -191,8 +191,6 @@ var errHRNotFound = errors.New("helmrelease not found")
 
 // inflateOptions controls how HelmReleases are inflated.
 type inflateOptions struct {
-	// skipCRDs drops CustomResourceDefinition documents from the output.
-	skipCRDs bool
 	// quiet suppresses stderr diagnostics (progress + warnings). Used by the
 	// diff command's comparison side so diagnostics are not printed twice.
 	quiet bool
@@ -365,10 +363,6 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 		} else {
 			stderr("Warning: failed to fill namespace %q in HelmRelease %s/%s output: %v\n",
 				hrNamespace, hr.Metadata.Namespace, hr.Metadata.Name, err)
-		}
-
-		if opts.skipCRDs {
-			output = filterCRDDocs(output)
 		}
 
 		outputs = append(outputs, output)

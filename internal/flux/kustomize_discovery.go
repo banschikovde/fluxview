@@ -21,7 +21,7 @@ type nativeKustomization struct {
 //   - buildDirs: native kustomize overlays to build, with the same selection
 //     and dedup as DiscoverKustomizeDirs.
 //   - fileDirs: every directory containing a kustomization file of any kind
-//     (same set as DiscoverKustomizationFileDirs).
+//     (native overlay, Flux Kustomization, or Component).
 //
 // Combining the two in a single walk avoids walking the tree and re-reading
 // each kustomization.yaml twice at call sites that need both (the loose-file
@@ -145,7 +145,7 @@ func DiscoverKustomizeDirsAndFiles(ctx context.Context, rootPath string) (buildD
 // overlays (kustomization.yaml/yml/Kustomization with apiVersion kustomize.config.k8s.io)
 // and returns the buildable directories (with dedup). See DiscoverKustomizeDirsAndFiles
 // for the selection rules. Callers that also need every kustomization-file directory
-// should call DiscoverKustomizeDirsAndFiles once instead of this plus DiscoverKustomizationFileDirs.
+// should call DiscoverKustomizeDirsAndFiles once instead of this function.
 func DiscoverKustomizeDirs(ctx context.Context, rootPath string) ([]string, error) {
 	buildDirs, _, err := DiscoverKustomizeDirsAndFiles(ctx, rootPath)
 	return buildDirs, err

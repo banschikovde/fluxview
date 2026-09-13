@@ -139,7 +139,9 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		fmt.Fprintf(os.Stderr, "Warning: %v, processing in original order\n", err)
 	}
 
-	if name != "" || flags.Namespace != "" {
+	// Namespace filtering of the final output happens after the build
+	// (filterByNamespace below); here only the name filter applies.
+	if name != "" {
 		kustomizations = filterKustomizations(kustomizations, name)
 		if len(kustomizations) == 0 {
 			return NewExitError(fmt.Errorf("kustomization %q not found", name), ExitCodeError)
@@ -202,6 +204,8 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return nil
 	}
 
+	// CRD filtering is caller-side (--skip-crds): HR inflation itself never
+	// drops CustomResourceDefinition documents from its output.
 	if flags.SkipCRDs {
 		output = filterCRDDocs(output)
 	}

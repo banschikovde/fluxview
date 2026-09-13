@@ -17,8 +17,7 @@ import (
 
 // Operations provides git operations for the local repository via go-git SDK.
 type Operations struct {
-	repo     *git.Repository
-	RepoRoot string
+	repo *git.Repository
 }
 
 // NewOperations creates a new git Operations instance using the go-git SDK.
@@ -28,10 +27,7 @@ func NewOperations(repoRoot string) (*Operations, error) {
 		return nil, fmt.Errorf("opening git repo at %s: %w", repoRoot, err)
 	}
 
-	return &Operations{
-		repo:     repo,
-		RepoRoot: repoRoot,
-	}, nil
+	return &Operations{repo: repo}, nil
 }
 
 // DefaultBranch returns the default branch name (main or master).

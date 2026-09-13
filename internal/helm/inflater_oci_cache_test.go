@@ -155,8 +155,7 @@ func TestResolveOCIChart_TTLZeroFallsBackToStaleDigest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
-	var stderr string
-	stderr = captureStderrHelm(func() {
+	stderr := captureStderrHelm(func() {
 		// TTL=0 forces a re-resolve; wrong creds make it fail with 401, the
 		// stale digest must carry the run.
 		if _, err := in.resolveOCIChart(env.ref, "0.1.0", "wrong", "creds"); err != nil {
@@ -336,8 +335,7 @@ func TestResolveOCIChart_TTLZeroStaleTagSelection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
-	var stderr string
-	stderr = captureStderrHelm(func() {
+	stderr := captureStderrHelm(func() {
 		if _, err := in.resolveOCIChart(env.ref, "", "wrong", "creds"); err != nil {
 			t.Fatalf("stale tag-selection fallback: %v", err)
 		}

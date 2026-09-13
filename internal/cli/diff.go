@@ -163,7 +163,7 @@ func runDiffKS(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 		return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, err), ExitCodeError)
 	}
 
-	return computeAndOutputDiff(compareOutput, currentOutput, flags)
+	return computeAndOutputDiff(ctx, compareOutput, currentOutput, flags)
 }
 
 func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, compareCommit string, flags *DiffFlags) error {
@@ -227,19 +227,14 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 				return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, err), ExitCodeError)
 			}
 		}
-		return computeAndOutputDiff(compareOutput, currentOutput, flags)
+		return computeAndOutputDiff(ctx, compareOutput, currentOutput, flags)
 	}
 
-	return computeAndOutputDiff(nil, currentOutput, flags)
+	return computeAndOutputDiff(ctx, nil, currentOutput, flags)
 }
 
 // buildKSOutput builds the Kustomization output for the current working tree.
 func buildKSOutput(ctx context.Context, clusterPath, repoRoot, name string, ksCache kustomizeCacheOptions) ([]byte, error) {
-	return buildKSOutputWithCache(ctx, clusterPath, repoRoot, name, make(buildCache), ksCache)
-}
-
-// buildKSOutputWithCache builds the Kustomization output for the current working tree with build cache.
-func buildKSOutputWithCache(ctx context.Context, clusterPath, repoRoot, name string, buildCache map[string]buildResult, ksCache kustomizeCacheOptions) ([]byte, error) {
 	// Check that the path contains Kustomization files directly (not just in subdirectories)
 	hasDirectKS, err := hasDirectKustomizations(clusterPath)
 	if err != nil {
@@ -263,6 +258,7 @@ func buildKSOutputWithCache(ctx context.Context, clusterPath, repoRoot, name str
 	}
 
 	builder := kustomize.NewBuilder(repoRoot, ksCache.builderOptions()...)
+	buildCache := make(buildCache)
 	// Resolve ConfigMaps and Secrets for postBuild substitution.
 	configMaps := resolveConfigMaps(ctx, clusterPath, builder, buildCache)
 	secrets := resolveSecrets(ctx, clusterPath, builder, buildCache)
@@ -778,7 +774,7 @@ func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, helmRe
 // computeAndOutputDiff computes per-resource diffs and outputs them.
 // Processing (redact, strip-attrs, skip-crds, resource split) is done in a
 // single pass per state to avoid redundant YAML round-trips.
-func computeAndOutputDiff(original, modified []byte, flags *DiffFlags) error {
+func computeAndOutputDiff(ctx context.Context, original, modified []byte, flags *DiffFlags) error {
 	if flags.Namespace != "" {
 		original = filterByNamespace(original, flags.Namespace)
 		modified = filterByNamespace(modified, flags.Namespace)
@@ -791,9 +787,9 @@ func computeAndOutputDiff(original, modified []byte, flags *DiffFlags) error {
 	origMap := buildResourceMap(original, flags)
 	modMap := buildResourceMap(modified, flags)
 
-	// Check for interruption before expensive diff computation
-	if origMap == nil || modMap == nil {
-		return nil
+	// Check for interruption before expensive diff computation.
+	if err := CheckInterrupted(ctx); err != nil {
+		return err
 	}
 
 	diffs := diffResourceMaps(origMap, modMap, flags.Unified)
