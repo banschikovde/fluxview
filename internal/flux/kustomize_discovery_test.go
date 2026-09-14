@@ -226,6 +226,62 @@ func TestParseConfigMapsFromBytes_Empty(t *testing.T) {
 	}
 }
 
+func TestParseKustomizationsFromBytes(t *testing.T) {
+	yaml := `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: apps
+  namespace: flux-system
+spec:
+  path: ./apps
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+metadata:
+  name: native-overlay
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infra
+  namespace: flux-system
+spec:
+  path: ./infra
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata: not-a-mapping
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unrelated
+---
+# comment-only document
+`
+	kss := ParseKustomizationsFromBytes([]byte(yaml))
+	if len(kss) != 2 {
+		t.Fatalf("expected 2 Kustomizations, got %d", len(kss))
+	}
+
+	if kss[0].Metadata.Name != "apps" {
+		t.Errorf("kss[0] name = %q, want %q", kss[0].Metadata.Name, "apps")
+	}
+	if kss[0].Spec.Path != "./apps" {
+		t.Errorf("kss[0] spec.path = %q, want %q", kss[0].Spec.Path, "./apps")
+	}
+	if kss[1].Metadata.Name != "infra" {
+		t.Errorf("kss[1] name = %q, want %q", kss[1].Metadata.Name, "infra")
+	}
+}
+
+func TestParseKustomizationsFromBytes_Empty(t *testing.T) {
+	kss := ParseKustomizationsFromBytes([]byte(""))
+	if len(kss) != 0 {
+		t.Errorf("expected 0 Kustomizations, got %d", len(kss))
+	}
+}
+
 // TestParseAllFromBytes_ParityWithPerTypeParsers verifies that one
 // ParseAllFromBytes pass returns exactly the same resources (values and
 // order) as the per-type ParseXxxFromBytes functions still alive for

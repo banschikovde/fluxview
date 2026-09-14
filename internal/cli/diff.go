@@ -499,32 +499,12 @@ func buildAllKustomizations(ctx context.Context, scans *scanCache, builder *kust
 // discoverResourcesFromOutput parses build output for Flux Kustomization
 // resources that haven't been seen yet.
 func discoverResourcesFromOutput(data []byte, seen map[string]bool) []flux.Kustomization {
-	docs := flux.SplitYAMLDocuments(data)
 	var ksResults []flux.Kustomization
 
-	for _, doc := range docs {
-		trimmed := strings.TrimSpace(doc)
-		if trimmed == "" {
-			continue
-		}
-		var meta struct {
-			APIVersion string `yaml:"apiVersion"`
-			Kind       string `yaml:"kind"`
-		}
-		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
-			continue
-		}
-
-		// Discover Flux Kustomization resources.
-		if meta.Kind == "Kustomization" && strings.HasPrefix(meta.APIVersion, "kustomize.toolkit.fluxcd.io") {
-			var ks flux.Kustomization
-			if err := yaml.Unmarshal([]byte(trimmed), &ks); err != nil {
-				continue
-			}
-			key := fmt.Sprintf("%s/%s", ks.Metadata.Namespace, ks.Metadata.Name)
-			if !seen[key] {
-				ksResults = append(ksResults, ks)
-			}
+	for _, ks := range flux.ParseKustomizationsFromBytes(data) {
+		key := fmt.Sprintf("%s/%s", ks.Metadata.Namespace, ks.Metadata.Name)
+		if !seen[key] {
+			ksResults = append(ksResults, ks)
 		}
 	}
 

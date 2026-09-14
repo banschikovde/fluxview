@@ -454,7 +454,7 @@ data:
 // into an in-repo Helm chart's templates/ directory.
 //
 // Files under templates/ are Go-template text (not standalone YAML), so
-// SplitYAMLDocuments cannot decode them and emits spurious "YAML parse error"
+// the raw resource parsers cannot decode them and emit spurious "YAML parse error"
 // warnings to stderr. The parser must skip the whole chart subtree (any
 // directory containing a Chart.yaml) while still discovering legitimate
 // resources that live outside the chart.
@@ -498,7 +498,7 @@ data:
 		t.Fatalf("write template: %v", err)
 	}
 
-	// Capture stderr: SplitYAMLDocuments writes warnings directly to os.Stderr.
+	// Capture stderr: the raw parsers write warnings directly to os.Stderr.
 	oldStderr := os.Stderr
 	r, w, err := os.Pipe()
 	if err != nil {

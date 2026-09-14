@@ -306,3 +306,9 @@ func ParseSecretsFromBytes(data []byte) []Secret {
 		return api == "v1" && kind == "Secret"
 	})
 }
+
+func ParseKustomizationsFromBytes(data []byte) []Kustomization {
+	return parseResourcesFromBytes[Kustomization](data, func(kind, api string) bool {
+		return kind == KindKustomization && isKustomizeAPI(api)
+	})
+}

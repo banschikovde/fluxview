@@ -443,24 +443,8 @@ func hasDirectKustomizations(path string) (bool, error) {
 			continue
 		}
 
-		docs := flux.SplitYAMLDocuments(data)
-		for _, doc := range docs {
-			trimmed := strings.TrimSpace(doc)
-			if trimmed == "" {
-				continue
-			}
-
-			var meta struct {
-				APIVersion string `yaml:"apiVersion"`
-				Kind       string `yaml:"kind"`
-			}
-			if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
-				continue
-			}
-
-			if meta.Kind == "Kustomization" && strings.HasPrefix(meta.APIVersion, "kustomize.toolkit.fluxcd.io") {
-				return true, nil
-			}
+		if len(flux.ParseKustomizationsFromBytes(data)) > 0 {
+			return true, nil
 		}
 	}
 

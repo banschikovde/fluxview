@@ -50,7 +50,7 @@ func (p *Parser) snapshotOf(ctx context.Context) (*ResourceSnapshot, error) {
 // A Helm chart root is identified by the presence of a Chart.yaml file next
 // to it. Chart subtrees contain Go-template text under templates/ (and other
 // chart-only files such as values.yaml) that is not standalone YAML and must
-// not be scanned by raw resource parsers: SplitYAMLDocuments cannot render
+// not be scanned by raw resource parsers: the document decoder cannot render
 // Go templates and would emit spurious "YAML parse error" warnings for them.
 func isChartRoot(dir string) bool {
 	info, err := os.Stat(filepath.Join(dir, "Chart.yaml"))
@@ -276,32 +276,6 @@ func mapScalar(mapping *yaml.Node, key string) string {
 		return ""
 	}
 	return v.Value
-}
-
-// SplitYAMLDocuments splits a multi-document YAML into individual documents.
-func SplitYAMLDocuments(data []byte) []string {
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	var docs []string
-
-	for {
-		var node yaml.Node
-		if err := decoder.Decode(&node); err != nil {
-			if err != io.EOF {
-				fmt.Fprintf(os.Stderr, "Warning: YAML parse error in SplitYAMLDocuments: %v\n", err)
-			}
-			break
-		}
-		var buf bytes.Buffer
-		encoder := yaml.NewEncoder(&buf)
-		encoder.SetIndent(2)
-		if err := encoder.Encode(&node); err != nil {
-			break
-		}
-		encoder.Close()
-		docs = append(docs, buf.String())
-	}
-
-	return docs
 }
 
 // SplitYAMLText splits multi-doc YAML into individual documents.
