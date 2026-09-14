@@ -243,6 +243,13 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 	}
 
 	var outputs [][]byte
+
+	// O(1) source lookups per HelmRelease instead of linear scans over the
+	// repo/secret lists on every iteration. Built once per run.
+	ociRepoIndex := indexByNSName(ociRepos, func(r flux.OCIRepository) flux.ObjectMeta { return r.Metadata })
+	helmRepoIndex := indexByNSName(helmRepos, func(r flux.HelmRepository) flux.ObjectMeta { return r.Metadata })
+	secretIndex := indexByNSName(secrets, func(s flux.Secret) flux.ObjectMeta { return s.Metadata })
+
 	for _, hr := range helmReleases {
 		if err := CheckInterrupted(ctx); err != nil {
 			return nil, err
@@ -259,7 +266,7 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 
 		// ChartRef-based HR (Flux v2 OCIRepository pattern).
 		if hr.Spec.ChartRef != nil && hr.Spec.ChartRef.Kind == flux.KindOCIRepository {
-			ociRef, ociVersion := resolveOCIRepoURL(hr, ociRepos)
+			ociRef, ociVersion := resolveOCIRepoURL(hr, ociRepoIndex)
 			if ociRef == "" {
 				fail(hr, fmt.Sprintf("could not resolve OCIRepository source (chartRef %s/%s) — not found",
 					hr.Spec.ChartRef.Namespace, hr.Spec.ChartRef.Name))
@@ -315,7 +322,7 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 					hr.Metadata.Namespace, hr.Metadata.Name, hr.Spec.Chart.Spec.Chart)
 				continue
 			} else {
-				repoURL, username, password = resolveHelmRepoURL(hr, helmRepos, secrets)
+				repoURL, username, password = resolveHelmRepoURL(hr, helmRepoIndex, secretIndex)
 				if repoURL == "" {
 					fail(hr, fmt.Sprintf("could not resolve source (chart %q) — HelmRepository not found",
 						hr.Spec.Chart.Spec.Chart))
@@ -439,10 +446,25 @@ func applyHelmNamespace(data []byte, namespace string) ([]byte, error) {
 	return []byte(strings.Join(result, "\n---\n")), nil
 }
 
-// resolveOCIRepoURL finds the OCIRepository reference for a HelmRelease's chartRef.
-// Returns (chartRef, version) where chartRef is the full OCI reference
-// (URL, optionally with @digest appended), and version is semver/tag.
-func resolveOCIRepoURL(hr flux.HelmRelease, ociRepos []flux.OCIRepository) (string, string) {
+// indexByNSName indexes resources by "namespace/name", keeping the first
+// occurrence — the same winner the previous per-HelmRelease linear scans
+// found. Built once per pipeline run, looked up per HelmRelease.
+func indexByNSName[T any](items []T, metaOf func(T) flux.ObjectMeta) map[string]T {
+	index := make(map[string]T, len(items))
+	for _, item := range items {
+		key := metaOf(item).Namespace + "/" + metaOf(item).Name
+		if _, exists := index[key]; !exists {
+			index[key] = item
+		}
+	}
+	return index
+}
+
+// resolveOCIRepoURL finds the OCIRepository reference for a HelmRelease's chartRef
+// in the pre-built namespace/name index. Returns (chartRef, version) where
+// chartRef is the full OCI reference (URL, optionally with @digest appended),
+// and version is semver/tag.
+func resolveOCIRepoURL(hr flux.HelmRelease, ociRepos map[string]flux.OCIRepository) (string, string) {
 	if hr.Spec.ChartRef == nil {
 		return "", ""
 	}
@@ -450,23 +472,23 @@ func resolveOCIRepoURL(hr flux.HelmRelease, ociRepos []flux.OCIRepository) (stri
 	if repoNS == "" {
 		repoNS = hr.Metadata.Namespace
 	}
-	for _, repo := range ociRepos {
-		if repo.Metadata.Name == hr.Spec.ChartRef.Name && repo.Metadata.Namespace == repoNS {
-			url := repo.Spec.URL
-			ref := repo.Spec.Ref
-
-			if ref.HasDigest() {
-				return url + "@" + ref.Digest, ""
-			}
-
-			return url, ref.ResolveVersion()
-		}
+	repo, ok := ociRepos[repoNS+"/"+hr.Spec.ChartRef.Name]
+	if !ok {
+		return "", ""
 	}
-	return "", ""
+	url := repo.Spec.URL
+	ref := repo.Spec.Ref
+
+	if ref.HasDigest() {
+		return url + "@" + ref.Digest, ""
+	}
+
+	return url, ref.ResolveVersion()
 }
 
-// resolveHelmRepoURL finds the HelmRepository URL for a HelmRelease's chart.
-func resolveHelmRepoURL(hr flux.HelmRelease, helmRepos []flux.HelmRepository, secrets []flux.Secret) (string, string, string) {
+// resolveHelmRepoURL finds the HelmRepository URL for a HelmRelease's chart in
+// the pre-built namespace/name indexes.
+func resolveHelmRepoURL(hr flux.HelmRelease, helmRepos map[string]flux.HelmRepository, secrets map[string]flux.Secret) (string, string, string) {
 	sourceRef := hr.Spec.Chart.Spec.SourceRef
 	if sourceRef.Kind != flux.KindHelmRepository {
 		return "", "", ""

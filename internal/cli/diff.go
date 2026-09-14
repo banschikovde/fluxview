@@ -633,24 +633,25 @@ func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, helmRe
 // Processing (redact, strip-attrs, skip-crds, resource split) is done in a
 // single pass per state to avoid redundant YAML round-trips.
 func computeAndOutputDiff(ctx context.Context, original, modified []byte, flags *DiffFlags) error {
-	// Bail out before the first potentially heavy work (namespace filter +
-	// per-document parsing of both states) if the command is already
-	// cancelled; a second checkpoint follows after the parsing.
+	// Bail out before the first potentially heavy work (per-document parsing
+	// of both states) if the command is already cancelled; a second
+	// checkpoint follows after the parsing.
 	if err := CheckInterrupted(ctx); err != nil {
 		return err
 	}
 
-	if flags.Namespace != "" {
-		original = filterByNamespace(original, flags.Namespace)
-		modified = filterByNamespace(modified, flags.Namespace)
-		if len(original) == 0 && len(modified) == 0 {
-			fmt.Fprintf(os.Stderr, "No resources found in namespace %q\n", flags.Namespace)
-			return nil
-		}
-	}
-
+	// Namespace filtering happens inside buildResourceMap (metadata is
+	// already parsed there) instead of a separate full re-parse per state.
 	origMap := buildResourceMap(original, flags)
 	modMap := buildResourceMap(modified, flags)
+
+	// Deliberate: this fires on an empty final result, not only on an empty
+	// namespace match — with --namespace X --skip-crds, a namespace holding
+	// only CRDs reports this message instead of silently printing nothing.
+	if flags.Namespace != "" && len(origMap) == 0 && len(modMap) == 0 {
+		fmt.Fprintf(os.Stderr, "No resources found in namespace %q\n", flags.Namespace)
+		return nil
+	}
 
 	// Check for interruption before expensive diff computation.
 	if err := CheckInterrupted(ctx); err != nil {

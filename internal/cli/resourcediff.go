@@ -34,9 +34,37 @@ type resourceDiffResult struct {
 	RawDiff string
 }
 
+// docMeta is the metadata prefix parsed from a YAML document for output
+// filtering (namespace / CRD selection). Shared by the diff and build
+// processing passes.
+type docMeta struct {
+	APIVersion string `yaml:"apiVersion"`
+	Kind       string `yaml:"kind"`
+	Metadata   struct {
+		Name      string `yaml:"name"`
+		Namespace string `yaml:"namespace"`
+	} `yaml:"metadata"`
+}
+
+// matchesNamespace reports whether a document with this metadata belongs to
+// the given namespace. Special cases:
+//   - kind: Namespace with metadata.name == namespace (cluster-scoped,
+//     matches by name)
+//   - namespace == "default": resources with empty metadata.namespace match
+//     (except cluster-scoped kinds like Namespace, ClusterRole, etc.)
+func (m docMeta) matchesNamespace(namespace string) bool {
+	if m.APIVersion == "v1" && m.Kind == "Namespace" && m.Metadata.Name == namespace {
+		return true
+	}
+	if m.Metadata.Namespace == namespace {
+		return true
+	}
+	return namespace == "default" && m.Metadata.Namespace == "" && !isClusterScoped(m.Kind)
+}
+
 // buildResourceMap splits multi-doc YAML into individual resources in a single
-// pass, applying redaction, attribute stripping, and CRD filtering. This
-// replaces the previous multi-step pipeline that parsed YAML 4+ times.
+// pass, applying namespace filtering, redaction, attribute stripping, and CRD
+// filtering. This replaces the previous multi-step pipeline that parsed YAML 4+ times.
 func buildResourceMap(data []byte, flags *DiffFlags) map[resourceKey]string {
 	stripAttrs := parseAttrs(flags.StripAttrs)
 	docs := flux.SplitYAMLText(data)
@@ -49,17 +77,18 @@ func buildResourceMap(data []byte, flags *DiffFlags) map[resourceKey]string {
 		}
 
 		// Parse metadata only (fast — small struct).
-		var meta struct {
-			Kind     string `yaml:"kind"`
-			Metadata struct {
-				Name      string `yaml:"name"`
-				Namespace string `yaml:"namespace"`
-			} `yaml:"metadata"`
-		}
+		var meta docMeta
 		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: skipping unparseable YAML document: %v\n", err)
 			continue
 		}
+
+		// Namespace filter: metadata is already parsed here, so filtering
+		// inside the map build avoids a separate parse of every document.
+		if flags.Namespace != "" && !meta.matchesNamespace(flags.Namespace) {
+			continue
+		}
+
 		if meta.Kind == "" || meta.Metadata.Name == "" {
 			continue
 		}
@@ -185,11 +214,8 @@ func filterCRDDocs(data []byte) []byte {
 	return []byte(strings.Join(result, "\n---\n"))
 }
 
-// filterByNamespace keeps only YAML documents whose metadata.namespace matches.
-// Special cases:
-//   - kind: Namespace with metadata.name == namespace (cluster-scoped, matches by name)
-//   - namespace == "default": resources with empty metadata.namespace match
-//     (except cluster-scoped kinds like Namespace, ClusterRole, etc.)
+// filterByNamespace keeps only YAML documents whose metadata.namespace matches
+// (see docMeta.matchesNamespace for the special cases).
 func filterByNamespace(data []byte, namespace string) []byte {
 	if namespace == "" {
 		return data
@@ -197,34 +223,12 @@ func filterByNamespace(data []byte, namespace string) []byte {
 	docs := flux.SplitYAMLText(data)
 	var result []string
 	for _, doc := range docs {
-		var meta struct {
-			APIVersion string `yaml:"apiVersion"`
-			Kind       string `yaml:"kind"`
-			Metadata   struct {
-				Name      string `yaml:"name"`
-				Namespace string `yaml:"namespace"`
-			} `yaml:"metadata"`
-		}
+		var meta docMeta
 		if err := yaml.Unmarshal([]byte(doc), &meta); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: skipping unparseable document in filterByNamespace: %v\n", err)
 			continue
 		}
-
-		// Namespace resources (v1): match by metadata.name.
-		if meta.APIVersion == "v1" && meta.Kind == "Namespace" && meta.Metadata.Name == namespace {
-			result = append(result, doc)
-			continue
-		}
-
-		// Exact namespace match.
-		if meta.Metadata.Namespace == namespace {
-			result = append(result, doc)
-			continue
-		}
-
-		// Default namespace: resources with empty namespace match
-		// (except cluster-scoped kinds).
-		if namespace == "default" && meta.Metadata.Namespace == "" && !isClusterScoped(meta.Kind) {
+		if meta.matchesNamespace(namespace) {
 			result = append(result, doc)
 		}
 	}
@@ -256,20 +260,6 @@ var clusterScopedKinds = map[string]bool{
 
 func isClusterScoped(kind string) bool {
 	return clusterScopedKinds[kind]
-}
-
-// stripAllAttrs strips specified keys from all documents in multi-doc YAML.
-func stripAllAttrs(data []byte, attrsList string) []byte {
-	attrs := parseAttrs(attrsList)
-	if attrs == nil {
-		return data
-	}
-	docs := flux.SplitYAMLText(data)
-	var result []string
-	for _, doc := range docs {
-		result = append(result, stripAttrsFromDoc(doc, attrs))
-	}
-	return []byte(strings.Join(result, "\n---\n"))
 }
 
 // diffResourceMaps matches resources by key and computes per-resource diffs.

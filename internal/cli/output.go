@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -18,38 +19,65 @@ type resourceEntry struct {
 	content string
 }
 
-// printResourcesBoxed splits multi-doc YAML into individual resources, sorts
-// them by kind/namespace/name, and prints each with a box header (same format
-// as diff output).
-func printResourcesBoxed(data []byte) {
-	if len(bytes.TrimSpace(data)) == 0 {
-		return
-	}
+// outputOptions configures the single-pass processing of build output: every
+// step used to be its own full re-parse of the combined output (filter →
+// filter → strip → print).
+type outputOptions struct {
+	// namespace keeps only resources in this namespace ("" disables).
+	namespace string
+	// skipCRDs drops CustomResourceDefinition documents.
+	skipCRDs bool
+	// stripAttrs lists keys removed recursively from every document.
+	stripAttrs map[string]bool
+}
 
-	docs := flux.SplitYAMLText(data)
+// processResources splits multi-doc YAML into individual resources in a
+// single pass, applying the namespace filter, CRD filter, attribute
+// stripping, field reordering, JSON-in-YAML conversion, and secret redaction
+// per document, then sorts entries by kind/namespace/name.
+func processResources(data []byte, opts outputOptions) []resourceEntry {
 	var entries []resourceEntry
 
-	for _, doc := range docs {
+	for _, doc := range flux.SplitYAMLText(data) {
 		trimmed := strings.TrimSpace(doc)
 		if trimmed == "" {
 			continue
 		}
 
-		var meta struct {
-			Kind     string `yaml:"kind"`
-			Metadata struct {
-				Name      string `yaml:"name"`
-				Namespace string `yaml:"namespace"`
-			} `yaml:"metadata"`
-		}
+		var meta docMeta
+		// meta is intentionally parsed BEFORE stripping: --strip-attrs targets
+		// noise fields (status, creationTimestamp, helm.sh/chart), and stripping
+		// the identity fields (kind/name/namespace) is outside the contract.
 		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
+			if opts.namespace != "" {
+				// Parity with filterByNamespace: warn about unparseable
+				// documents only while namespace-filtering.
+				fmt.Fprintf(os.Stderr, "Warning: skipping unparseable document in namespace filter: %v\n", err)
+			}
 			continue
 		}
+
+		if opts.namespace != "" && !meta.matchesNamespace(opts.namespace) {
+			continue
+		}
+
+		// Skip CRDs if requested.
+		if opts.skipCRDs && meta.Kind == "CustomResourceDefinition" {
+			continue
+		}
+
+		processed := trimmed
+
+		// Strip specified attrs if requested.
+		if len(opts.stripAttrs) > 0 {
+			processed = stripAttrsFromDoc(processed, opts.stripAttrs)
+		}
+
 		if meta.Kind == "" || meta.Metadata.Name == "" {
 			continue
 		}
 
-		normalized := reorderYAMLFields([]byte(trimmed))
+		normalized := reorderYAMLFields([]byte(processed))
 		converted, err := helm.ConvertJSONInYAMLToYAML(normalized)
 		if err != nil || converted == nil {
 			continue
@@ -77,6 +105,12 @@ func printResourcesBoxed(data []byte) {
 		return a.Name < b.Name
 	})
 
+	return entries
+}
+
+// printResourceEntries prints already-processed resources, each with a box
+// header (same format as diff output).
+func printResourceEntries(entries []resourceEntry) {
 	for _, e := range entries {
 		header := e.key.String()
 		border := strings.Repeat("-", len(header)+2)

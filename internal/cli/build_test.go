@@ -229,10 +229,10 @@ func TestFilterHelmReleases_ByName(t *testing.T) {
 }
 
 func TestResolveOCIRepoURL(t *testing.T) {
-	ociRepos := []flux.OCIRepository{
+	ociRepos := indexByNSName([]flux.OCIRepository{
 		{Metadata: flux.ObjectMeta{Name: "chart-a", Namespace: "ns1"}, Spec: flux.OCIRepositorySpec{URL: "oci://registry.io/chart-a"}},
 		{Metadata: flux.ObjectMeta{Name: "chart-b", Namespace: "ns2"}, Spec: flux.OCIRepositorySpec{URL: "oci://registry.io/chart-b"}},
-	}
+	}, func(r flux.OCIRepository) flux.ObjectMeta { return r.Metadata })
 
 	tests := []struct {
 		name    string
@@ -293,7 +293,7 @@ func TestResolveOCIRepoURL(t *testing.T) {
 }
 
 func TestResolveOCIRepoURL_WithRef(t *testing.T) {
-	ociRepos := []flux.OCIRepository{
+	ociRepos := indexByNSName([]flux.OCIRepository{
 		{
 			Metadata: flux.ObjectMeta{Name: "chart-tagged", Namespace: "ns1"},
 			Spec: flux.OCIRepositorySpec{
@@ -322,7 +322,7 @@ func TestResolveOCIRepoURL_WithRef(t *testing.T) {
 				Ref: &flux.OCIRepositoryRef{Tag: "v1.0.0", Semver: "^2.0.0"},
 			},
 		},
-	}
+	}, func(r flux.OCIRepository) flux.ObjectMeta { return r.Metadata })
 
 	// Tag only.
 	hr := flux.HelmRelease{
@@ -1645,9 +1645,101 @@ func TestInflateHelmReleasesShared_LocalSourceChartMissing(t *testing.T) {
 	}
 }
 
-// Test: printResourcesBoxed outputs each resource with a box header and
-// sorts by kind/namespace/name.
-func TestPrintResourcesBoxed(t *testing.T) {
+// TestProcessResources_SinglePassFilters verifies the single-pass build-output
+// processing: namespace filter, CRD skip, attribute stripping, and secret
+// redaction applied in one pass over the documents (replacing the former
+// filter→filter→strip→print chain of full re-parses).
+func TestProcessResources_SinglePassFilters(t *testing.T) {
+	data := []byte(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm-a
+  namespace: team-a
+  creationTimestamp: "2024-01-01T00:00:00Z"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm-b
+  namespace: team-b
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: crds.example.com
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sec
+  namespace: team-a
+type: Opaque
+data:
+  password: c2VjcmV0
+`)
+
+	entries := processResources(data, outputOptions{
+		namespace:  "team-a",
+		skipCRDs:   true,
+		stripAttrs: map[string]bool{"creationTimestamp": true},
+	})
+
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries (cm-a + redacted Secret), got %d: %+v", len(entries), entries)
+	}
+	// Sorted by kind: ConfigMap before Secret.
+	if entries[0].key.Kind != "ConfigMap" || entries[0].key.Name != "cm-a" {
+		t.Errorf("entries[0] = %s, want ConfigMap/cm-a", entries[0].key)
+	}
+	if entries[1].key.Kind != "Secret" || entries[1].key.Name != "sec" {
+		t.Errorf("entries[1] = %s, want Secret/sec", entries[1].key)
+	}
+	if contains(entries[0].content, "creationTimestamp") {
+		t.Errorf("expected creationTimestamp stripped, got:\n%s", entries[0].content)
+	}
+	if !contains(entries[1].content, flux.SecretRedactedValue) {
+		t.Errorf("expected secret data redacted, got:\n%s", entries[1].content)
+	}
+}
+
+// TestProcessResources_UnparseableDocWarnsUnderNamespaceFilter verifies that
+// an unparseable document is warned about only while namespace-filtering
+// (parity with the old filterByNamespace step) and always silently skipped
+// from the output.
+func TestProcessResources_UnparseableDocWarnsUnderNamespaceFilter(t *testing.T) {
+	data := []byte(`::: broken yaml :::
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ok
+  namespace: team-a
+`)
+
+	stderr := captureStderr(func() {
+		entries := processResources(data, outputOptions{namespace: "team-a"})
+		if len(entries) != 1 || entries[0].key.Name != "ok" {
+			t.Errorf("expected only the valid ConfigMap, got %+v", entries)
+		}
+	})
+	if !contains(stderr, "Warning: skipping unparseable document") {
+		t.Errorf("expected an unparseable-document warning under namespace filter, got:\n%s", stderr)
+	}
+
+	stderr = captureStderr(func() {
+		entries := processResources(data, outputOptions{})
+		if len(entries) != 1 || entries[0].key.Name != "ok" {
+			t.Errorf("expected only the valid ConfigMap, got %+v", entries)
+		}
+	})
+	if stderr != "" {
+		t.Errorf("expected silent stderr without namespace filter, got:\n%s", stderr)
+	}
+}
+
+// Test: printResourceEntries (fed by processResources) outputs each resource
+// with a box header and sorts by kind/namespace/name.
+func TestPrintResourceEntries(t *testing.T) {
 	input := []byte(`apiVersion: v1
 kind: Service
 metadata:
@@ -1668,7 +1760,7 @@ metadata:
 `)
 
 	output := captureStdout(func() {
-		printResourcesBoxed(input)
+		printResourceEntries(processResources(input, outputOptions{}))
 	})
 
 	// All three resources must have box headers.
@@ -1703,16 +1795,16 @@ metadata:
 }
 
 // Test: printResourcesBoxed produces no output for nil/empty input.
-func TestPrintResourcesBoxed_Empty(t *testing.T) {
+func TestPrintResourceEntries_Empty(t *testing.T) {
 	output := captureStdout(func() {
-		printResourcesBoxed(nil)
+		printResourceEntries(processResources(nil, outputOptions{}))
 	})
 	if output != "" {
 		t.Errorf("expected empty output for nil input, got %q", output)
 	}
 
 	output = captureStdout(func() {
-		printResourcesBoxed([]byte(""))
+		printResourceEntries(processResources([]byte(""), outputOptions{}))
 	})
 	if output != "" {
 		t.Errorf("expected empty output for empty input, got %q", output)

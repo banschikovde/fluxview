@@ -824,36 +824,32 @@ func mergeChartValuesFile(dst map[string]interface{}, acc chart.Accessor, name s
 	return fmt.Errorf("values file %q not found in chart", name)
 }
 
-// FindHelmRepoURL finds the URL for a HelmRepository referenced by a HelmRelease.
-// For OCI repositories (type: oci), the URL is prefixed with oci:// as required
-// by the Helm SDK.
-func FindHelmRepoURL(repos []fluxtypes.HelmRepository, name, namespace string, secrets []fluxtypes.Secret) (string, string, string, error) {
-	for _, repo := range repos {
-		if repo.Metadata.Name == name && repo.Metadata.Namespace == namespace {
-			url := repo.Spec.URL
-			if repo.Spec.Type == "oci" && !strings.HasPrefix(url, "oci://") {
-				url = strings.TrimPrefix(url, "https://")
-				url = strings.TrimPrefix(url, "http://")
-				url = "oci://" + url
-			}
+// FindHelmRepoURL finds the URL for a HelmRepository referenced by a HelmRelease
+// in "namespace/name" indexes of repositories and secrets (built once per run
+// by the caller, so per-HelmRelease lookups are O(1)). For OCI repositories
+// (type: oci), the URL is prefixed with oci:// as required by the Helm SDK.
+func FindHelmRepoURL(repos map[string]fluxtypes.HelmRepository, name, namespace string, secrets map[string]fluxtypes.Secret) (string, string, string, error) {
+	repo, ok := repos[namespace+"/"+name]
+	if !ok {
+		return "", "", "", fmt.Errorf("HelmRepository %s/%s not found", namespace, name)
+	}
+	url := repo.Spec.URL
+	if repo.Spec.Type == "oci" && !strings.HasPrefix(url, "oci://") {
+		url = strings.TrimPrefix(url, "https://")
+		url = strings.TrimPrefix(url, "http://")
+		url = "oci://" + url
+	}
 
-			username := ""
-			password := ""
-			if repo.Spec.SecretRef != nil {
-				secretNS := namespace
-				for _, secret := range secrets {
-					if secret.Metadata.Name == repo.Spec.SecretRef.Name && secret.Metadata.Namespace == secretNS {
-						username = secret.GetSecretValue("username")
-						password = secret.GetSecretValue("password")
-						break
-					}
-				}
-			}
-
-			return url, username, password, nil
+	username := ""
+	password := ""
+	if repo.Spec.SecretRef != nil {
+		if secret, ok := secrets[namespace+"/"+repo.Spec.SecretRef.Name]; ok {
+			username = secret.GetSecretValue("username")
+			password = secret.GetSecretValue("password")
 		}
 	}
-	return "", "", "", fmt.Errorf("HelmRepository %s/%s not found", namespace, name)
+
+	return url, username, password, nil
 }
 
 // ConvertJSONInYAMLToYAML converts JSON-in-YAML format (e.g., metadata: {...})

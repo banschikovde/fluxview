@@ -155,20 +155,21 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	}
 
 	if output != nil {
-		if flags.Namespace != "" {
-			output = filterByNamespace(output, flags.Namespace)
-			if len(output) == 0 {
-				fmt.Fprintf(os.Stderr, "No resources found in namespace %q\n", flags.Namespace)
-				return nil
-			}
+		// Single pass over the output documents: namespace filter, CRD
+		// filter, attr stripping, reordering, conversion, redaction.
+		entries := processResources(output, outputOptions{
+			namespace:  flags.Namespace,
+			skipCRDs:   flags.SkipCRDs,
+			stripAttrs: parseAttrs(flags.StripAttrs),
+		})
+		if flags.Namespace != "" && len(entries) == 0 {
+			// Deliberate: fires on an empty final result, not only an empty
+			// namespace match (e.g. the namespace holds only CRDs and
+			// --skip-crds dropped them).
+			fmt.Fprintf(os.Stderr, "No resources found in namespace %q\n", flags.Namespace)
+			return nil
 		}
-		if flags.SkipCRDs {
-			output = filterCRDDocs(output)
-		}
-		if flags.StripAttrs != "" {
-			output = stripAllAttrs(output, flags.StripAttrs)
-		}
-		printResourcesBoxed(output)
+		printResourceEntries(entries)
 	}
 
 	return nil
@@ -206,14 +207,13 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	}
 
 	// CRD filtering is caller-side (--skip-crds): HR inflation itself never
-	// drops CustomResourceDefinition documents from its output.
-	if flags.SkipCRDs {
-		output = filterCRDDocs(output)
-	}
-	if flags.StripAttrs != "" {
-		output = stripAllAttrs(output, flags.StripAttrs)
-	}
-	printResourcesBoxed(output)
+	// drops CustomResourceDefinition documents from its output. The output is
+	// processed (skip-crds / strip-attrs / reorder / convert / redact) in a
+	// single pass over the documents.
+	printResourceEntries(processResources(output, outputOptions{
+		skipCRDs:   flags.SkipCRDs,
+		stripAttrs: parseAttrs(flags.StripAttrs),
+	}))
 
 	return nil
 }

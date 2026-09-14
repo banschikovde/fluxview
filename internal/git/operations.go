@@ -97,7 +97,11 @@ func (g *Operations) CloneToDir(ctx context.Context, revision string) (string, e
 		return "", fmt.Errorf("creating temp dir: %w", err)
 	}
 
-	// Write all files from the tree into the temp directory.
+	// Write all files from the tree into the temp directory. Directory
+	// creation is memoized per directory; a first file in a directory pays
+	// one MkdirAll (idempotent for already-created parents), siblings hit
+	// the map — previously every file paid the syscall.
+	createdDirs := make(map[string]bool)
 	err = tree.Files().ForEach(func(f *object.File) error {
 		// Honor context cancellation mid-checkout (large repos can write many
 		// thousands of files).
@@ -105,8 +109,12 @@ func (g *Operations) CloneToDir(ctx context.Context, revision string) (string, e
 			return err
 		}
 		filePath := filepath.Join(tmpDir, f.Name)
-		if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
-			return fmt.Errorf("creating directory %s: %w", filepath.Dir(filePath), err)
+		dir := filepath.Dir(filePath)
+		if !createdDirs[dir] {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return fmt.Errorf("creating directory %s: %w", dir, err)
+			}
+			createdDirs[dir] = true
 		}
 
 		// Handle symlinks: git stores the target path as file content.
