@@ -71,7 +71,7 @@ resources:
 	}
 
 	// Run discovery
-	dirs, err := DiscoverKustomizeDirs(context.Background(), fluxDir)
+	dirs, _, err := DiscoverKustomizeDirsAndFiles(context.Background(), fluxDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -121,7 +121,7 @@ resources:
 		t.Fatal(err)
 	}
 
-	dirs, err := DiscoverKustomizeDirs(context.Background(), tmpDir)
+	dirs, _, err := DiscoverKustomizeDirsAndFiles(context.Background(), tmpDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -152,7 +152,7 @@ metadata:
 		t.Fatal(err)
 	}
 
-	dirs, err := DiscoverKustomizeDirs(context.Background(), tmpDir)
+	dirs, _, err := DiscoverKustomizeDirsAndFiles(context.Background(), tmpDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestDiscoverKustomizeDirs_NoKustomizeDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dirs, err := DiscoverKustomizeDirs(context.Background(), tmpDir)
+	dirs, _, err := DiscoverKustomizeDirsAndFiles(context.Background(), tmpDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -228,8 +228,10 @@ func TestParseConfigMapsFromBytes_Empty(t *testing.T) {
 
 // TestParseAllFromBytes_ParityWithPerTypeParsers verifies that one
 // ParseAllFromBytes pass returns exactly the same resources (values and
-// order) as the per-type ParseXxxFromBytes functions it replaces in
-// buildHRInflation.
+// order) as the per-type ParseXxxFromBytes functions still alive for
+// ConfigMaps/Secrets; the Flux source types (HelmRelease, HelmRepository,
+// OCIRepository) have no per-type wrappers anymore, so their extraction is
+// asserted directly.
 func TestParseAllFromBytes_ParityWithPerTypeParsers(t *testing.T) {
 	input := `apiVersion: v1
 kind: ConfigMap
@@ -285,21 +287,9 @@ spec:
 	data := []byte(input)
 	all := ParseAllFromBytes(data)
 
-	hrs := ParseHelmReleasesFromBytes(data)
-	repos := ParseHelmRepositoriesFromBytes(data)
-	ocis := ParseOCIRepositoriesFromBytes(data)
 	cms := ParseConfigMapsFromBytes(data)
 	secrets := ParseSecretsFromBytes(data)
 
-	if !reflect.DeepEqual(all.HelmReleases, hrs) {
-		t.Errorf("HelmReleases mismatch: %+v vs %+v", all.HelmReleases, hrs)
-	}
-	if !reflect.DeepEqual(all.HelmRepositories, repos) {
-		t.Errorf("HelmRepositories mismatch: %+v vs %+v", all.HelmRepositories, repos)
-	}
-	if !reflect.DeepEqual(all.OCIRepositories, ocis) {
-		t.Errorf("OCIRepositories mismatch: %+v vs %+v", all.OCIRepositories, ocis)
-	}
 	if !reflect.DeepEqual(all.ConfigMaps, cms) {
 		t.Errorf("ConfigMaps mismatch: %+v vs %+v", all.ConfigMaps, cms)
 	}
@@ -310,6 +300,12 @@ spec:
 	// Spot-check the extracted values themselves.
 	if len(all.HelmReleases) != 1 || all.HelmReleases[0].Metadata.Namespace != "default" {
 		t.Errorf("HelmReleases = %+v, want one podinfo HR in default namespace", all.HelmReleases)
+	}
+	if len(all.HelmRepositories) != 1 || all.HelmRepositories[0].Spec.URL != "https://stefanprodan.github.io/podinfo" {
+		t.Errorf("HelmRepositories = %+v, want one podinfo repo URL", all.HelmRepositories)
+	}
+	if len(all.OCIRepositories) != 1 || all.OCIRepositories[0].Spec.URL != "oci://registry.example.com/charts/podinfo" {
+		t.Errorf("OCIRepositories = %+v, want one podinfo OCI repo URL", all.OCIRepositories)
 	}
 	if len(all.ConfigMaps) != 1 || all.ConfigMaps[0].Data["CLUSTER_NAME"] != "prod" {
 		t.Errorf("ConfigMaps = %+v, want one with CLUSTER_NAME=prod", all.ConfigMaps)

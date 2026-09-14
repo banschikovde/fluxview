@@ -21,8 +21,8 @@ type nativeKustomization struct {
 }
 
 // DiscoverKustomizeDirsAndFiles walks rootPath once and returns both:
-//   - buildDirs: native kustomize overlays to build, with the same selection
-//     and dedup as DiscoverKustomizeDirs.
+//   - buildDirs: native kustomize overlays to build (selection and dedup
+//     rules below).
 //   - fileDirs: every directory containing a kustomization file of any kind
 //     (native overlay, Flux Kustomization, or Component).
 //
@@ -144,16 +144,6 @@ func DiscoverKustomizeDirsAndFiles(ctx context.Context, rootPath string) (buildD
 	return buildDirs, fileDirs, nil
 }
 
-// DiscoverKustomizeDirs scans subdirectories under rootPath for native kustomize
-// overlays (kustomization.yaml/yml/Kustomization with apiVersion kustomize.config.k8s.io)
-// and returns the buildable directories (with dedup). See DiscoverKustomizeDirsAndFiles
-// for the selection rules. Callers that also need every kustomization-file directory
-// should call DiscoverKustomizeDirsAndFiles once instead of this function.
-func DiscoverKustomizeDirs(ctx context.Context, rootPath string) ([]string, error) {
-	buildDirs, _, err := DiscoverKustomizeDirsAndFiles(ctx, rootPath)
-	return buildDirs, err
-}
-
 // readKustomizationFile reads the first found kustomization file in dir.
 func readKustomizationFile(dir string) []byte {
 	for _, name := range []string{"kustomization.yaml", "kustomization.yml", "Kustomization"} {
@@ -202,12 +192,7 @@ func isNativeKustomize(kust nativeKustomization) bool {
 		strings.HasPrefix(kust.APIVersion, "kustomize.config.k8s.io")
 }
 
-// ParseHelmReleasesFromBytes parses HelmRelease resources from YAML output bytes.
-// Used to extract HelmReleases from kustomize build output so that namespace/
-// name transformers applied by kustomize (e.g. a top-level `namespace:` field
-// in kustomization.yaml) are reflected, unlike parsing the raw HelmRelease
-// file directly from disk.
-// parseResourcesFromBytes is the generic implementation behind all
+// parseResourcesFromBytes is the generic implementation behind the
 // ParseXxxFromBytes functions: decode each document into a yaml.Node once,
 // match by kind/apiVersion, then decode the same node into the target type.
 // Documents that fail to decode are silently skipped (they may not be the
@@ -308,24 +293,6 @@ func (r *ParsedResources) dispatch(kind, apiVersion string, node *yaml.Node) {
 			r.Secrets = append(r.Secrets, secret)
 		}
 	}
-}
-
-func ParseHelmReleasesFromBytes(data []byte) []HelmRelease {
-	return parseResourcesFromBytes[HelmRelease](data, func(kind, api string) bool {
-		return kind == KindHelmRelease && isHelmAPI(api)
-	})
-}
-
-func ParseHelmRepositoriesFromBytes(data []byte) []HelmRepository {
-	return parseResourcesFromBytes[HelmRepository](data, func(kind, api string) bool {
-		return kind == KindHelmRepository && isSourceAPI(api)
-	})
-}
-
-func ParseOCIRepositoriesFromBytes(data []byte) []OCIRepository {
-	return parseResourcesFromBytes[OCIRepository](data, func(kind, api string) bool {
-		return kind == KindOCIRepository && isSourceAPI(api)
-	})
 }
 
 func ParseConfigMapsFromBytes(data []byte) []ConfigMap {

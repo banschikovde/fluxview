@@ -457,7 +457,7 @@ spec:
 		t.Fatalf("buildKSContent: %v", err)
 	}
 
-	helmReleases := flux.ParseHelmReleasesFromBytes(output)
+	helmReleases := flux.ParseAllFromBytes(output).HelmReleases
 	if len(helmReleases) != 1 {
 		t.Fatalf("expected 1 HelmRelease from shared base, got %d: %+v", len(helmReleases), helmReleases)
 	}
@@ -776,7 +776,7 @@ spec:
 	}
 
 	// The HR should be present in the build output.
-	helmReleases := flux.ParseHelmReleasesFromBytes(output)
+	helmReleases := flux.ParseAllFromBytes(output).HelmReleases
 	if len(helmReleases) == 0 {
 		t.Fatal("expected at least 1 HelmRelease from shared base, got 0")
 	}
@@ -1976,9 +1976,9 @@ metadata:
   name: standalone-cm
 `)
 
-	dirs, err := flux.DiscoverKustomizeDirs(context.Background(), root)
+	dirs, _, err := flux.DiscoverKustomizeDirsAndFiles(context.Background(), root)
 	if err != nil {
-		t.Fatalf("DiscoverKustomizeDirs: %v", err)
+		t.Fatalf("DiscoverKustomizeDirsAndFiles: %v", err)
 	}
 
 	// Should discover overlay and standalone, but NOT overlay/base.
@@ -2031,9 +2031,9 @@ metadata:
   name: overlay-cm
 `)
 
-	dirs, err := flux.DiscoverKustomizeDirs(context.Background(), root)
+	dirs, _, err := flux.DiscoverKustomizeDirsAndFiles(context.Background(), root)
 	if err != nil {
-		t.Fatalf("DiscoverKustomizeDirs: %v", err)
+		t.Fatalf("DiscoverKustomizeDirsAndFiles: %v", err)
 	}
 
 	found := make(map[string]bool)
@@ -2076,9 +2076,9 @@ metadata:
   name: noext-cm
 `)
 
-	dirs, err := flux.DiscoverKustomizeDirs(context.Background(), root)
+	dirs, _, err := flux.DiscoverKustomizeDirsAndFiles(context.Background(), root)
 	if err != nil {
-		t.Fatalf("DiscoverKustomizeDirs: %v", err)
+		t.Fatalf("DiscoverKustomizeDirsAndFiles: %v", err)
 	}
 
 	found := make(map[string]bool)
