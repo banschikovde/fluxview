@@ -282,6 +282,60 @@ func TestParseKustomizationsFromBytes_Empty(t *testing.T) {
 	}
 }
 
+func TestHasKustomizationsFromBytes(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want bool
+	}{
+		{
+			name: "flux kustomization",
+			yaml: "apiVersion: kustomize.toolkit.fluxcd.io/v1\nkind: Kustomization\nmetadata:\n  name: apps\n",
+			want: true,
+		},
+		{
+			name: "native overlay only",
+			yaml: "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nmetadata:\n  name: overlay\n",
+			want: false,
+		},
+		{
+			name: "unrelated kind",
+			yaml: "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n",
+			want: false,
+		},
+		{
+			name: "kind matches but body does not decode",
+			yaml: "apiVersion: kustomize.toolkit.fluxcd.io/v1\nkind: Kustomization\nmetadata: not-a-mapping\n",
+			want: false,
+		},
+		{
+			name: "flux ks after other documents",
+			yaml: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n---\napiVersion: kustomize.toolkit.fluxcd.io/v1\nkind: Kustomization\nmetadata:\n  name: apps\n",
+			want: true,
+		},
+		{
+			name: "comment-only document",
+			yaml: "# nothing here\n",
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		if got := HasKustomizationsFromBytes([]byte(tc.yaml)); got != tc.want {
+			t.Errorf("%s: HasKustomizationsFromBytes = %v, want %v", tc.name, got, tc.want)
+		}
+		if viaParse := len(ParseKustomizationsFromBytes([]byte(tc.yaml))) > 0; viaParse != tc.want {
+			t.Errorf("%s: len(ParseKustomizationsFromBytes) > 0 = %v, want %v (predicate/parser parity broken)", tc.name, viaParse, tc.want)
+		}
+	}
+}
+
+func TestHasKustomizationsFromBytes_Empty(t *testing.T) {
+	if HasKustomizationsFromBytes([]byte("")) {
+		t.Error("expected false for empty input")
+	}
+}
+
 // TestParseAllFromBytes_ParityWithPerTypeParsers verifies that one
 // ParseAllFromBytes pass returns exactly the same resources (values and
 // order) as the per-type ParseXxxFromBytes functions still alive for

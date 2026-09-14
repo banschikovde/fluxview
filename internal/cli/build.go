@@ -443,7 +443,7 @@ func hasDirectKustomizations(path string) (bool, error) {
 			continue
 		}
 
-		if len(flux.ParseKustomizationsFromBytes(data)) > 0 {
+		if flux.HasKustomizationsFromBytes(data) {
 			return true, nil
 		}
 	}

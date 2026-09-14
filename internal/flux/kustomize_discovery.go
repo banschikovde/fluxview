@@ -199,15 +199,31 @@ func isNativeKustomize(kust nativeKustomization) bool {
 // target type); the function always succeeds.
 func parseResourcesFromBytes[T any](data []byte, match func(kind, apiVersion string) bool) []T {
 	var results []T
+	eachMatchingResource(data, match, func(item T) bool {
+		results = append(results, item)
+		return false
+	})
+	return results
+}
 
+// eachMatchingResource is the shared core of the parseResourcesFromBytes
+// family: it decodes each document into a yaml.Node once, matches by
+// kind/apiVersion, and decodes the same node into the target type. fn runs
+// for every successfully decoded resource, and the walk stops early once fn
+// returns true, reporting whether that happened. Documents that fail to
+// decode are silently skipped; the function always succeeds.
+func eachMatchingResource[T any](data []byte, match func(kind, apiVersion string) bool, fn func(T) bool) bool {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	for {
 		var node yaml.Node
 		if err := decoder.Decode(&node); err != nil {
 			if err != io.EOF {
+				// The message names the parseResourcesFromBytes family
+				// this core implements; keep it stable — it is part of the
+				// CLI's (undocumented but reviewed) stderr output.
 				fmt.Fprintf(os.Stderr, "Warning: YAML parse error in parseResourcesFromBytes: %v\n", err)
 			}
-			return results
+			return false
 		}
 
 		mapping := mappingFor(&node)
@@ -222,7 +238,9 @@ func parseResourcesFromBytes[T any](data []byte, match func(kind, apiVersion str
 		if err := node.Decode(&item); err != nil {
 			continue
 		}
-		results = append(results, item)
+		if fn(item) {
+			return true
+		}
 	}
 }
 
@@ -311,4 +329,14 @@ func ParseKustomizationsFromBytes(data []byte) []Kustomization {
 	return parseResourcesFromBytes[Kustomization](data, func(kind, api string) bool {
 		return kind == KindKustomization && isKustomizeAPI(api)
 	})
+}
+
+// HasKustomizationsFromBytes reports whether data holds at least one Flux
+// Kustomization document that fully decodes. It is the presence-check
+// counterpart of ParseKustomizationsFromBytes: it stops at the first match
+// and does not materialize the result slice.
+func HasKustomizationsFromBytes(data []byte) bool {
+	return eachMatchingResource(data, func(kind, api string) bool {
+		return kind == KindKustomization && isKustomizeAPI(api)
+	}, func(Kustomization) bool { return true })
 }
