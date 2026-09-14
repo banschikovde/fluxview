@@ -13,9 +13,6 @@ bin/
 # Agent
 .agent/
 
-# Docs
-docs/
-
 # Go
 vendor/
 
