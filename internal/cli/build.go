@@ -316,95 +316,6 @@ func collectKustomizationPaths(repoRoot string, kustomizations []flux.Kustomizat
 	return paths
 }
 
-// buildKustomizeOverlays builds native kustomize overlays under clusterPath
-// (see DiscoverKustomizeDirsAndFiles for the selection rules). The builder is
-// passed in so all builds in one command share one configured Builder
-// (including the remote resource cache).
-func buildKustomizeOverlays(ctx context.Context, scans *scanCache, builder *kustomize.Builder, clusterPath string, excludePaths map[string]bool, cache buildCache) [][]byte {
-	// Single tree walk returns both the native overlays to build and every
-	// kustomization-file directory (any kind) to keep the loose-file walker
-	// out of.
-	kustomizeDirs, allKustFileDirs, err := scans.kustDirsAndFiles(ctx, clusterPath)
-	var outputs [][]byte
-
-	// Track ALL directories that have a kustomization.yaml (attempted build),
-	// not just successful ones. This prevents loose-file walker from reading
-	// raw files out of a directory whose kustomization.yaml exists but build
-	// failed — those files would leak as untransformed, plus the
-	// kustomization.yaml itself would appear as a garbage document.
-	kustDirs := make(map[string]bool)
-	if err == nil {
-		for _, dir := range kustomizeDirs {
-			kustDirs[dir] = true
-			if isExcludedDir(dir, excludePaths) {
-				continue
-			}
-			if output, ok := buildDirCached(ctx, builder, dir, cache); ok {
-				outputs = append(outputs, output)
-			}
-		}
-		// Also skip ANY directory containing a kustomization file (any kind),
-		// including orphan kind: Component dirs not selected for building.
-		for _, dir := range allKustFileDirs {
-			kustDirs[dir] = true
-		}
-	}
-
-	// Open the repository root as a root-scoped FS so loose-file reads reject
-	// any symlink that resolves outside the repository (CWE-367). Scoped to
-	// repoRoot — not clusterPath — to keep legitimate intra-repo symlinks
-	// working, matching the restrictedFs boundary used by kustomize builds.
-	repoRoot := builder.RootDir()
-	root, rootErr := os.OpenRoot(repoRoot)
-	if rootErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not open repo root %s for scoped reads: %v\n", repoRoot, rootErr)
-		return outputs
-	}
-	defer root.Close()
-
-	// Read loose YAML files from directories WITHOUT kustomization.yaml
-	// that are not excluded and not inside any kustomize directory.
-	// Only include files that look like k8s resources (have apiVersion + kind).
-	err = filepath.Walk(clusterPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(path))
-		if ext != ".yaml" && ext != ".yml" {
-			return nil
-		}
-		dir := filepath.Dir(path)
-
-		// Skip files inside any directory that has a kustomization.yaml
-		// (regardless of build success/failure).
-		for kd := range kustDirs {
-			if dir == kd || strings.HasPrefix(dir, kd+string(filepath.Separator)) {
-				return nil
-			}
-		}
-		// Skip files inside excluded directories (spec.path of Flux Kustomizations).
-		if isExcludedDir(dir, excludePaths) {
-			return nil
-		}
-		data, err := scopedRootReadFile(root, repoRoot, path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not read %s: %v\n", path, err)
-			return nil
-		}
-		// Only include documents that look like k8s resources.
-		filtered := filterK8sResources(data)
-		if filtered != nil {
-			outputs = append(outputs, filtered)
-		}
-		return nil
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: walking %s: %v\n", clusterPath, err)
-	}
-
-	return outputs
-}
-
 // filterK8sResources returns only documents that look like k8s resources
 // (have non-empty apiVersion and kind). Non-resource documents in a
 // multi-doc YAML file are silently dropped.
@@ -456,33 +367,45 @@ func isExcludedDir(dir string, excludePaths map[string]bool) bool {
 	return false
 }
 
-// --- ConfigMaps ---
+// --- ConfigMaps / Secrets ---
 
-func resolveConfigMaps(ctx context.Context, scans *scanCache, clusterPath string, builder *kustomize.Builder, cache buildCache) []flux.ConfigMap {
-	parser := scans.parserFor(clusterPath)
-
-	// Raw ConfigMaps scanned directly from clusterPath. Errors here are
-	// non-fatal: we fall back to an empty set and still merge built ones below.
-	rawCMs, _ := parser.ParseConfigMaps(ctx)
+// resolveSourceResources merges two substitution-source sets of one resource
+// kind: resources scanned directly (raw) from clusterPath and resources
+// produced by kustomize builds under it (which may apply namespace
+// transformation). Shared by resolveConfigMaps and resolveSecrets. Errors are
+// non-fatal: a failed raw scan falls back to an empty set, and failed builds
+// were already warned once by buildDirCached.
+func resolveSourceResources[T any](ctx context.Context, scans *scanCache, clusterPath string, builder *kustomize.Builder, cache buildCache, parseRaw func(context.Context) ([]T, error), parseBuilt func([]byte) []T, nameOf func(T) string) []T {
+	// Raw resources scanned directly from clusterPath.
+	raw, _ := parseRaw(ctx)
 
 	kustomizeDirs, _, err := scans.kustDirsAndFiles(ctx, clusterPath)
 	if err != nil {
-		return rawCMs
+		return raw
 	}
 
-	var builtCMs []flux.ConfigMap
+	var built []T
 	for _, dir := range kustomizeDirs {
 		output, ok := buildDirCached(ctx, builder, dir, cache)
 		if !ok {
 			continue
 		}
-		builtCMs = append(builtCMs, flux.ParseConfigMapsFromBytes(output)...)
+		built = append(built, parseBuilt(output)...)
 	}
 
-	return mergeSources(builtCMs, rawCMs, func(c flux.ConfigMap) string { return c.Metadata.Name })
+	return mergeSources(built, raw, nameOf)
 }
 
-// --- Secrets ---
+// resolveConfigMaps resolves ConfigMaps used for postBuild.substituteFrom /
+// valuesFrom with kind: ConfigMap: raw ConfigMaps scanned directly from
+// clusterPath are merged with ConfigMaps produced by kustomize builds.
+func resolveConfigMaps(ctx context.Context, scans *scanCache, clusterPath string, builder *kustomize.Builder, cache buildCache) []flux.ConfigMap {
+	return resolveSourceResources(ctx, scans, clusterPath, builder, cache,
+		scans.parserFor(clusterPath).ParseConfigMaps,
+		flux.ParseConfigMapsFromBytes,
+		func(c flux.ConfigMap) string { return c.Metadata.Name },
+	)
+}
 
 // resolveSecrets resolves Secrets used for postBuild.substituteFrom with
 // kind: Secret. Mirrors resolveConfigMaps: raw Secrets scanned directly from
@@ -490,26 +413,11 @@ func resolveConfigMaps(ctx context.Context, scans *scanCache, clusterPath string
 // apply namespace transformation). Only key names matter for substitution —
 // resolveSecrets never returns real secret values to the substitution path.
 func resolveSecrets(ctx context.Context, scans *scanCache, clusterPath string, builder *kustomize.Builder, cache buildCache) []flux.Secret {
-	parser := scans.parserFor(clusterPath)
-
-	// Raw Secrets scanned directly from clusterPath. Errors here are non-fatal.
-	rawSecrets, _ := parser.ParseSecrets(ctx)
-
-	kustomizeDirs, _, err := scans.kustDirsAndFiles(ctx, clusterPath)
-	if err != nil {
-		return rawSecrets
-	}
-
-	var builtSecrets []flux.Secret
-	for _, dir := range kustomizeDirs {
-		output, ok := buildDirCached(ctx, builder, dir, cache)
-		if !ok {
-			continue
-		}
-		builtSecrets = append(builtSecrets, flux.ParseSecretsFromBytes(output)...)
-	}
-
-	return mergeSources(builtSecrets, rawSecrets, func(s flux.Secret) string { return s.Metadata.Name })
+	return resolveSourceResources(ctx, scans, clusterPath, builder, cache,
+		scans.parserFor(clusterPath).ParseSecrets,
+		flux.ParseSecretsFromBytes,
+		func(s flux.Secret) string { return s.Metadata.Name },
+	)
 }
 
 // --- Utilities ---

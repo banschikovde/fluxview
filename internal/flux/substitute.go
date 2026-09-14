@@ -53,7 +53,7 @@ func ResolveSubstituteVars(ks Kustomization, configMaps []ConfigMap, secrets []S
 
 		switch strings.ToLower(entry.Kind) {
 		case "configmap":
-			cm, ok := findConfigMapCandidate(configMaps, entry.Name, ns, allowFallback)
+			cm, ok := findCandidate(configMaps, entry.Name, ns, allowFallback, func(c ConfigMap) ObjectMeta { return c.Metadata })
 			if !ok {
 				if !entry.Optional {
 					fmt.Fprintf(os.Stderr, "Warning: substituteFrom ConfigMap %s/%s not found (referenced by Kustomization %s/%s)\n",
@@ -70,7 +70,7 @@ func ResolveSubstituteVars(ks Kustomization, configMaps []ConfigMap, secrets []S
 			// for each key so unresolved ${VAR} references sourced from this
 			// Secret resolve to a non-empty YAML-safe string instead of being
 			// silently dropped to null.
-			secret, ok := findSecretCandidate(secrets, entry.Name, ns, allowFallback)
+			secret, ok := findCandidate(secrets, entry.Name, ns, allowFallback, func(s Secret) ObjectMeta { return s.Metadata })
 			if !ok {
 				if !entry.Optional {
 					fmt.Fprintf(os.Stderr, "Warning: substituteFrom Secret %s/%s not found (referenced by Kustomization %s/%s)\n",
@@ -325,7 +325,7 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 
 		switch strings.ToLower(entry.Kind) {
 		case "configmap":
-			cm, ok := findConfigMapCandidate(configMaps, entry.Name, entryNS, allowFallback)
+			cm, ok := findCandidate(configMaps, entry.Name, entryNS, allowFallback, func(c ConfigMap) ObjectMeta { return c.Metadata })
 			if !ok {
 				if !entry.Optional {
 					fmt.Fprintf(os.Stderr, "Warning: valuesFrom ConfigMap %s/%s not found (referenced by HelmRelease %s/%s)\n",
@@ -336,7 +336,7 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 			mergeConfigMapValues(result, cm.Data, vk)
 
 		case "secret":
-			secret, ok := findSecretCandidate(secrets, entry.Name, entryNS, allowFallback)
+			secret, ok := findCandidate(secrets, entry.Name, entryNS, allowFallback, func(s Secret) ObjectMeta { return s.Metadata })
 			if !ok {
 				if !entry.Optional {
 					fmt.Fprintf(os.Stderr, "Warning: valuesFrom Secret %s/%s not found (referenced by HelmRelease %s/%s)\n",
@@ -351,55 +351,29 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 	return result
 }
 
-// findConfigMapCandidate finds a ConfigMap by name with exact namespace match.
-// If allowFallback is true, also matches resources with empty namespace
-// (covers loose-file resources without metadata.namespace).
-func findConfigMapCandidate(items []ConfigMap, name, ns string, allowFallback bool) (ConfigMap, bool) {
-	var fallback ConfigMap
+// findCandidate finds a resource by name with exact namespace match. If
+// allowFallback is true, also matches resources with empty namespace (covers
+// loose-file resources without metadata.namespace). Shared by the ConfigMap
+// and Secret lookups of ResolveSubstituteVars and ResolveValuesFrom.
+func findCandidate[T any](items []T, name, ns string, allowFallback bool, metaOf func(T) ObjectMeta) (T, bool) {
+	var fallback T
 	hasFallback := false
 
-	for _, cm := range items {
-		if cm.Metadata.Name != name {
+	for _, item := range items {
+		meta := metaOf(item)
+		if meta.Name != name {
 			continue
 		}
-		if cm.Metadata.Namespace == ns {
-			return cm, true
+		if meta.Namespace == ns {
+			return item, true
 		}
-		if allowFallback && cm.Metadata.Namespace == "" && !hasFallback {
-			fallback = cm
+		if allowFallback && meta.Namespace == "" && !hasFallback {
+			fallback = item
 			hasFallback = true
 		}
 	}
 
-	if hasFallback {
-		return fallback, true
-	}
-	return ConfigMap{}, false
-}
-
-// findSecretCandidate finds a Secret by name with exact namespace match.
-// If allowFallback is true, also matches resources with empty namespace.
-func findSecretCandidate(items []Secret, name, ns string, allowFallback bool) (Secret, bool) {
-	var fallback Secret
-	hasFallback := false
-
-	for _, s := range items {
-		if s.Metadata.Name != name {
-			continue
-		}
-		if s.Metadata.Namespace == ns {
-			return s, true
-		}
-		if allowFallback && s.Metadata.Namespace == "" && !hasFallback {
-			fallback = s
-			hasFallback = true
-		}
-	}
-
-	if hasFallback {
-		return fallback, true
-	}
-	return Secret{}, false
+	return fallback, hasFallback
 }
 
 // mergeConfigMapValues selects the value at valuesKey from ConfigMap data,

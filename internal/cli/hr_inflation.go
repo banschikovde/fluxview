@@ -482,6 +482,28 @@ func resolveHelmRepoURL(hr flux.HelmRelease, helmRepos []flux.HelmRepository, se
 	return url, username, password
 }
 
+// parseWithRootFallback parses one resource type needed for HelmRelease
+// inflation from clusterPath, falling back to repoRoot when the cluster path
+// yields none (sources may live outside it, e.g. a shared sources/ or
+// flux-system/ directory). The parse closure receives the snapshot-cached
+// parser for the root being walked, so each tree is parsed at most once per
+// command regardless of how many resource types are resolved.
+func parseWithRootFallback[T any](scans *scanCache, clusterPath, repoRoot, label string, parse func(*flux.Parser) ([]T, error), stderr func(format string, args ...any)) []T {
+	items, err := parse(scans.parserFor(clusterPath))
+	if err != nil {
+		stderr("Warning: could not parse %s: %v\n", label, err)
+		items = nil
+	}
+	if len(items) == 0 && repoRoot != "" && repoRoot != clusterPath {
+		if rootItems, rErr := parse(scans.parserFor(repoRoot)); rErr != nil {
+			stderr("Warning: could not parse %s from %s: %v\n", label, repoRoot, rErr)
+		} else {
+			items = rootItems
+		}
+	}
+	return items
+}
+
 // resolveHelmInflationSources parses the source resources needed for HelmRelease
 // inflation (HelmRepository, OCIRepository, ConfigMap, Secret). Each resource
 // type is first parsed from clusterPath; if none are found there, the search
@@ -494,62 +516,17 @@ func resolveHelmInflationSources(ctx context.Context, scans *scanCache, clusterP
 		}
 	}
 
-	// All four ParseXxx calls below share one cached snapshot per root: the
+	// All four parse closures share one cached snapshot per root: the
 	// clusterPath walk happens once (already done for ParseKustomizations by
 	// the caller), and the repoRoot fallback walk at most once.
-	parser := scans.parserFor(clusterPath)
-
-	helmRepos, err := parser.ParseHelmRepositories(ctx)
-	if err != nil {
-		stderr("Warning: could not parse HelmRepositories: %v\n", err)
-		helmRepos = nil
-	}
-	if len(helmRepos) == 0 && repoRoot != "" && repoRoot != clusterPath {
-		if rootRepos, rErr := scans.parserFor(repoRoot).ParseHelmRepositories(ctx); rErr != nil {
-			stderr("Warning: could not parse HelmRepositories from %s: %v\n", repoRoot, rErr)
-		} else {
-			helmRepos = rootRepos
-		}
-	}
-
-	ociRepos, err = parser.ParseOCIRepositories(ctx)
-	if err != nil {
-		stderr("Warning: could not parse OCIRepositories: %v\n", err)
-		ociRepos = nil
-	}
-	if len(ociRepos) == 0 && repoRoot != "" && repoRoot != clusterPath {
-		if rootOCI, rErr := scans.parserFor(repoRoot).ParseOCIRepositories(ctx); rErr != nil {
-			stderr("Warning: could not parse OCIRepositories from %s: %v\n", repoRoot, rErr)
-		} else {
-			ociRepos = rootOCI
-		}
-	}
-
-	configMaps, err = parser.ParseConfigMaps(ctx)
-	if err != nil {
-		stderr("Warning: could not parse ConfigMaps: %v\n", err)
-		configMaps = nil
-	}
-	if len(configMaps) == 0 && repoRoot != "" && repoRoot != clusterPath {
-		if rootCMs, rErr := scans.parserFor(repoRoot).ParseConfigMaps(ctx); rErr != nil {
-			stderr("Warning: could not parse ConfigMaps from %s: %v\n", repoRoot, rErr)
-		} else {
-			configMaps = rootCMs
-		}
-	}
-
-	secrets, err = parser.ParseSecrets(ctx)
-	if err != nil {
-		stderr("Warning: could not parse Secrets: %v\n", err)
-		secrets = nil
-	}
-	if len(secrets) == 0 && repoRoot != "" && repoRoot != clusterPath {
-		if rootSecrets, rErr := scans.parserFor(repoRoot).ParseSecrets(ctx); rErr != nil {
-			stderr("Warning: could not parse Secrets from %s: %v\n", repoRoot, rErr)
-		} else {
-			secrets = rootSecrets
-		}
-	}
+	helmRepos = parseWithRootFallback(scans, clusterPath, repoRoot, "HelmRepositories",
+		func(p *flux.Parser) ([]flux.HelmRepository, error) { return p.ParseHelmRepositories(ctx) }, stderr)
+	ociRepos = parseWithRootFallback(scans, clusterPath, repoRoot, "OCIRepositories",
+		func(p *flux.Parser) ([]flux.OCIRepository, error) { return p.ParseOCIRepositories(ctx) }, stderr)
+	configMaps = parseWithRootFallback(scans, clusterPath, repoRoot, "ConfigMaps",
+		func(p *flux.Parser) ([]flux.ConfigMap, error) { return p.ParseConfigMaps(ctx) }, stderr)
+	secrets = parseWithRootFallback(scans, clusterPath, repoRoot, "Secrets",
+		func(p *flux.Parser) ([]flux.Secret, error) { return p.ParseSecrets(ctx) }, stderr)
 
 	return helmRepos, ociRepos, configMaps, secrets
 }

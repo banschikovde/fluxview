@@ -1037,6 +1037,123 @@ metadata:
 	}
 }
 
+// TestResolveSourceResources_DiscoveryFailureReturnsRaw verifies the
+// kustDirsAndFiles error branch of resolveSourceResources: when kustomize
+// directory discovery fails, the raw-scan resources are still returned
+// instead of being dropped. The memoized discovery error is injected directly
+// so only discovery fails while the raw parser snapshot still succeeds.
+func TestResolveSourceResources_DiscoveryFailureReturnsRaw(t *testing.T) {
+	clusterPath := t.TempDir()
+	writeHelper(t, clusterPath, "raw.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: raw-cm
+data:
+  key: val
+`)
+	writeHelper(t, clusterPath, "raw-secret.yaml", `apiVersion: v1
+kind: Secret
+metadata:
+  name: raw-secret
+type: Opaque
+`)
+
+	scans := newScanCache()
+	scans.dirs[clusterPath] = kustDirsResult{err: fmt.Errorf("simulated discovery failure")}
+
+	builder := kustomize.NewBuilder(clusterPath)
+	cms := resolveConfigMaps(context.Background(), scans, clusterPath, builder, make(buildCache))
+	if len(cms) != 1 || cms[0].Metadata.Name != "raw-cm" {
+		t.Errorf("expected raw ConfigMap 'raw-cm' to survive discovery failure, got %+v", cms)
+	}
+	secrets := resolveSecrets(context.Background(), scans, clusterPath, builder, make(buildCache))
+	if len(secrets) != 1 || secrets[0].Metadata.Name != "raw-secret" {
+		t.Errorf("expected raw Secret 'raw-secret' to survive discovery failure, got %+v", secrets)
+	}
+}
+
+// TestResolveSourceResources_MergesBuiltAndRaw verifies the build-loop path of
+// resolveSourceResources: resources from successful kustomize builds are
+// merged with the raw scan, and a failed build (warned by buildDirCached)
+// contributes nothing — its raw-scan resource survives instead.
+func TestResolveSourceResources_MergesBuiltAndRaw(t *testing.T) {
+	clusterPath := t.TempDir()
+
+	// Native overlay with a successful build.
+	okDir := filepath.Join(clusterPath, "overlay")
+	writeHelper(t, okDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cm.yaml
+`)
+	writeHelper(t, okDir, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: built-cm
+`)
+
+	// Directory whose build fails (references a missing resource).
+	failDir := filepath.Join(clusterPath, "broken")
+	writeHelper(t, failDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - missing.yaml
+`)
+	writeHelper(t, failDir, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: broken-cm
+`)
+
+	// Loose raw ConfigMap outside any kustomization directory.
+	writeHelper(t, clusterPath, "raw.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: raw-cm
+`)
+
+	scans := newScanCache()
+	builder := kustomize.NewBuilder(clusterPath)
+	var cms []flux.ConfigMap
+	stderr := captureStderr(func() {
+		cms = resolveConfigMaps(context.Background(), scans, clusterPath, builder, make(buildCache))
+	})
+	if !strings.Contains(stderr, "Warning: kustomize build") {
+		t.Errorf("expected a build-failure warning for the broken overlay, got:\n%s", stderr)
+	}
+
+	// mergeSources keeps build output and drops the same-named raw parse of
+	// overlay/cm.yaml, so every name must appear exactly once.
+	got := make(map[string]int)
+	for _, cm := range cms {
+		got[cm.Metadata.Name]++
+	}
+	want := map[string]int{"built-cm": 1, "broken-cm": 1, "raw-cm": 1}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("expected merged set %v, got %v", want, got)
+	}
+}
+
+// TestParseWithRootFallback_RootParseErrorWarns covers the fallback branch
+// where parsing from repoRoot itself fails (non-existent root): a warning
+// naming the resource label and root is printed and no items are returned.
+func TestParseWithRootFallback_RootParseErrorWarns(t *testing.T) {
+	clusterPath := t.TempDir() // exists, but has no resources of any kind
+	repoRoot := filepath.Join(t.TempDir(), "does-not-exist")
+
+	stderr := captureStderr(func() {
+		items := parseWithRootFallback(newScanCache(), clusterPath, repoRoot, "ConfigMaps",
+			func(p *flux.Parser) ([]flux.ConfigMap, error) { return p.ParseConfigMaps(context.Background()) },
+			func(format string, args ...any) { fmt.Fprintf(os.Stderr, format, args...) })
+		if len(items) != 0 {
+			t.Errorf("expected no ConfigMaps, got %+v", items)
+		}
+	})
+	if !strings.Contains(stderr, "Warning: could not parse ConfigMaps from ") {
+		t.Errorf("expected a repoRoot fallback parse warning, got:\n%s", stderr)
+	}
+}
+
 // Test 6: inflateHelmReleasesShared prints a warning (not silence) when a
 // HelmRelease's source cannot be resolved.
 func TestInflateHelmReleasesShared_WarnOnMissingSource(t *testing.T) {
