@@ -142,17 +142,31 @@ For custom CRDs (VictoriaMetrics, Kyverno, etc.), place YAML files alongside.
 
 ## CI
 
-Example GitLab CI:
+A working GitLab CI skeleton (MR pipelines need the base branch fetched locally, and the runner's clone triggers git's ownership check under the image's fixed non-root user):
 
 ```yaml
 fluxview:diff:
-  image: ghcr.io/banschikovde/fluxview:latest
+  stage: diff
+  image: ghcr.io/banschikovde/fluxview:1.0.0
+  variables:
+    GIT_DEPTH: 0                    # diff needs the base revision locally
+  before_script:
+    - git config --global --add safe.directory "${CI_PROJECT_DIR}"
+    - git fetch origin ${CI_DEFAULT_BRANCH}
   script:
-    - fluxview diff ks --path clusters/prod/flux/ --branch-orig master
-        --strip-attrs helm.sh/chart,checksum/cm,status --skip-crds --color never
+    - fluxview diff ks --path clusters/prod/flux/ --branch-orig origin/${CI_DEFAULT_BRANCH}
+        --strip-attrs helm.sh/chart,checksum/cm,status --skip-crds
+  allow_failure:
+    exit_codes: 1                   # differences found don't fail the pipeline
   rules:
-    - if: $CI_MERGE_REQUEST_ID
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 ```
+
+Notes:
+
+- `--color always` renders a colored diff right in the job log (GitLab shows ANSI colors).
+- Drop `allow_failure` (or make the job `when: manual`) if differences should block the merge.
+- Pin the image to a release tag (`:1.0.0`) so the diff output stays reproducible across upgrades.
 
 To keep downloads between jobs, cache the cache directories — see [docs/caching.md](docs/caching.md#caching-between-ci-jobs).
 
