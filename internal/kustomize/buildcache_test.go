@@ -52,7 +52,7 @@ func countCacheEntries(t *testing.T, cacheDir string) int {
 func TestBuildCache_ServesSecondBuildWithoutKustomize(t *testing.T) {
 	root := writeBuildFixture(t)
 	cacheDir := filepath.Join(t.TempDir(), "builds")
-	builder := NewBuilder(root, WithRemoteCache(filepath.Join(t.TempDir(), "remote"), time.Hour),
+	builder := NewBuilder(root, WithRemoteCache(filepath.Join(t.TempDir(), "remote"), time.Hour, 30*time.Second),
 		WithBuildCache(cacheDir, time.Hour))
 
 	out1, err := builder.Build(context.Background(), filepath.Join(root, "app"))
@@ -448,7 +448,7 @@ func TestBuildCache_RemoteRefreshInvalidatesEntry(t *testing.T) {
 
 	// First run: floating TTL > 0, the resource is downloaded and the build
 	// output is cached.
-	b1 := NewBuilder(repo, WithRemoteCache(remoteDir, time.Hour), WithBuildCache(buildsDir, time.Hour))
+	b1 := NewBuilder(repo, WithRemoteCache(remoteDir, time.Hour, 30*time.Second), WithBuildCache(buildsDir, time.Hour))
 	out1, err := b1.Build(context.Background(), overlay)
 	if err != nil {
 		t.Fatalf("first build: %v", err)
@@ -463,7 +463,7 @@ func TestBuildCache_RemoteRefreshInvalidatesEntry(t *testing.T) {
 	// Second run: remote TTL 0 forces a re-fetch; the refreshed file's new
 	// content hash must invalidate the build entry even though its own TTL
 	// has not expired.
-	b2 := NewBuilder(repo, WithRemoteCache(remoteDir, 0), WithBuildCache(buildsDir, time.Hour))
+	b2 := NewBuilder(repo, WithRemoteCache(remoteDir, 0, 30*time.Second), WithBuildCache(buildsDir, time.Hour))
 	out2, err := b2.Build(context.Background(), overlay)
 	if err != nil {
 		t.Fatalf("second build: %v", err)

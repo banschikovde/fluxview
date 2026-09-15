@@ -27,19 +27,21 @@ var errAlreadyWarned = errors.New("build already warned")
 
 // DiffFlags holds flags for the diff command.
 type DiffFlags struct {
-	Path           string
-	Namespace      string
-	Color          string
-	BranchOrig     string
-	Unified        int
-	SkipCRDs       bool
-	StripAttrs     string
-	HelmCacheDir   string
-	HelmIndexTTL   time.Duration
-	RemoteCacheDir string
-	RemoteCacheTTL time.Duration
-	BuildCacheDir  string
-	BuildCacheTTL  time.Duration
+	Path                string
+	Namespace           string
+	Color               string
+	BranchOrig          string
+	Unified             int
+	SkipCRDs            bool
+	StripAttrs          string
+	HelmCacheDir        string
+	HelmIndexTTL        time.Duration
+	HelmDownloadTimeout time.Duration
+	RemoteCacheDir      string
+	RemoteCacheTTL      time.Duration
+	RemoteCacheTimeout  time.Duration
+	BuildCacheDir       string
+	BuildCacheTTL       time.Duration
 }
 
 func newDiffCmd() *cobra.Command {
@@ -74,8 +76,8 @@ Examples:
 	cmd.Flags().IntVar(&flags.Unified, "unified", 3, "Number of context lines in diff output")
 	cmd.Flags().BoolVar(&flags.SkipCRDs, "skip-crds", false, "Skip CustomResourceDefinition resources in diff")
 	cmd.Flags().StringVar(&flags.StripAttrs, "strip-attrs", "", "Comma-separated keys to strip from diff (e.g. helm.sh/chart,status)")
-	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL)
-	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.BuildCacheDir, &flags.BuildCacheTTL)
+	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL, &flags.HelmDownloadTimeout)
+	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.RemoteCacheTimeout, &flags.BuildCacheDir, &flags.BuildCacheTTL)
 	return cmd
 }
 
@@ -152,6 +154,7 @@ func runDiffKS(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	ksCache := kustomizeCacheOptions{
 		remoteDir:     flags.RemoteCacheDir,
 		remoteTtl:     flags.RemoteCacheTTL,
+		remoteTimeout: flags.RemoteCacheTimeout,
 		buildCacheDir: flags.BuildCacheDir,
 		buildCacheTTL: flags.BuildCacheTTL,
 	}
@@ -183,10 +186,11 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	// "added" (green) / "removed" (red) diff.
 	scans := newScanCache()
 	currentOutput, err := buildHRInflation(ctx, scans, clusterPath, repoRoot, name, flags.Namespace, false, true,
-		helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL},
+		helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout},
 		kustomizeCacheOptions{
 			remoteDir:     flags.RemoteCacheDir,
 			remoteTtl:     flags.RemoteCacheTTL,
+			remoteTimeout: flags.RemoteCacheTimeout,
 			buildCacheDir: flags.BuildCacheDir,
 			buildCacheTTL: flags.BuildCacheTTL,
 		})
@@ -211,10 +215,11 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 		fmt.Fprintf(os.Stderr, "Warning: path %s does not exist at revision %s\n", relPath, compareCommit)
 	} else {
 		compareOutput, err := buildHRInflation(ctx, scans, worktreeClusterPath, worktreePath, name, flags.Namespace, true, true,
-			helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL},
+			helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout},
 			kustomizeCacheOptions{
 				remoteDir:     flags.RemoteCacheDir,
 				remoteTtl:     flags.RemoteCacheTTL,
+				remoteTimeout: flags.RemoteCacheTimeout,
 				buildCacheDir: flags.BuildCacheDir,
 				buildCacheTTL: flags.BuildCacheTTL,
 			})

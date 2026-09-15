@@ -18,17 +18,20 @@ import (
 )
 
 // helmCacheOptions carries Helm cache settings from CLI flags/env into the
-// Inflater: where the on-disk Helm cache lives and how long repository
-// indexes stay fresh. Independent of the kustomize cache.
+// Inflater: where the on-disk Helm cache lives, how long repository
+// indexes stay fresh, and how long one HTTP download may take (0 = no
+// limit). Independent of the kustomize cache.
 type helmCacheOptions struct {
-	dir      string
-	indexTTL time.Duration
+	dir             string
+	indexTTL        time.Duration
+	downloadTimeout time.Duration
 }
 
 func (o helmCacheOptions) inflaterOptions() []helm.InflaterOption {
 	return []helm.InflaterOption{
 		helm.WithCacheDir(o.dir),
 		helm.WithIndexTTL(o.indexTTL),
+		helm.WithDownloadTimeout(o.downloadTimeout),
 	}
 }
 
@@ -41,26 +44,30 @@ func (o helmCacheOptions) inflaterOptions() []helm.InflaterOption {
 type kustomizeCacheOptions struct {
 	remoteDir     string
 	remoteTtl     time.Duration
+	remoteTimeout time.Duration
 	buildCacheDir string
 	buildCacheTTL time.Duration
 }
 
 func (o kustomizeCacheOptions) builderOptions() []kustomize.BuilderOption {
 	return []kustomize.BuilderOption{
-		kustomize.WithRemoteCache(o.remoteDir, o.remoteTtl),
+		kustomize.WithRemoteCache(o.remoteDir, o.remoteTtl, o.remoteTimeout),
 		kustomize.WithBuildCache(o.buildCacheDir, o.buildCacheTTL),
 	}
 }
 
 // registerHelmCacheFlags registers the Helm cache flags shared by the
-// commands. Defaults come from helm.DefaultCacheDir()/DefaultIndexTTL() so the
-// FLUXVIEW_HELM_CACHE_DIR / FLUXVIEW_HELM_INDEX_TTL env vars are honored
-// unless overridden by an explicit flag.
-func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL *time.Duration) {
+// commands. Defaults come from helm.DefaultCacheDir()/DefaultIndexTTL()/
+// DefaultDownloadTimeout() so the FLUXVIEW_HELM_CACHE_DIR /
+// FLUXVIEW_HELM_INDEX_TTL / FLUXVIEW_HELM_DOWNLOAD_TIMEOUT env vars are
+// honored unless overridden by an explicit flag.
+func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL, downloadTimeout *time.Duration) {
 	cmd.Flags().StringVar(cacheDir, "helm-cache-dir", helm.DefaultCacheDir(),
 		"Helm cache directory for repo indexes and downloaded charts (env: FLUXVIEW_HELM_CACHE_DIR)")
 	cmd.Flags().DurationVar(indexTTL, "helm-index-ttl", helm.DefaultIndexTTL(),
 		"How long cached Helm repo indexes and OCI tag resolutions stay fresh; 0 always refreshes (env: FLUXVIEW_HELM_INDEX_TTL)")
+	cmd.Flags().DurationVar(downloadTimeout, "helm-download-timeout", helm.DefaultDownloadTimeout(),
+		"Per-request timeout for downloading Helm repo indexes and chart tarballs; 0 = no limit, for slow networks (env: FLUXVIEW_HELM_DOWNLOAD_TIMEOUT)")
 }
 
 // registerKustomizeCacheFlags registers the kustomize cache flags shared by
@@ -72,12 +79,14 @@ func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL *time
 // Here <name> is "remote" (resources fetched by URL, referenced by
 // kustomizations) and "build" (kustomize build outputs). Defaults come from
 // kustomize.DefaultRemoteCacheDir()/DefaultRemoteCacheTTL()/
-// DefaultBuildCacheDir()/DefaultBuildCacheTTL().
-func registerKustomizeCacheFlags(cmd *cobra.Command, remoteDir *string, remoteTtl *time.Duration, buildCacheDir *string, buildCacheTTL *time.Duration) {
+// DefaultRemoteCacheTimeout()/DefaultBuildCacheDir()/DefaultBuildCacheTTL().
+func registerKustomizeCacheFlags(cmd *cobra.Command, remoteDir *string, remoteTtl, remoteTimeout *time.Duration, buildCacheDir *string, buildCacheTTL *time.Duration) {
 	cmd.Flags().StringVar(remoteDir, "remote-cache-dir", kustomize.DefaultRemoteCacheDir(),
 		"Cache directory for remote resources referenced by kustomizations; off/none disables")
 	cmd.Flags().DurationVar(remoteTtl, "remote-cache-ttl", kustomize.DefaultRemoteCacheTTL(),
 		"How long cached remote resources with floating refs (branch/HEAD URLs) stay fresh; pinned version URLs never expire; 0 always re-fetches")
+	cmd.Flags().DurationVar(remoteTimeout, "remote-cache-timeout", kustomize.DefaultRemoteCacheTimeout(),
+		"Per-request timeout for downloading remote resources referenced by kustomizations; 0 = no limit, for slow networks (env: FLUXVIEW_REMOTE_CACHE_TIMEOUT)")
 	cmd.Flags().StringVar(buildCacheDir, "build-cache-dir", kustomize.DefaultBuildCacheDir(),
 		"Cache directory for kustomize build outputs, reused while input files are unchanged; off/none disables (env: FLUXVIEW_BUILD_CACHE_DIR)")
 	cmd.Flags().DurationVar(buildCacheTTL, "build-cache-ttl", kustomize.DefaultBuildCacheTTL(),

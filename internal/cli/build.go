@@ -22,16 +22,18 @@ import (
 
 // BuildFlags holds flags for the build command.
 type BuildFlags struct {
-	Path           string
-	Namespace      string
-	SkipCRDs       bool
-	StripAttrs     string
-	HelmCacheDir   string
-	HelmIndexTTL   time.Duration
-	RemoteCacheDir string
-	RemoteCacheTTL time.Duration
-	BuildCacheDir  string
-	BuildCacheTTL  time.Duration
+	Path                string
+	Namespace           string
+	SkipCRDs            bool
+	StripAttrs          string
+	HelmCacheDir        string
+	HelmIndexTTL        time.Duration
+	HelmDownloadTimeout time.Duration
+	RemoteCacheDir      string
+	RemoteCacheTTL      time.Duration
+	RemoteCacheTimeout  time.Duration
+	BuildCacheDir       string
+	BuildCacheTTL       time.Duration
 }
 
 func newBuildCmd() *cobra.Command {
@@ -62,8 +64,8 @@ Examples:
 	cmd.Flags().StringVarP(&flags.Namespace, "namespace", "n", "", "Filter output resources by namespace")
 	cmd.Flags().BoolVar(&flags.SkipCRDs, "skip-crds", false, "Skip CustomResourceDefinition resources in output")
 	cmd.Flags().StringVar(&flags.StripAttrs, "strip-attrs", "", "Comma-separated keys to strip from output (e.g. helm.sh/chart,status)")
-	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL)
-	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.BuildCacheDir, &flags.BuildCacheTTL)
+	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL, &flags.HelmDownloadTimeout)
+	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.RemoteCacheTimeout, &flags.BuildCacheDir, &flags.BuildCacheTTL)
 
 	return cmd
 }
@@ -129,6 +131,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	builder := kustomize.NewBuilder(repoRoot, kustomizeCacheOptions{
 		remoteDir:     flags.RemoteCacheDir,
 		remoteTtl:     flags.RemoteCacheTTL,
+		remoteTimeout: flags.RemoteCacheTimeout,
 		buildCacheDir: flags.BuildCacheDir,
 		buildCacheTTL: flags.BuildCacheTTL,
 	}.builderOptions()...)
@@ -192,10 +195,11 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	}
 
 	output, err := buildHRInflation(ctx, newScanCache(), clusterPath, repoRoot, name, flags.Namespace, false, false,
-		helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL},
+		helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout},
 		kustomizeCacheOptions{
 			remoteDir:     flags.RemoteCacheDir,
 			remoteTtl:     flags.RemoteCacheTTL,
+			remoteTimeout: flags.RemoteCacheTimeout,
 			buildCacheDir: flags.BuildCacheDir,
 			buildCacheTTL: flags.BuildCacheTTL,
 		})

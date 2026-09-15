@@ -32,9 +32,10 @@ type BuilderOption func(*Builder)
 
 // WithRemoteCache enables the on-disk cache for remote resources referenced by
 // kustomization files (http(s) entries in resources): --remote-cache-dir for
-// the directory, --remote-cache-ttl for the TTL. Pinned version URLs are
-// cached without TTL, floating refs honor the ttl (0 = always re-fetch). An
-// empty cacheDir means DefaultRemoteCacheDir(); the values
+// the directory, --remote-cache-ttl for the TTL, --remote-cache-timeout for
+// the per-request download timeout (0 = no limit, for slow links). Pinned
+// version URLs are cached without TTL, floating refs honor the ttl (0 = always
+// re-fetch). An empty cacheDir means DefaultRemoteCacheDir(); the values
 // "off"/"none"/"disabled" disable the cache entirely (same spell as the build
 // cache).
 //
@@ -42,12 +43,12 @@ type BuilderOption func(*Builder)
 // remote URLs point at cached files, so kustomize makes no network requests
 // for them. URLs that cannot be cached (git/directory bases, failed downloads)
 // keep their previous behavior — kustomize fetches them itself.
-func WithRemoteCache(cacheDir string, ttl time.Duration) BuilderOption {
+func WithRemoteCache(cacheDir string, ttl, timeout time.Duration) BuilderOption {
 	return func(b *Builder) {
 		if cacheDirDisabled(cacheDir) {
 			return
 		}
-		b.remote = newRemoteCache(cacheDir, ttl)
+		b.remote = newRemoteCache(cacheDir, ttl, timeout)
 	}
 }
 

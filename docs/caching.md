@@ -1,6 +1,6 @@
 # Caching
 
-fluxview keeps five independent on-disk caches, one per kind of expensive work: the **Helm chart cache** (repo indexes, chart tarballs), the **remote resource cache** (files fetched by URL and referenced by kustomizations), the **build cache** (kustomize build outputs), the **schema cache** (validation schemas downloaded over HTTP) and the **CRD schema cache** (schemas converted from CRD YAML manifests). The first three follow the same conventions — flags `--<name>-cache-dir`/`--<name>-cache-ttl`, dir `off`/`none` disables, ttl `0` always bypasses (still writes); the Helm and build caches also honor `FLUXVIEW_HELM_*`/`FLUXVIEW_BUILD_CACHE_*` env vars, the remote cache is flags-only. The schema caches have no flags — they are always on (entries are version-pinned or keyed by source mtime, there is nothing to configure). They share nothing but a parent: all default under `~/.cache/fluxview/`, so a single volume mount covers them.
+fluxview keeps five independent on-disk caches, one per kind of expensive work: the **Helm chart cache** (repo indexes, chart tarballs), the **remote resource cache** (files fetched by URL and referenced by kustomizations), the **build cache** (kustomize build outputs), the **schema cache** (validation schemas downloaded over HTTP) and the **CRD schema cache** (schemas converted from CRD YAML manifests). The first three follow the same conventions — flags `--<name>-cache-dir`/`--<name>-cache-ttl`, dir `off`/`none` disables, ttl `0` always bypasses (still writes); the Helm and build caches also honor `FLUXVIEW_HELM_*`/`FLUXVIEW_BUILD_CACHE_*` env vars, the remote cache honors `FLUXVIEW_REMOTE_CACHE_TIMEOUT` (its download timeout) only. The schema caches have no flags — they are always on (entries are version-pinned or keyed by source mtime, there is nothing to configure). They share nothing but a parent: all default under `~/.cache/fluxview/`, so a single volume mount covers them.
 
 ## Cache flags
 
@@ -8,15 +8,18 @@ fluxview keeps five independent on-disk caches, one per kind of expensive work: 
 |------|----------|-------------|
 | `--helm-cache-dir` | build, diff | Helm cache directory for repo indexes and downloaded charts (default: `$FLUXVIEW_HELM_CACHE_DIR`, else `~/.cache/fluxview/helm`) |
 | `--helm-index-ttl` | build, diff | How long cached Helm repo indexes and OCI tag resolutions stay fresh (default: `10m`, env: `FLUXVIEW_HELM_INDEX_TTL`) |
+| `--helm-download-timeout` | build, diff | Per-request timeout for downloading Helm repo indexes and chart tarballs; `0` = no limit (default: `2m`, env: `FLUXVIEW_HELM_DOWNLOAD_TIMEOUT`) |
 | `--remote-cache-dir` | build, diff, validate | Cache directory for remote resources referenced by kustomizations (default: `~/.cache/fluxview/kustomize-remote`) |
 | `--remote-cache-ttl` | build, diff, validate | How long cached remote resources with floating refs (branch/HEAD URLs) stay fresh; pinned version URLs never expire (default: `10m`) |
+| `--remote-cache-timeout` | build, diff, validate | Per-request timeout for downloading remote resources referenced by kustomizations; `0` = no limit (default: `30s`, env: `FLUXVIEW_REMOTE_CACHE_TIMEOUT`) |
 | `--build-cache-dir` | build, diff, validate | Cache directory for kustomize build outputs, reused while input files are unchanged (default: `$FLUXVIEW_BUILD_CACHE_DIR`, else `~/.cache/fluxview/kustomize-builds`) |
 | `--build-cache-ttl` | build, diff, validate | How long cached build outputs stay usable (default: `24h`, env: `FLUXVIEW_BUILD_CACHE_TTL`) |
 
 Conventions shared by all caches:
 
 - a `-dir` value of `off`/`none`/`disabled` turns that cache off completely;
-- a `-ttl` of `0` always bypasses it — remote refs are re-fetched, indexes re-read, builds re-run — but fresh results are still written to disk for later runs.
+- a `-ttl` of `0` always bypasses it — remote refs are re-fetched, indexes re-read, builds re-run — but fresh results are still written to disk for later runs;
+- the download-timeout flags (`--helm-download-timeout`, `--remote-cache-timeout`) treat a negative value like `0` (no limit) with a warning — the same forgiving normalization as the `-ttl` flags. This is deliberately different from validate's `--schema-download-timeout`, which rejects negative values outright (exit 2).
 
 ## Helm chart cache
 
@@ -26,11 +29,14 @@ Downloaded Helm charts and repository indexes are cached on disk, so repeated `b
 - **Charts**: tarballs are stored keyed by the sha256 digest from the repo index (or the OCI manifest digest) — a pinned chart version downloads once, then renders offline.
 - **OCI**: tags are resolved to digests once per TTL (`oci-digests.yaml`); chart blobs come from the content cache by digest, so warm runs make zero registry requests. Floating versions (empty `spec.chart.spec.version` or a semver range, `OCIRepository.spec.ref.semver`) are resolved against the tag list, also cached with TTL (`oci-tags.yaml`). Digest-pinned refs (`spec.ref.digest`) are immutable and never re-resolve.
 - **Indexes**: repo `index.yaml` is re-fetched when older than `--helm-index-ttl` (default `10m`). `--helm-index-ttl=0` always fetches a fresh index — use it if a newly published chart version is reported missing from a cached index.
+- **Slow networks**: index and tarball downloads are bounded by `--helm-download-timeout` (default `2m`, the Helm SDK's own default). On a slow link raise it (`--helm-download-timeout=30m`) or disable it entirely (`--helm-download-timeout=0`). The flag applies to HTTP(S) repositories only — OCI behavior is deliberately different, see the caveat below.
 - **Offline fallback**: if the index cannot be refreshed but a cached copy exists, the stale copy is used with a warning.
 - **Credentials**: auth resolved from cluster Secrets is used for downloads but never written to the cache (`repositories.yaml` holds URLs only).
 - **Cleanup**: the cache has no eviction — clear it any time with `rm -rf ~/.cache/fluxview/helm` (or your `--helm-cache-dir`); everything is re-downloadable.
 
 Caveat: with a non-zero TTL, a floating chart version (empty or range `spec.chart.spec.version`, or a moved OCI tag) resolves against the cached index/digest — up to TTL stale. Pinned versions are unaffected (chart versions are immutable).
+
+Caveat (OCI has no download timeout): OCI operations (digest/tag resolution, chart pulls) are deliberately not bounded by `--helm-download-timeout` — they wait as long as the network takes, which is what very slow links need. The trade-off: an unreachable registry fails on its own within roughly a minute (TCP dial timeout plus the registry client's built-in retries), but a registry that accepts the connection and then hangs — or trickles bytes forever — is waited on indefinitely; the command will not terminate by itself. `Ctrl-C` (or `SIGTERM`) always aborts immediately: every OCI operation is wrapped in cancellation even though the underlying SDK calls accept no context.
 
 ## Remote resource cache
 
@@ -42,6 +48,7 @@ Remote resources referenced by kustomizations (http(s) entries in `resources:`, 
 - **What is not cached**: git/directory bases (`github.com/org/repo/path?ref=…` as a kustomization base, remote `components:`) are left for kustomize itself and warned about once — they still trigger kustomize's own git fetch. A URL that cannot be downloaded and has no cached copy is likewise left untouched, preserving the pre-cache behavior (warning + skip in `build`, strict failure in `diff`). Private/authenticated URLs are out of scope.
 - **Scope**: only `resources:` entries are cached. Remote URLs in `crds:`, `patches:`, `configurations:` and `transformers:` (if any) are not scanned or rewritten — kustomize fetches them itself on every build, as before.
 - **Integrity**: cached entries are validated as YAML on every use — a corrupted entry is re-downloaded instead of failing the build.
+- **Slow networks**: each download is bounded by `--remote-cache-timeout` (default `30s`). On a slow link raise it or disable it entirely (`--remote-cache-timeout=0`); a URL that still cannot be downloaded falls back to kustomize's own fetch, as before.
 
 Caveat: with `--remote-cache-ttl=0` every `diff` side re-fetches floating URLs independently, so a remote resource that changes mid-run can surface as a phantom diff unrelated to the commit. With a non-zero TTL (default) both diff sides share one fresh cached copy, so this cannot happen.
 

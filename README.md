@@ -135,7 +135,7 @@ Behavior:
 | `--skip-kind` | validate | Kinds to skip (repeatable or comma-separated): `Deployment` (any apiVersion) or `apps/v1/Deployment` |
 | `--output` | validate | Output format: `text` (default, stderr), `json` or `junit` (stdout, per-resource statuses + summary) |
 
-Cache flags (`--helm-*`, `--remote-*`, `--build-*`) share one pattern: `--<name>-cache-dir` (`off`/`none` disables) and `--<name>-cache-ttl` (`0` always bypasses) — see [docs/caching.md](docs/caching.md).
+Cache flags (`--helm-*`, `--remote-*`, `--build-*`) share one pattern: `--<name>-cache-dir` (`off`/`none` disables) and `--<name>-cache-ttl` (`0` always bypasses). On slow networks, `--helm-download-timeout` and `--remote-cache-timeout` (`0` = no limit) let downloads wait as long as the link needs instead of being cut off after `2m`/`30s` — see [docs/caching.md](docs/caching.md).
 
 ## Exit codes
 

@@ -108,7 +108,7 @@ func TestRemoteCache_ColdWarmCounters(t *testing.T) {
 	cacheDir := t.TempDir()
 
 	// Cold: exactly one GET.
-	b1 := NewBuilder(repo, WithRemoteCache(cacheDir, time.Hour))
+	b1 := NewBuilder(repo, WithRemoteCache(cacheDir, time.Hour, 30*time.Second))
 	out1, err := b1.Build(context.Background(), overlay)
 	if err != nil {
 		t.Fatalf("cold build: %v", err)
@@ -121,7 +121,7 @@ func TestRemoteCache_ColdWarmCounters(t *testing.T) {
 	}
 
 	// Warm (new process simulation: new Builder, same cache dir): zero GETs.
-	b2 := NewBuilder(repo, WithRemoteCache(cacheDir, time.Hour))
+	b2 := NewBuilder(repo, WithRemoteCache(cacheDir, time.Hour, 30*time.Second))
 	out2, err := b2.Build(context.Background(), overlay)
 	if err != nil {
 		t.Fatalf("warm build: %v", err)
@@ -135,7 +135,7 @@ func TestRemoteCache_ColdWarmCounters(t *testing.T) {
 
 	// Warm offline: server gone, build still succeeds byte-identically.
 	cs.close()
-	b3 := NewBuilder(repo, WithRemoteCache(cacheDir, time.Hour))
+	b3 := NewBuilder(repo, WithRemoteCache(cacheDir, time.Hour, 30*time.Second))
 	out3, err := b3.Build(context.Background(), overlay)
 	if err != nil {
 		t.Fatalf("offline warm build: %v", err)
@@ -165,7 +165,7 @@ func TestRemoteCache_ByteIdenticalToDirectRemoteBuild(t *testing.T) {
 	// Repo with the cache: URL rewritten to the cache path.
 	cached := t.TempDir()
 	writeRemoteKustomization(t, cached, url)
-	b := NewBuilder(cached, WithRemoteCache(cacheDir, time.Hour))
+	b := NewBuilder(cached, WithRemoteCache(cacheDir, time.Hour, 30*time.Second))
 	cachedOut, err := b.Build(context.Background(), cached)
 	if err != nil {
 		t.Fatalf("cached build: %v", err)
@@ -201,7 +201,7 @@ func TestRemoteCache_PinnedIgnoresTTL(t *testing.T) {
 	writeRemoteKustomization(t, overlay, url)
 	cacheDir := t.TempDir()
 
-	b := NewBuilder(repo, WithRemoteCache(cacheDir, 0))
+	b := NewBuilder(repo, WithRemoteCache(cacheDir, 0, 30*time.Second))
 	if _, err := b.Build(context.Background(), overlay); err != nil {
 		t.Fatalf("cold build: %v", err)
 	}
@@ -210,14 +210,14 @@ func TestRemoteCache_PinnedIgnoresTTL(t *testing.T) {
 	}
 
 	// Age the cache entry far beyond any TTL.
-	rc := newRemoteCache(cacheDir, 0)
+	rc := newRemoteCache(cacheDir, 0, 30*time.Second)
 	path := rc.cachePath(url)
 	old := time.Now().Add(-72 * time.Hour)
 	if err := os.Chtimes(path, old, old); err != nil {
 		t.Fatalf("Chtimes: %v", err)
 	}
 
-	b2 := NewBuilder(repo, WithRemoteCache(cacheDir, 0))
+	b2 := NewBuilder(repo, WithRemoteCache(cacheDir, 0, 30*time.Second))
 	if _, err := b2.Build(context.Background(), overlay); err != nil {
 		t.Fatalf("pinned warm build: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestRemoteCache_FloatingTTLZeroRefetches(t *testing.T) {
 	cacheDir := t.TempDir()
 
 	for i := 1; i <= 2; i++ {
-		b := NewBuilder(repo, WithRemoteCache(cacheDir, 0))
+		b := NewBuilder(repo, WithRemoteCache(cacheDir, 0, 30*time.Second))
 		if _, err := b.Build(context.Background(), overlay); err != nil {
 			t.Fatalf("build %d: %v", i, err)
 		}
@@ -257,19 +257,19 @@ func TestRemoteCache_FloatingExpiredRefetches(t *testing.T) {
 	writeRemoteKustomization(t, overlay, url)
 	cacheDir := t.TempDir()
 
-	b := NewBuilder(repo, WithRemoteCache(cacheDir, time.Hour))
+	b := NewBuilder(repo, WithRemoteCache(cacheDir, time.Hour, 30*time.Second))
 	if _, err := b.Build(context.Background(), overlay); err != nil {
 		t.Fatalf("cold build: %v", err)
 	}
 
-	rc := newRemoteCache(cacheDir, time.Hour)
+	rc := newRemoteCache(cacheDir, time.Hour, 30*time.Second)
 	path := rc.cachePath(url)
 	old := time.Now().Add(-2 * time.Hour)
 	if err := os.Chtimes(path, old, old); err != nil {
 		t.Fatalf("Chtimes: %v", err)
 	}
 
-	b2 := NewBuilder(repo, WithRemoteCache(cacheDir, time.Hour))
+	b2 := NewBuilder(repo, WithRemoteCache(cacheDir, time.Hour, 30*time.Second))
 	if _, err := b2.Build(context.Background(), overlay); err != nil {
 		t.Fatalf("expired build: %v", err)
 	}
@@ -288,14 +288,14 @@ func TestRemoteCache_FloatingUnreachableUsesStale(t *testing.T) {
 	writeRemoteKustomization(t, overlay, url)
 	cacheDir := t.TempDir()
 
-	b := NewBuilder(repo, WithRemoteCache(cacheDir, time.Hour))
+	b := NewBuilder(repo, WithRemoteCache(cacheDir, time.Hour, 30*time.Second))
 	warmOut, err := b.Build(context.Background(), overlay)
 	if err != nil {
 		t.Fatalf("warm-up build: %v", err)
 	}
 
 	// Expire the entry, then kill the server.
-	rc := newRemoteCache(cacheDir, time.Hour)
+	rc := newRemoteCache(cacheDir, time.Hour, 30*time.Second)
 	path := rc.cachePath(url)
 	old := time.Now().Add(-2 * time.Hour)
 	if err := os.Chtimes(path, old, old); err != nil {
@@ -305,7 +305,7 @@ func TestRemoteCache_FloatingUnreachableUsesStale(t *testing.T) {
 
 	var staleOut []byte
 	stderr := captureStderr(t, func() {
-		b2 := NewBuilder(repo, WithRemoteCache(cacheDir, time.Hour))
+		b2 := NewBuilder(repo, WithRemoteCache(cacheDir, time.Hour, 30*time.Second))
 		var err error
 		staleOut, err = b2.Build(context.Background(), overlay)
 		if err != nil {
@@ -330,17 +330,17 @@ func TestRemoteCache_CorruptCacheFileRedownloads(t *testing.T) {
 	writeRemoteKustomization(t, overlay, url)
 	cacheDir := t.TempDir()
 
-	b := NewBuilder(repo, WithRemoteCache(cacheDir, time.Hour))
+	b := NewBuilder(repo, WithRemoteCache(cacheDir, time.Hour, 30*time.Second))
 	if _, err := b.Build(context.Background(), overlay); err != nil {
 		t.Fatalf("cold build: %v", err)
 	}
 
-	rc := newRemoteCache(cacheDir, time.Hour)
+	rc := newRemoteCache(cacheDir, time.Hour, 30*time.Second)
 	if err := os.WriteFile(rc.cachePath(url), []byte("{{{ not yaml"), 0o644); err != nil {
 		t.Fatalf("corrupting cache file: %v", err)
 	}
 
-	b2 := NewBuilder(repo, WithRemoteCache(cacheDir, time.Hour))
+	b2 := NewBuilder(repo, WithRemoteCache(cacheDir, time.Hour, 30*time.Second))
 	out, err := b2.Build(context.Background(), overlay)
 	if err != nil {
 		t.Fatalf("build over corrupt cache: %v", err)
@@ -367,7 +367,7 @@ func TestRemoteCache_UnresolvableURLFallsBack(t *testing.T) {
 
 	var err error
 	stderr := captureStderr(t, func() {
-		b := NewBuilder(repo, WithRemoteCache(t.TempDir(), time.Hour))
+		b := NewBuilder(repo, WithRemoteCache(t.TempDir(), time.Hour, 30*time.Second))
 		_, err = b.Build(context.Background(), overlay)
 	})
 	if err == nil {
@@ -396,7 +396,7 @@ func TestRemoteCache_RelativeBasesStillWork(t *testing.T) {
 	writeTestFile(t, filepath.Join(overlay, "kustomization.yaml"), fmt.Sprintf(
 		"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - ../../../apps/base\n  - %s\n", url))
 
-	b := NewBuilder(repo, WithRemoteCache(t.TempDir(), time.Hour))
+	b := NewBuilder(repo, WithRemoteCache(t.TempDir(), time.Hour, 30*time.Second))
 	out, err := b.Build(context.Background(), overlay)
 	if err != nil {
 		t.Fatalf("build with relative base + remote URL: %v", err)
@@ -436,7 +436,7 @@ func TestRemoteCache_ComponentsNotCachedWarns(t *testing.T) {
 		t.Fatalf("expected 1 dir ref, got %v", dirRefs)
 	}
 
-	rc := newRemoteCache(t.TempDir(), time.Hour)
+	rc := newRemoteCache(t.TempDir(), time.Hour, 30*time.Second)
 	stderr := captureStderr(t, func() {
 		rc.prepare(context.Background(), repo)
 	})
@@ -475,7 +475,7 @@ func TestRestrictedFs_ExtraRootIsNarrow(t *testing.T) {
 // TestRemoteCache_RewriteKeepsUnresolvedURLs: URLs the cache could not resolve
 // stay in the rewritten content untouched, so kustomize still sees them.
 func TestRemoteCache_RewriteKeepsUnresolvedURLs(t *testing.T) {
-	rc := newRemoteCache(t.TempDir(), time.Hour)
+	rc := newRemoteCache(t.TempDir(), time.Hour, 30*time.Second)
 	inner := newRestrictedFs(t.TempDir())
 	fs := rc.wrapFs(inner).(*rewritingFs)
 
@@ -502,7 +502,7 @@ resources:
 // TestRemoteCache_RewritePreservesShape verifies the YAML round-trip of the
 // rewrite: comments and key order survive, only resolved URL scalars change.
 func TestRemoteCache_RewritePreservesShape(t *testing.T) {
-	rc := newRemoteCache(t.TempDir(), time.Hour)
+	rc := newRemoteCache(t.TempDir(), time.Hour, 30*time.Second)
 	rc.remember("https://raw.githubusercontent.com/org/repo/main/crd.yaml", "/cache/abc.yaml")
 
 	dir := t.TempDir()
@@ -629,7 +629,7 @@ func TestRemoteCache_HTTP404FallsBack(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	rc := newRemoteCache(t.TempDir(), time.Hour)
+	rc := newRemoteCache(t.TempDir(), time.Hour, 30*time.Second)
 	var path string
 	var ok bool
 	stderr := captureStderr(t, func() {
@@ -697,7 +697,7 @@ func TestRemoteCache_NonYAMLBodyFallsBack(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	rc := newRemoteCache(t.TempDir(), time.Hour)
+	rc := newRemoteCache(t.TempDir(), time.Hour, 30*time.Second)
 	var ok bool
 	stderr := captureStderr(t, func() {
 		_, ok = rc.ensure(context.Background(), srv.URL+"/org/repo")
@@ -733,7 +733,7 @@ func TestRemoteCache_RelativeCacheDirAnchoredToCWD(t *testing.T) {
 
 	// Relative cache dir: expected to land at <CWD>/rel-cache, and the
 	// rewritten path inside the kustomization to be absolute.
-	b := NewBuilder(repo, WithRemoteCache("rel-cache", time.Hour))
+	b := NewBuilder(repo, WithRemoteCache("rel-cache", time.Hour, 30*time.Second))
 	out, err := b.Build(context.Background(), overlay)
 	if err != nil {
 		t.Fatalf("build with relative cache dir: %v", err)
@@ -742,7 +742,7 @@ func TestRemoteCache_RelativeCacheDirAnchoredToCWD(t *testing.T) {
 		t.Fatalf("output missing remote resource:\n%s", out)
 	}
 
-	rc := newRemoteCache("rel-cache", time.Hour)
+	rc := newRemoteCache("rel-cache", time.Hour, 30*time.Second)
 	if !filepath.IsAbs(rc.dir) {
 		t.Fatalf("cache dir must be absolutized, got %q", rc.dir)
 	}
@@ -755,11 +755,11 @@ func TestRemoteCache_RelativeCacheDirAnchoredToCWD(t *testing.T) {
 // spell leaves the Builder without a remote cache.
 func TestRemoteCacheDisabledViaDir(t *testing.T) {
 	for _, dir := range []string{"off", "none", "DISABLED"} {
-		if b := NewBuilder(t.TempDir(), WithRemoteCache(dir, time.Hour)); b.remote != nil {
+		if b := NewBuilder(t.TempDir(), WithRemoteCache(dir, time.Hour, 30*time.Second)); b.remote != nil {
 			t.Fatalf("remote cache must be disabled with dir=%q", dir)
 		}
 	}
-	if b := NewBuilder(t.TempDir(), WithRemoteCache("", time.Hour)); b.remote == nil {
+	if b := NewBuilder(t.TempDir(), WithRemoteCache("", time.Hour, 30*time.Second)); b.remote == nil {
 		t.Fatal("empty dir must keep the remote cache enabled (default dir)")
 	}
 }
@@ -770,6 +770,24 @@ func TestDefaultRemoteCacheTTLAndDir(t *testing.T) {
 	if got := DefaultRemoteCacheTTL(); got != 10*time.Minute {
 		t.Errorf("DefaultRemoteCacheTTL() = %s, want 10m", got)
 	}
+	if got := DefaultRemoteCacheTimeout(); got != 30*time.Second {
+		t.Errorf("DefaultRemoteCacheTimeout() = %s, want 30s", got)
+	}
+	t.Setenv("FLUXVIEW_REMOTE_CACHE_TIMEOUT", "5m")
+	if got := DefaultRemoteCacheTimeout(); got != 5*time.Minute {
+		t.Errorf("DefaultRemoteCacheTimeout() = %s, want 5m (env)", got)
+	}
+	warnEnvTimeoutOnce = sync.Once{}
+	captureStderr(t, func() {
+		t.Setenv("FLUXVIEW_REMOTE_CACHE_TIMEOUT", "bogus")
+		if got := DefaultRemoteCacheTimeout(); got != 30*time.Second {
+			t.Errorf("DefaultRemoteCacheTimeout() = %s, want 30s fallback on invalid env", got)
+		}
+	})
+	t.Setenv("FLUXVIEW_REMOTE_CACHE_TIMEOUT", "0")
+	if got := DefaultRemoteCacheTimeout(); got != 0 {
+		t.Errorf("DefaultRemoteCacheTimeout() = %s, want 0 (env no-limit)", got)
+	}
 
 	t.Setenv("XDG_CACHE_HOME", "/custom-xdg")
 	if got := DefaultRemoteCacheDir(); got != "/custom-xdg/fluxview/kustomize-remote" {
@@ -777,13 +795,26 @@ func TestDefaultRemoteCacheTTLAndDir(t *testing.T) {
 	}
 
 	// An explicitly empty cache dir (e.g. --remote-cache-dir=) means
-	// "default", and a negative TTL is normalized to 0.
-	rc := newRemoteCache("", -time.Minute)
+	// "default", and negative TTL/timeout values are normalized to 0 with
+	// one explanatory warning each.
+	var rc *remoteCache
+	stderr := captureStderr(t, func() {
+		rc = newRemoteCache("", -time.Minute, -time.Minute)
+	})
+	if !strings.Contains(stderr, "negative kustomize remote cache TTL -1m0s, treating as 0 (always refresh)") {
+		t.Errorf("expected negative-TTL warning, got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "negative kustomize remote download timeout -1m0s, treating as 0 (no limit)") {
+		t.Errorf("expected negative-timeout warning, got:\n%s", stderr)
+	}
 	if rc.dir != "/custom-xdg/fluxview/kustomize-remote" {
 		t.Errorf("newRemoteCache dir = %s, want default %s", rc.dir, "/custom-xdg/fluxview/kustomize-remote")
 	}
 	if rc.ttl != 0 {
 		t.Errorf("newRemoteCache ttl = %s, want 0 (negative normalized)", rc.ttl)
+	}
+	if rc.client.Timeout != 0 {
+		t.Errorf("newRemoteCache client timeout = %s, want 0 (negative normalized to no limit)", rc.client.Timeout)
 	}
 }
 
@@ -796,7 +827,7 @@ func TestRemoteCache_RepeatedBuildsShareResolution(t *testing.T) {
 	writeRemoteKustomization(t, filepath.Join(repo, "a"), url)
 	writeRemoteKustomization(t, filepath.Join(repo, "b"), url)
 
-	b := NewBuilder(repo, WithRemoteCache(t.TempDir(), time.Hour))
+	b := NewBuilder(repo, WithRemoteCache(t.TempDir(), time.Hour, 30*time.Second))
 	for _, dir := range []string{filepath.Join(repo, "a"), filepath.Join(repo, "b")} {
 		if _, err := b.Build(context.Background(), dir); err != nil {
 			t.Fatalf("build %s: %v", dir, err)
@@ -804,5 +835,59 @@ func TestRemoteCache_RepeatedBuildsShareResolution(t *testing.T) {
 	}
 	if n := cs.getsCount(); n != 1 {
 		t.Fatalf("%d GETs for two directories sharing one URL, want 1", n)
+	}
+}
+
+// TestRemoteCache_DownloadTimeout: a remote slower than the configured
+// per-request timeout fails fast, while timeout 0 (no limit) waits the
+// download out — the slow-network escape hatch.
+func TestRemoteCache_DownloadTimeout(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		fmt.Fprint(w, remoteCRDBody)
+	}))
+	t.Cleanup(slow.Close)
+	url := slow.URL + "/crd.yaml"
+
+	rc := newRemoteCache(t.TempDir(), time.Hour, 20*time.Millisecond)
+	if _, ok := rc.ensure(context.Background(), url); ok {
+		t.Fatal("ensure succeeded despite a timeout shorter than the server delay")
+	}
+
+	rc = newRemoteCache(t.TempDir(), time.Hour, 0)
+	path, ok := rc.ensure(context.Background(), url)
+	if !ok {
+		t.Fatal("ensure with no timeout failed on a slow remote")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("cached file missing: %v", err)
+	}
+}
+
+// TestDefaultRemoteCacheTimeoutInvalidEnvWarnsOnce: an unparsable
+// FLUXVIEW_REMOTE_CACHE_TIMEOUT falls back to the default and warns exactly
+// once per process (same contract as the Helm env vars). The package Once is
+// reset first so the test stays order-independent and re-runnable under
+// -count=2+.
+func TestDefaultRemoteCacheTimeoutInvalidEnvWarnsOnce(t *testing.T) {
+	t.Setenv("FLUXVIEW_REMOTE_CACHE_TIMEOUT", "bogus")
+	warnEnvTimeoutOnce = sync.Once{}
+
+	first := captureStderr(t, func() {
+		if d := DefaultRemoteCacheTimeout(); d != 30*time.Second {
+			t.Errorf("DefaultRemoteCacheTimeout() = %s, want default 30s for invalid env", d)
+		}
+	})
+	if !strings.Contains(first, `invalid FLUXVIEW_REMOTE_CACHE_TIMEOUT "bogus"`) {
+		t.Errorf("expected invalid-env warning, got:\n%s", first)
+	}
+
+	second := captureStderr(t, func() {
+		if d := DefaultRemoteCacheTimeout(); d != 30*time.Second {
+			t.Errorf("DefaultRemoteCacheTimeout() = %s, want default 30s for invalid env", d)
+		}
+	})
+	if second != "" {
+		t.Errorf("warning must not repeat, got:\n%s", second)
 	}
 }

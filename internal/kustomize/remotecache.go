@@ -75,6 +75,32 @@ func DefaultRemoteCacheTTL() time.Duration {
 	return 10 * time.Minute
 }
 
+// warnEnvTimeoutOnce keeps the invalid-env warning to a single line per
+// process: DefaultRemoteCacheTimeout runs at flag registration and again
+// wherever a remoteCache is constructed without an explicit timeout.
+var warnEnvTimeoutOnce sync.Once
+
+// DefaultRemoteCacheTimeout returns the per-request timeout for downloading
+// remote resources: $FLUXVIEW_REMOTE_CACHE_TIMEOUT (Go duration, e.g. "30m"),
+// else 30 seconds. An unparsable value warns once and falls back to the
+// default; zero and negative values flow through and are normalized by
+// newRemoteCache (zero = no limit).
+func DefaultRemoteCacheTimeout() time.Duration {
+	const def = 30 * time.Second
+	v := os.Getenv("FLUXVIEW_REMOTE_CACHE_TIMEOUT")
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		warnEnvTimeoutOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "Warning: invalid FLUXVIEW_REMOTE_CACHE_TIMEOUT %q, using %s\n", v, def)
+		})
+		return def
+	}
+	return d
+}
+
 // remoteCache downloads remote kustomize resources into an on-disk cache and
 // resolves URLs to absolute cache paths for the rewriting filesystem.
 // A Builder holds at most one; all entry points are safe for concurrent use
@@ -87,7 +113,8 @@ type remoteCache struct {
 	// Zero means always re-fetch. Pinned URLs ignore it.
 	ttl time.Duration
 	// client fetches remote resources. A conservative timeout bounds a dead
-	// remote; kustomize's own git operations default to 30s as well.
+	// remote; kustomize's own git operations default to 30s as well. Zero
+	// disables the limit for slow links.
 	client *http.Client
 
 	mu sync.Mutex
@@ -102,10 +129,11 @@ type remoteCache struct {
 // newRemoteCache creates a remote resource cache rooted at cacheDir (used
 // as-is). An explicitly empty cacheDir means "default" (same convention as the
 // Helm cache), not "relative paths off the CWD". A negative ttl behaves like 0
-// (always re-fetch). The directory itself is created lazily on the first
-// successful download, so constructing the cache never fails or creates
-// directories for repositories without remote refs.
-func newRemoteCache(cacheDir string, ttl time.Duration) *remoteCache {
+// (always re-fetch); a negative timeout like 0 (no limit). The directory
+// itself is created lazily on the first successful download, so constructing
+// the cache never fails or creates directories for repositories without
+// remote refs.
+func newRemoteCache(cacheDir string, ttl, timeout time.Duration) *remoteCache {
 	if cacheDir == "" {
 		cacheDir = DefaultRemoteCacheDir()
 	}
@@ -121,10 +149,14 @@ func newRemoteCache(cacheDir string, ttl time.Duration) *remoteCache {
 		fmt.Fprintf(os.Stderr, "Warning: negative kustomize remote cache TTL %s, treating as 0 (always refresh)\n", ttl)
 		ttl = 0
 	}
+	if timeout < 0 {
+		fmt.Fprintf(os.Stderr, "Warning: negative kustomize remote download timeout %s, treating as 0 (no limit)\n", timeout)
+		timeout = 0
+	}
 	return &remoteCache{
 		dir:      cacheDir,
 		ttl:      ttl,
-		client:   &http.Client{Timeout: 30 * time.Second},
+		client:   &http.Client{Timeout: timeout},
 		resolved: make(map[string]string),
 		warned:   make(map[string]bool),
 	}

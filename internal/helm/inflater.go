@@ -46,6 +46,10 @@ type Inflater struct {
 	// indexTTL is how long a cached repository index.yaml stays fresh.
 	// Zero means the index is re-downloaded on every use.
 	indexTTL time.Duration
+	// downloadTimeout bounds one HTTP request for repo indexes and chart
+	// tarballs (the Helm SDK's getter default is a fixed 120s, which fails
+	// large downloads on slow links). Zero means no limit.
+	downloadTimeout time.Duration
 	// registered memoizes repoURL -> cache name so that several HelmReleases
 	// sharing one repository validate the cached index only once per process.
 	// InflateHelmRelease calls are sequential (inflateHelmReleasesShared loops
@@ -96,6 +100,14 @@ func WithIndexTTL(ttl time.Duration) InflaterOption {
 	return func(in *Inflater) { in.indexTTL = ttl }
 }
 
+// WithDownloadTimeout overrides the per-request timeout for HTTP downloads
+// (repo indexes, chart tarballs; default: DefaultDownloadTimeout()). Zero
+// disables the limit — on slow links a large chart may legitimately take
+// many minutes. OCI digest/tag resolution is not bounded by it.
+func WithDownloadTimeout(d time.Duration) InflaterOption {
+	return func(in *Inflater) { in.downloadTimeout = d }
+}
+
 // DefaultCacheDir returns the Helm cache directory: $FLUXVIEW_HELM_CACHE_DIR,
 // else $XDG_CACHE_HOME/fluxview/helm, else ~/.cache/fluxview/helm.
 func DefaultCacheDir() string {
@@ -117,6 +129,31 @@ func DefaultCacheDir() string {
 // inside NewInflater. Tests reset it (warnEnvTTLOnce = sync.Once{}) to assert
 // the warning order-independently — keep it a plain variable, not a func.
 var warnEnvTTLOnce sync.Once
+
+// warnEnvTimeoutOnce serves DefaultDownloadTimeout the same way
+// warnEnvTTLOnce serves DefaultIndexTTL.
+var warnEnvTimeoutOnce sync.Once
+
+// DefaultDownloadTimeout returns the per-request timeout for HTTP downloads
+// (repo indexes, chart tarballs): $FLUXVIEW_HELM_DOWNLOAD_TIMEOUT (Go
+// duration, e.g. "30m"), else 120s (the Helm SDK's own default). An
+// unparsable value warns once and falls back to the default; zero and
+// negative values flow through and are normalized by NewInflater.
+func DefaultDownloadTimeout() time.Duration {
+	const def = 120 * time.Second
+	v := os.Getenv("FLUXVIEW_HELM_DOWNLOAD_TIMEOUT")
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		warnEnvTimeoutOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "Warning: invalid FLUXVIEW_HELM_DOWNLOAD_TIMEOUT %q, using %s\n", v, def)
+		})
+		return def
+	}
+	return d
+}
 
 // DefaultIndexTTL returns the repository index cache TTL: $FLUXVIEW_HELM_INDEX_TTL
 // (Go duration, e.g. "10m"), else 10 minutes. An unparsable value warns once
@@ -157,16 +194,23 @@ func DefaultIndexTTL() time.Duration {
 // collide (different preimages) and coexist in one directory.
 func NewInflater(opts ...InflaterOption) (*Inflater, error) {
 	in := &Inflater{
-		settings:   cli.New(),
-		cacheDir:   DefaultCacheDir(),
-		indexTTL:   DefaultIndexTTL(),
-		registered: make(map[string]string),
-		ociDigests: make(map[string]ociDigestEntry),
-		ociTags:    make(map[string]ociTagEntry),
-		ociClients: make(map[string]*registry.Client),
+		settings:        cli.New(),
+		cacheDir:        DefaultCacheDir(),
+		indexTTL:        DefaultIndexTTL(),
+		downloadTimeout: DefaultDownloadTimeout(),
+		registered:      make(map[string]string),
+		ociDigests:      make(map[string]ociDigestEntry),
+		ociTags:         make(map[string]ociTagEntry),
+		ociClients:      make(map[string]*registry.Client),
 	}
 	for _, opt := range opts {
 		opt(in)
+	}
+	// A negative timeout (e.g. --helm-download-timeout=-5m) behaves like 0 —
+	// no limit — normalized here so the getter setup below stays honest.
+	if in.downloadTimeout < 0 {
+		fmt.Fprintf(os.Stderr, "Warning: negative Helm download timeout %s, treating as 0 (no limit)\n", in.downloadTimeout)
+		in.downloadTimeout = 0
 	}
 	// An explicitly empty cache dir (e.g. `--helm-cache-dir=`) means "default",
 	// not "relative paths off the CWD".
@@ -190,7 +234,11 @@ func NewInflater(opts ...InflaterOption) (*Inflater, error) {
 			return nil, fmt.Errorf("creating helm cache dir %s: %w", dir, err)
 		}
 	}
-	in.getters = getter.All(in.settings)
+	// The extra option is applied after the SDK's built-in defaults, so it
+	// overrides the fixed 120s getter timeout (a value of 0 removes the
+	// limit entirely). Index downloads and tarball fetches through these
+	// getters then honor the configured timeout.
+	in.getters = getter.All(in.settings, getter.WithTimeout(in.downloadTimeout))
 	in.loadOCIDigests()
 	in.loadOCITags()
 
@@ -710,7 +758,7 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 			return nil, fmt.Errorf("locating chart %s: %w", chartRef, err)
 		}
 	} else {
-		chartPath, err = locateChartCancelable(ctx, &install.ChartPathOptions, chartRef, in.settings)
+		chartPath, err = in.chartPathCancelable(ctx, &install.ChartPathOptions, chartRef, repoURL != "")
 		if err != nil {
 			// A chart or version missing from the index while index caching is on is
 			// most often staleness (the chart was published after the cached index).
@@ -941,4 +989,75 @@ func locateChartCancelable(ctx context.Context, cpo *action.ChartPathOptions, na
 	case r := <-ch:
 		return r.chartPath, r.err
 	}
+}
+
+// chartPathCancelable resolves chartRef to a local chart path while honoring
+// ctx. fromRepo selects the download path: repo/chart references go through
+// the Inflater's own getters (configured download timeout), local paths
+// through the SDK's LocateChart (a stat, no network involved).
+func (in *Inflater) chartPathCancelable(ctx context.Context, cpo *action.ChartPathOptions, name string, fromRepo bool) (string, error) {
+	if fromRepo {
+		return in.locateHTTPChartCancelable(ctx, cpo, name)
+	}
+	return locateChartCancelable(ctx, cpo, name, in.settings)
+}
+
+// locateHTTPChartCancelable is locateChartCancelable for "repo/chart"
+// references, routing the download through the Inflater's own getters so the
+// configured download timeout applies. The SDK's LocateChart rebuilds its
+// getters with getter.All(settings) internally, which would fall back to the
+// SDK's fixed 120s per-request timeout regardless of the Inflater's setting.
+func (in *Inflater) locateHTTPChartCancelable(ctx context.Context, cpo *action.ChartPathOptions, name string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	type result struct {
+		chartPath string
+		err       error
+	}
+	ch := make(chan result, 1) // buffered: the goroutine always sends, never blocks
+	go func() {
+		cp, err := in.locateHTTPChart(cpo, name)
+		ch <- result{cp, err}
+	}()
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case r := <-ch:
+		return r.chartPath, r.err
+	}
+}
+
+// locateHTTPChart resolves a "repo/chart" reference to a local chart archive.
+// It mirrors the ChartDownloader ChartPathOptions.LocateChart builds for this
+// case (no verification, no explicit repo URL), with one difference: the
+// getters come from the Inflater, carrying the configured download timeout.
+func (in *Inflater) locateHTTPChart(cpo *action.ChartPathOptions, name string) (string, error) {
+	dl := downloader.ChartDownloader{
+		Out:     os.Stdout,
+		Keyring: cpo.Keyring,
+		Getters: in.getters,
+		Options: []getter.Option{
+			getter.WithPassCredentialsAll(cpo.PassCredentialsAll),
+			getter.WithTLSClientConfig(cpo.CertFile, cpo.KeyFile, cpo.CaFile),
+			getter.WithInsecureSkipVerifyTLS(cpo.InsecureSkipTLSVerify),
+			getter.WithPlainHTTP(cpo.PlainHTTP),
+			getter.WithBasicAuth(cpo.Username, cpo.Password),
+		},
+		RepositoryConfig: in.settings.RepositoryConfig,
+		RepositoryCache:  in.settings.RepositoryCache,
+		ContentCache:     in.settings.ContentCache,
+	}
+	if err := os.MkdirAll(in.settings.RepositoryCache, 0755); err != nil {
+		return "", err
+	}
+	filename, _, err := dl.DownloadToCache(name, cpo.Version)
+	if err != nil {
+		return "", err
+	}
+	lname, err := filepath.Abs(filename)
+	if err != nil {
+		return filename, err
+	}
+	return lname, nil
 }

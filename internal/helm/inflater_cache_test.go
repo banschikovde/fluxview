@@ -29,6 +29,18 @@ type httpRepoServer struct {
 }
 
 func newHTTPRepoServer(t *testing.T) *httpRepoServer {
+	return newHTTPRepoServerWithDelays(t, 0, 0)
+}
+
+// newHTTPRepoServerWithDelay serves the same minimal repository, stalling
+// every response for delay — for download-timeout tests.
+func newHTTPRepoServerWithDelay(t *testing.T, delay time.Duration) *httpRepoServer {
+	return newHTTPRepoServerWithDelays(t, delay, delay)
+}
+
+// newHTTPRepoServerWithDelays stalls index.yaml and tarball responses
+// independently, so a test can hold one fast and the other slow.
+func newHTTPRepoServerWithDelays(t *testing.T, indexDelay, tgzDelay time.Duration) *httpRepoServer {
 	t.Helper()
 
 	// Build the chart archive once; its sha256 becomes the index digest, which
@@ -49,6 +61,7 @@ func newHTTPRepoServer(t *testing.T) *httpRepoServer {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/index.yaml", func(w http.ResponseWriter, r *http.Request) {
 		indexHits.Add(1)
+		time.Sleep(indexDelay)
 		fmt.Fprintf(w, `apiVersion: v1
 entries:
   testchart:
@@ -65,6 +78,7 @@ generated: "2026-01-01T00:00:00Z"
 	})
 	mux.HandleFunc("/testchart-1.0.0.tgz", func(w http.ResponseWriter, r *http.Request) {
 		tgzHits.Add(1)
+		time.Sleep(tgzDelay)
 		w.Header().Set("Content-Type", "application/gzip")
 		w.Write(tgzData)
 	})
@@ -372,5 +386,125 @@ func TestRepoCacheName(t *testing.T) {
 	}
 	if a != filepath.Base(a) || strings.ContainsAny(a, "/\\") {
 		t.Errorf("repoCacheName %q is not a safe file name", a)
+	}
+}
+
+// TestDefaultDownloadTimeoutInvalidEnvWarnsOnce: an unparsable
+// FLUXVIEW_HELM_DOWNLOAD_TIMEOUT falls back to the default and warns exactly
+// once per process (same contract as the index TTL env).
+func TestDefaultDownloadTimeoutInvalidEnvWarnsOnce(t *testing.T) {
+	t.Setenv("FLUXVIEW_HELM_DOWNLOAD_TIMEOUT", "bogus")
+	warnEnvTimeoutOnce = sync.Once{}
+
+	first := captureStderrHelm(func() {
+		if d := DefaultDownloadTimeout(); d != 120*time.Second {
+			t.Errorf("DefaultDownloadTimeout() = %s, want default 2m for invalid env", d)
+		}
+	})
+	if !strings.Contains(first, `invalid FLUXVIEW_HELM_DOWNLOAD_TIMEOUT "bogus"`) {
+		t.Errorf("expected invalid-env warning, got:\n%s", first)
+	}
+
+	second := captureStderrHelm(func() {
+		if d := DefaultDownloadTimeout(); d != 120*time.Second {
+			t.Errorf("DefaultDownloadTimeout() = %s, want default 2m for invalid env", d)
+		}
+	})
+	if second != "" {
+		t.Errorf("warning must not repeat, got:\n%s", second)
+	}
+}
+
+// TestDefaultDownloadTimeout covers the env resolution paths: unset → the
+// SDK-matching 120s default, valid durations honored (including 0 = no
+// limit), negative flows through (NewInflater normalizes it).
+func TestDefaultDownloadTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want time.Duration
+	}{
+		{name: "unset falls back to default", env: "", want: 120 * time.Second},
+		{name: "valid duration honored", env: "30m", want: 30 * time.Minute},
+		{name: "zero means no limit", env: "0", want: 0},
+		{name: "negative flows through for NewInflater to normalize", env: "-5m", want: -5 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("FLUXVIEW_HELM_DOWNLOAD_TIMEOUT", tt.env)
+			if got := DefaultDownloadTimeout(); got != tt.want {
+				t.Errorf("DefaultDownloadTimeout() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestInflateHelmRelease_DownloadTimeout: a repository slower than the
+// configured per-request timeout fails the inflation fast, while timeout 0
+// (no limit) waits the slow downloads out — the slow-network escape hatch.
+// The success leg also exercises the repo/chart download path end to end,
+// which routes through the Inflater's own getters (not the SDK's
+// LocateChart) precisely so this timeout applies.
+func TestInflateHelmRelease_DownloadTimeout(t *testing.T) {
+	srv := newHTTPRepoServerWithDelay(t, 300*time.Millisecond)
+
+	inflater, err := NewInflater(WithCacheDir(t.TempDir()), WithDownloadTimeout(20*time.Millisecond))
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+	if _, err := inflater.InflateHelmRelease(context.Background(), httpRepoHR(), srv.URL, "", "", nil, nil, ""); err == nil {
+		t.Fatal("inflation succeeded despite a download timeout shorter than the server delay")
+	}
+
+	inflater, err = NewInflater(WithCacheDir(t.TempDir()), WithDownloadTimeout(0))
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+	if _, err := inflater.InflateHelmRelease(context.Background(), httpRepoHR(), srv.URL, "", "", nil, nil, ""); err != nil {
+		t.Fatalf("inflation with no download timeout failed on a slow repo: %v", err)
+	}
+}
+
+// TestInflateHelmRelease_DownloadTimeoutTarball: the timeout must also bound
+// the tarball leg of the repo/chart download (the index resolves instantly,
+// the chart download stalls) — the path that routes through the Inflater's
+// own ChartDownloader rather than the SDK's LocateChart.
+func TestInflateHelmRelease_DownloadTimeoutTarball(t *testing.T) {
+	srv := newHTTPRepoServerWithDelays(t, 0, 300*time.Millisecond)
+
+	inflater, err := NewInflater(WithCacheDir(t.TempDir()), WithDownloadTimeout(20*time.Millisecond))
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+	_, err = inflater.InflateHelmRelease(context.Background(), httpRepoHR(), srv.URL, "", "", nil, nil, "")
+	if err == nil {
+		t.Fatal("inflation succeeded despite a tarball download slower than the timeout")
+	}
+	if !strings.Contains(err.Error(), "locating chart") {
+		t.Errorf("expected a chart-locating failure, got: %v", err)
+	}
+	// The index resolved fine before the tarball aborted.
+	if got := srv.indexHits.Load(); got != 1 {
+		t.Errorf("index fetches = %d, want 1 (timeout applies to the tarball leg)", got)
+	}
+	if got := srv.tgzHits.Load(); got != 1 {
+		t.Errorf("tarball requests = %d, want 1", got)
+	}
+}
+
+// TestNewInflaterNegativeDownloadTimeoutWarns: a negative timeout is
+// normalized to 0 (no limit) with a single explanatory warning.
+func TestNewInflaterNegativeDownloadTimeoutWarns(t *testing.T) {
+	stderr := captureStderrHelm(func() {
+		in, err := NewInflater(WithCacheDir(t.TempDir()), WithDownloadTimeout(-time.Minute))
+		if err != nil {
+			t.Fatalf("NewInflater: %v", err)
+		}
+		if in.downloadTimeout != 0 {
+			t.Errorf("downloadTimeout = %s, want 0 (negative normalized to no limit)", in.downloadTimeout)
+		}
+	})
+	if !strings.Contains(stderr, "negative Helm download timeout -1m0s, treating as 0 (no limit)") {
+		t.Errorf("expected negative-timeout warning, got:\n%s", stderr)
 	}
 }

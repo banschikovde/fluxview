@@ -41,6 +41,7 @@ type ValidateFlags struct {
 	SchemaDownloadTimeout time.Duration
 	RemoteCacheDir        string
 	RemoteCacheTTL        time.Duration
+	RemoteCacheTimeout    time.Duration
 	BuildCacheDir         string
 	BuildCacheTTL         time.Duration
 
@@ -118,7 +119,7 @@ Examples:
 	cmd.Flags().BoolVar(&flags.Strict, "strict", false, "Reject duplicated YAML keys; strict schemas for the default registry also reject unknown fields")
 	cmd.Flags().StringSliceVar(&flags.SkipKinds, "skip-kind", nil, "Kinds to skip (repeatable or comma-separated): Kind (e.g. Deployment, any apiVersion) or apiVersion/Kind (e.g. apps/v1/Deployment)")
 	cmd.Flags().StringVar(&flags.Output, "output", "text", "Output format: text, json or junit (machine formats go to stdout)")
-	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.BuildCacheDir, &flags.BuildCacheTTL)
+	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.RemoteCacheTimeout, &flags.BuildCacheDir, &flags.BuildCacheTTL)
 
 	return cmd
 }
@@ -196,6 +197,7 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 	builder := kustomize.NewBuilder(repoRoot, kustomizeCacheOptions{
 		remoteDir:     flags.RemoteCacheDir,
 		remoteTtl:     flags.RemoteCacheTTL,
+		remoteTimeout: flags.RemoteCacheTimeout,
 		buildCacheDir: flags.BuildCacheDir,
 		buildCacheTTL: flags.BuildCacheTTL,
 	}.builderOptions()...)
