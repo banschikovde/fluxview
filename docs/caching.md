@@ -1,6 +1,6 @@
 # Caching
 
-fluxview keeps three independent on-disk caches, one per kind of expensive work: the **Helm chart cache** (repo indexes, chart tarballs), the **remote resource cache** (files fetched by URL and referenced by kustomizations) and the **build cache** (kustomize build outputs). All follow the same conventions — flags `--<name>-cache-dir`/`--<name>-cache-ttl`, dir `off`/`none` disables, ttl `0` always bypasses (still writes). The Helm and build caches also honor `FLUXVIEW_HELM_*`/`FLUXVIEW_BUILD_CACHE_*` env vars; the remote cache is flags-only. They share nothing but a parent: all default under `~/.cache/fluxview/`, so a single volume mount covers them.
+fluxview keeps five independent on-disk caches, one per kind of expensive work: the **Helm chart cache** (repo indexes, chart tarballs), the **remote resource cache** (files fetched by URL and referenced by kustomizations), the **build cache** (kustomize build outputs), the **schema cache** (validation schemas downloaded over HTTP) and the **CRD schema cache** (schemas converted from CRD YAML manifests). The first three follow the same conventions — flags `--<name>-cache-dir`/`--<name>-cache-ttl`, dir `off`/`none` disables, ttl `0` always bypasses (still writes); the Helm and build caches also honor `FLUXVIEW_HELM_*`/`FLUXVIEW_BUILD_CACHE_*` env vars, the remote cache is flags-only. The schema caches have no flags — they are always on (entries are version-pinned or keyed by source mtime, there is nothing to configure). They share nothing but a parent: all default under `~/.cache/fluxview/`, so a single volume mount covers them.
 
 ## Cache flags
 
@@ -58,6 +58,19 @@ Kustomize builds dominate fluxview's CPU cost (the SDK re-parses and re-serializ
 - **Cleanup**: oldest entries are evicted beyond 2048 entries / 256 MB; clear any time with `rm -rf ~/.cache/fluxview/kustomize-builds` — everything is rebuildable.
 
 Caveats: keep the cache directory **outside** directories containing kustomizations — a cache entry appearing inside a recorded directory changes its listing and needlessly invalidates entries (the CI examples put `.cache/` at the repository root, away from the cluster trees). Floating remote resources are refreshed before the first build-cache lookup of each run (each fluxview invocation is a fresh process in CI), so a changed remote copy invalidates dependent entries immediately rather than waiting out the build TTL; pinned URLs never change and never invalidate.
+
+## Schema cache
+
+`validate` downloads the Kubernetes schemas it needs from the kubeconform default registry before validating: a bounded, parallel prefetch (per-request timeout, retries, interruptible) fills the on-disk cache, and validation itself reads only from disk — after one run per Kubernetes version, `validate` works offline for built-in kinds. A registry failure worse than a missing schema fails the run (exit 2) rather than hanging.
+
+- **Location**: `~/.cache/fluxview/schemas` (or `$XDG_CACHE_HOME/fluxview/schemas`); the prefetched registry copy sits in the `registry/` subdirectory in the kubernetes-json-schema layout.
+- **No TTL, no flags**: entries are keyed by the exact schema URL, which includes the pinned `--kubernetes-version` — they never change and never expire. Bump `--kubernetes-version` and the new version simply populates the cache alongside the old one.
+- **Offline**: schemas from `--schema-dir` (local JSON/CRD files) never touch the network; a cold cache without network fails the run up front instead of hanging mid-validation.
+- **Cleanup**: the cache has no eviction — clear it any time with `rm -rf ~/.cache/fluxview/schemas`; everything is re-downloadable.
+
+## CRD schema cache
+
+CRD YAML manifests from `--schema-dir` are converted to kubeconform JSON schemas once and cached under `~/.cache/fluxview/crd-schemas` (one subdirectory per source directory, keyed by a path hash). A CRD file is reconverted only when its size or modification time changes; schemas of removed files are dropped automatically. `rm -rf ~/.cache/fluxview/crd-schemas` forces a full reconversion.
 
 ## Caching between CI jobs
 

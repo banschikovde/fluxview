@@ -43,10 +43,10 @@ docker run --rm --user "$(id -u):$(id -g)" \
 
 ## CRD schemas
 
-CRD schemas for `validate` are not bundled — mount them via `-v /path/to/crds:/crds`:
+Kubernetes resource schemas are fetched by `validate` over HTTP and cached inside the container (see [caching.md](caching.md) — mount the cache volume to keep them). CRD schemas are not bundled — mount them via `-v /path/to/schemas:/schemas`:
 
 ```bash
-docker run --rm -v $(pwd):/repo -v /path/to/crds:/crds \
+docker run --rm -v $(pwd):/repo -v /path/to/schemas:/schemas \
   -w /repo ghcr.io/banschikovde/fluxview:latest \
   validate --path clusters/prod/flux/
 ```

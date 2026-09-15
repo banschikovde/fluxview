@@ -195,23 +195,21 @@ func parseAttrs(s string) map[string]bool {
 	return attrs
 }
 
-// filterCRDDocs removes CustomResourceDefinition documents from multi-doc YAML.
+// filterCRDDocs removes CustomResourceDefinition documents from multi-doc
+// YAML. CRDs are schema definitions, not resources to validate. Unparseable
+// documents are kept — they cannot be identified as CRDs, and dropping them
+// would lose data.
 func filterCRDDocs(data []byte) []byte {
-	docs := flux.SplitYAMLText(data)
-	var result []string
-	for _, doc := range docs {
+	var kept []string
+	for _, doc := range flux.SplitYAMLText(data) {
 		var meta struct {
 			Kind string `yaml:"kind"`
 		}
-		if err := yaml.Unmarshal([]byte(doc), &meta); err != nil {
-			result = append(result, doc) // keep unparseable docs — don't lose data
-			continue
-		}
-		if meta.Kind != "CustomResourceDefinition" {
-			result = append(result, doc)
+		if err := yaml.Unmarshal([]byte(doc), &meta); err != nil || meta.Kind != "CustomResourceDefinition" {
+			kept = append(kept, doc)
 		}
 	}
-	return []byte(strings.Join(result, "\n---\n"))
+	return []byte(strings.Join(kept, "\n---\n"))
 }
 
 // filterByNamespace keeps only YAML documents whose metadata.namespace matches

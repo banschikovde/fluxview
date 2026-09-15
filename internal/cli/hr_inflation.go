@@ -106,7 +106,7 @@ func buildHRInflation(ctx context.Context, scans *scanCache, clusterPath, repoRo
 	configMaps := resolveConfigMaps(ctx, scans, clusterPath, builder, buildCache)
 	secrets := resolveSecrets(ctx, scans, clusterPath, builder, buildCache)
 
-	output, err := buildKSContent(ctx, scans, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, true, buildCache)
+	output, err := buildKSContent(ctx, scans, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, true, buildCache, nil)
 	if err != nil {
 		return nil, err
 	}

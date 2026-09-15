@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -149,7 +150,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		}
 	}
 
-	output, err := buildKSContent(ctx, scans, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, false, buildCache)
+	output, err := buildKSContent(ctx, scans, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, false, buildCache, nil)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}
@@ -269,6 +270,22 @@ type buildResult struct {
 // buildCache maps directory path to its build result.
 type buildCache map[string]buildResult
 
+// buildReport collects non-fatal build anomalies that a strict validation
+// gate treats as failures: Flux Kustomizations whose declared spec.path is
+// absent from the local repository, whose resources are then silently
+// missing from the build output. A nil report means "don't collect" —
+// build and diff stay lenient (warn only).
+type buildReport struct {
+	missingPaths []missingPath
+}
+
+// missingPath is one Flux Kustomization pointing at a path that could not
+// be resolved locally.
+type missingPath struct {
+	ks   string // "namespace/name"
+	path string // the declared spec.path
+}
+
 // buildDirCached runs builder.Build(dir) at most once per dir per cache
 // lifetime. On failure it prints the warning exactly once and caches the
 // error, so any later caller — across resolveConfigMaps, buildKustomizeOverlays,
@@ -283,6 +300,21 @@ func buildDirCached(ctx context.Context, builder *kustomize.Builder, dir string,
 	}
 	cache[dir] = buildResult{output, err}
 	return output, err == nil
+}
+
+// failedDirs returns the sorted directories whose kustomize build failed.
+// buildDirCached already printed the per-dir warnings with the underlying
+// errors; this lists the failed paths so callers that must not proceed on
+// a partial build (validate) can fail.
+func (c buildCache) failedDirs() []string {
+	var dirs []string
+	for dir, res := range c {
+		if res.err != nil {
+			dirs = append(dirs, dir)
+		}
+	}
+	sort.Strings(dirs)
+	return dirs
 }
 
 // --- Path resolution ---

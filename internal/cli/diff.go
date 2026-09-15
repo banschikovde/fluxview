@@ -266,7 +266,7 @@ func buildKSOutput(ctx context.Context, scans *scanCache, clusterPath, repoRoot,
 	configMaps := resolveConfigMaps(ctx, scans, clusterPath, builder, buildCache)
 	secrets := resolveSecrets(ctx, scans, clusterPath, builder, buildCache)
 
-	return buildKSContent(ctx, scans, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, false, buildCache)
+	return buildKSContent(ctx, scans, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, false, buildCache, nil)
 }
 
 // buildKSOutputAtRevision builds the Kustomization output at a specific git revision.
@@ -322,7 +322,7 @@ func buildKSOutputAtRevision(ctx context.Context, scans *scanCache, gitOps *git.
 	// Use worktreePath as repoRoot so that recursive discovery and postBuild
 	// substitution work identically to the current state. External GitRepository
 	// resolution is disabled for diff (too expensive — clones remote repos).
-	return buildKSContent(ctx, scans, builder, kustomizations, worktreePath, worktreeClusterPath, configMaps, secrets, true, buildCache)
+	return buildKSContent(ctx, scans, builder, kustomizations, worktreePath, worktreeClusterPath, configMaps, secrets, true, buildCache, nil)
 }
 
 // buildKSContent is the shared build logic for Flux Kustomization resources,
@@ -330,8 +330,8 @@ func buildKSOutputAtRevision(ctx context.Context, scans *scanCache, gitOps *git.
 // follows Flux controller behavior: recursive discovery, postBuild substitution,
 // optional external GitRepository resolution) and then appends native kustomize
 // overlay outputs.
-func buildKSContent(ctx context.Context, scans *scanCache, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot, clusterPath string, configMaps []flux.ConfigMap, secrets []flux.Secret, quiet bool, cache buildCache) ([]byte, error) {
-	output, err := buildAllKustomizations(ctx, scans, builder, kustomizations, repoRoot, configMaps, secrets, quiet, cache)
+func buildKSContent(ctx context.Context, scans *scanCache, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot, clusterPath string, configMaps []flux.ConfigMap, secrets []flux.Secret, quiet bool, cache buildCache, report *buildReport) ([]byte, error) {
+	output, err := buildAllKustomizations(ctx, scans, builder, kustomizations, repoRoot, configMaps, secrets, quiet, cache, report)
 	if err != nil {
 		return nil, err
 	}
@@ -360,7 +360,7 @@ func buildKSContent(ctx context.Context, scans *scanCache, builder *kustomize.Bu
 // applies postBuild variable substitution from configMaps and secrets, and
 // recursively discovers and builds new Kustomization resources found in the
 // output (following Flux Kustomize controller behavior).
-func buildAllKustomizations(ctx context.Context, scans *scanCache, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot string, configMaps []flux.ConfigMap, secrets []flux.Secret, quiet bool, cache buildCache) ([]byte, error) {
+func buildAllKustomizations(ctx context.Context, scans *scanCache, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot string, configMaps []flux.ConfigMap, secrets []flux.Secret, quiet bool, cache buildCache, report *buildReport) ([]byte, error) {
 	// Track already-processed KS by "namespace/name" to prevent duplicates.
 	seen := make(map[string]bool)
 	var results []string
@@ -410,7 +410,19 @@ func buildAllKustomizations(ctx context.Context, scans *scanCache, builder *kust
 			}
 
 			if sourcePath == "" {
-				// Source not found locally — skip gracefully (KS resource only).
+				// Source not found locally — warn and include the KS
+				// resource only. Validate additionally fails on this: its
+				// resources would be silently absent from the checked set.
+				if ks.Spec.Path != "" {
+					fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally, skipping its resources\n",
+						ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path)
+					if report != nil {
+						report.missingPaths = append(report.missingPaths, missingPath{
+							ks:   fmt.Sprintf("%s/%s", ks.Metadata.Namespace, ks.Metadata.Name),
+							path: ks.Spec.Path,
+						})
+					}
+				}
 				if ksYAML != nil {
 					results = append(results, string(ksYAML))
 				}

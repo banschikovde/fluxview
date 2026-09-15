@@ -19,7 +19,7 @@ docker run --rm -v $(pwd):/repo -w /repo ghcr.io/banschikovde/fluxview:latest \
 
 - **build** — assemble Kustomization and HelmRelease resources
 - **diff** — per-resource comparison against a git revision
-- **validate** — validate resources against CRD schemas (Flux CRDs + any custom)
+- **validate** — schema validation via the kubeconform engine: native Kubernetes kinds out of the box, Flux/custom CRD schemas via `--schema-dir`; supports `--strict`, `--skip-kind`, `--output json|junit`
 - Recursive Kustomization discovery following `spec.path` into shared bases (Flux controller behavior)
 - postBuild variable substitution from ConfigMaps and Secrets (Secret values redacted with a placeholder)
 - On-disk caching of Helm charts, remote resources, and kustomize builds — warm runs make no network requests and skip kustomize entirely ([details](docs/caching.md))
@@ -82,14 +82,40 @@ Diff output is per-resource — each changed resource gets its own header follow
 ### validate — validate resources
 
 ```bash
-# Validate against CRD schemas (defaults to /crds/ or ./crds/)
+# Kubernetes resources are validated out of the box (schemas for
+# --kubernetes-version, downloaded on first use and cached)
 fluxview validate --path clusters/prod/flux/
 
-# Specify schema directory
-fluxview validate --path clusters/prod/flux/ --schema-dir /crds
+# Add schemas for Flux CRDs and custom resources
+fluxview validate --path clusters/prod/flux/ --schema-dir /schemas
+
+# Pin a different Kubernetes schema version
+fluxview validate --path clusters/prod/flux/ --kubernetes-version 1.34.0
+
+# Strict mode: reject duplicated YAML keys; strict default-registry
+# schemas also reject unknown fields
+fluxview validate --path clusters/prod/flux/ --strict
+
+# Full offline mode: unpack a kubernetes-json-schema checkout into the
+# schema directory — native kinds validate locally, no network
+mkdir -p schemas/kubernetes-json-schema
+cp -r /path/to/kubernetes-json-schema/v1.36.1-standalone* schemas/kubernetes-json-schema/
 ```
 
-Two schema formats are supported: **JSON Schema** (`.json`, kubeconform-compatible — e.g. `crd-schemas.tar.gz` from flux2 releases) and **CRD YAML** (`.yaml`/`.yml`). Missing schemas never break the pipeline — resources without a matching schema are silently skipped.
+Validation uses the [kubeconform](https://github.com/yannh/kubeconform) engine. Schema sources, in priority order (first match wins):
+
+1. `--schema-dir` (default: `/schemas/` or `./schemas/`):
+   - **JSON Schema** files (`.json`, kubeconform-compatible — e.g. `crd-schemas.tar.gz` from flux2 releases)
+   - **CRD YAML** manifests (`.yaml`/`.yml`, converted on the fly)
+2. A **kubernetes-json-schema checkout** found in or one level under `--schema-dir`: directories named `v<version>-standalone[-strict]` — the same layout the default registry serves. Grab the dirs for your `--kubernetes-version` from [yannh/kubernetes-json-schema](https://github.com/yannh/kubernetes-json-schema), `-standalone-strict` too if you use `--strict`.
+3. The default registry of Kubernetes schemas for `--kubernetes-version`: before validation, the needed schemas are downloaded in parallel into the local cache (per-request timeout `--schema-download-timeout`, retries, interruptible) and validation then reads them from disk — it never waits on the network. A registry failure (other than a missing schema) fails the run (exit 2) instead of hanging or silently skipping.
+
+Behavior:
+
+- Resources without a matching schema are silently skipped; an unreadable `--schema-dir` — or one containing a malformed CRD YAML file or a schema that cannot be converted — fails the run, so typos and corrupt schema sources don't silently disable CRD validation.
+- `--kubernetes-version` must be a full `X.Y.Z` version (or `master`); anything else fails fast (exit 2) — a short form like `1.36` would 404 every native-kind schema and look like a green run while validating nothing. If the registry has no schema for any of the fetched kinds (a published-but-wrong version looks exactly like that), validate warns about the mass skip.
+- A failed kustomize build or a Kustomization whose `spec.path` is missing from the repository (suspended ones exempt) fails the run (exit 2) — a validation gate must not report success on a partial build.
+- `--output json` / `--output junit` emit a machine-readable report to stdout for CI.
 
 ## Flags
 
@@ -102,7 +128,12 @@ Two schema formats are supported: **JSON Schema** (`.json`, kubeconform-compatib
 | `--unified` | diff | Context lines (default: 3) |
 | `--skip-crds` | build, diff | Skip CustomResourceDefinition resources |
 | `--strip-attrs` | build, diff | Comma-separated keys to strip (e.g. `helm.sh/chart,status`) |
-| `--schema-dir` | validate | Schema files directory |
+| `--schema-dir` | validate | Directory with schemas: kubeconform JSON files, CRD YAML manifests and/or a kubernetes-json-schema checkout (default: `/schemas/` or `./schemas/`) |
+| `--kubernetes-version` | validate | Kubernetes version (full `X.Y.Z` like `1.34.0`, or `master`) for the default schema location (default: `1.36.1`) |
+| `--schema-download-timeout` | validate | Per-request timeout for downloading Kubernetes schemas (e.g. `30s`, `1m`; `0` = no limit, Ctrl-C still interrupts; default: `30s`) |
+| `--strict` | validate | Reject duplicated YAML keys; strict default-registry schemas also reject unknown fields |
+| `--skip-kind` | validate | Kinds to skip (repeatable or comma-separated): `Deployment` (any apiVersion) or `apps/v1/Deployment` |
+| `--output` | validate | Output format: `text` (default, stderr), `json` or `junit` (stdout, per-resource statuses + summary) |
 
 Cache flags (`--helm-*`, `--remote-*`, `--build-*`) share one pattern: `--<name>-cache-dir` (`off`/`none` disables) and `--<name>-cache-ttl` (`0` always bypasses) — see [docs/caching.md](docs/caching.md).
 
@@ -117,7 +148,7 @@ Cache flags (`--helm-*`, `--remote-*`, `--build-*`) share one pattern: `--<name>
 
 ## Caching
 
-Three independent on-disk caches — Helm charts, remote kustomize resources, kustomize build outputs — all under `~/.cache/fluxview/` by default, so a single volume mount covers them. Both sides of a `diff` share one warm copy of everything. Defaults: indexes and floating remote refs re-check every `10m`, build outputs valid for `24h`.
+Four independent on-disk caches — Helm charts, remote kustomize resources, kustomize build outputs, downloaded validation schemas — all under `~/.cache/fluxview/` by default, so a single volume mount covers them. Both sides of a `diff` share one warm copy of everything. Defaults: indexes and floating remote refs re-check every `10m`, build outputs valid for `24h`, validation schemas never expire (they are version-pinned); schemas converted from CRD YAML manifests are cached too, reconverted only when a source file changes.
 
 Details, caveats, and per-cache flags/env vars: [docs/caching.md](docs/caching.md).
 
@@ -132,13 +163,13 @@ The image runs as a fixed non-root user; caches live inside the container unless
 
 ## CRD schemas
 
-Download Flux CRD schemas:
+Kubernetes resource schemas are fetched automatically (kubeconform default registry, cached under `~/.cache/fluxview/schemas` — see `--kubernetes-version`). CRD schemas come from `--schema-dir` (default `/schemas/` or `./schemas/`): for Flux CRDs, download the schemas:
 
 ```bash
-wget -qO- "https://github.com/fluxcd/flux2/releases/download/v2.9.1/crd-schemas.tar.gz" | tar xzf - -C ./crds
+wget -qO- "https://github.com/fluxcd/flux2/releases/download/v2.9.1/crd-schemas.tar.gz" | tar xzf - -C ./schemas
 ```
 
-For custom CRDs (VictoriaMetrics, Kyverno, etc.), place YAML files alongside.
+For other CRDs (VictoriaMetrics, Kyverno, etc.), place their YAML manifests alongside.
 
 ## CI
 
@@ -157,7 +188,20 @@ fluxview:diff:
         --strip-attrs helm.sh/chart,checksum/cm,status --skip-crds --color never
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+fluxview:validate:
+  image: ghcr.io/banschikovde/fluxview:latest
+  before_script:
+    - git config --global --add safe.directory "${CI_PROJECT_DIR}"
+  script:
+    - fluxview validate --path clusters/prod/flux/ --schema-dir ./schemas --output junit > fluxview-validate.xml
+  artifacts:
+    when: always
+    reports:
+      junit: fluxview-validate.xml
 ```
+
+The validate job fails with exit 3 on invalid resources; `artifacts.when: always` still uploads the JUnit report, which GitLab renders in the merge-request test summary. Exit 2 means the run itself is broken (failed kustomize build, missing `spec.path`, unreadable schema dir) — no report is produced in that case.
 
 To keep downloads between jobs, cache the cache directories — see [docs/caching.md](docs/caching.md#caching-between-ci-jobs).
 
