@@ -240,6 +240,61 @@ func (r *OCIRepositoryRef) HasDigest() bool {
 	return r != nil && r.Digest != ""
 }
 
+// GitRepository represents a Flux GitRepository resource.
+type GitRepository struct {
+	APIVersion string            `yaml:"apiVersion"`
+	Kind       string            `yaml:"kind"`
+	Metadata   ObjectMeta        `yaml:"metadata"`
+	Spec       GitRepositorySpec `yaml:"spec"`
+}
+
+// GitRepositorySpec holds the spec for a Flux GitRepository.
+//
+// secretRef and proxySecretRef are ignored: only public repositories are
+// fetched. spec.ignore is ignored too — it shapes the source-controller
+// artifact, not the result of building spec.path against a full clone.
+type GitRepositorySpec struct {
+	URL      string            `yaml:"url"`
+	Ref      *GitRepositoryRef `yaml:"ref,omitempty"`
+	Interval any               `yaml:"interval,omitempty"`
+}
+
+// GitRepositoryRef specifies which git ref to check out. Flux makes the
+// fields mutually exclusive via CRD validation; when several are set
+// anyway, resolution follows commit > tag > branch > semver, and no ref
+// at all means the remote HEAD.
+type GitRepositoryRef struct {
+	Branch string `yaml:"branch,omitempty"`
+	Tag    string `yaml:"tag,omitempty"`
+	Semver string `yaml:"semver,omitempty"`
+	Commit string `yaml:"commit,omitempty"`
+}
+
+// RefString returns the canonical ref description used in cache keys and
+// logs: "commit:<sha>", "tag:<tag>", "branch:<branch>", "semver:<range>"
+// or "" (no ref — HEAD). A nil ref is HEAD.
+func (r *GitRepositoryRef) RefString() string {
+	switch {
+	case r == nil || (*r == GitRepositoryRef{}):
+		return ""
+	case r.Commit != "":
+		return "commit:" + r.Commit
+	case r.Tag != "":
+		return "tag:" + r.Tag
+	case r.Branch != "":
+		return "branch:" + r.Branch
+	default:
+		return "semver:" + r.Semver
+	}
+}
+
+// IsPinned reports whether the ref is immutable (commit or tag): a clone
+// at a pinned ref never needs re-fetching. Floating refs (branch, semver
+// or no ref — HEAD) are re-resolved once the cache TTL expires.
+func (r *GitRepositoryRef) IsPinned() bool {
+	return r != nil && (r.Commit != "" || r.Tag != "")
+}
+
 // HelmReleaseChartSpec specifies the chart source.
 type HelmReleaseChartSpec struct {
 	Chart     string `yaml:"chart"`

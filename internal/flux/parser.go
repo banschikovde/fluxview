@@ -99,6 +99,8 @@ type ResourceSnapshot struct {
 	HelmRepositories []HelmRepository
 	// OCIRepositories are Flux OCIRepository resources.
 	OCIRepositories []OCIRepository
+	// GitRepositories are Flux GitRepository resources.
+	GitRepositories []GitRepository
 	// ConfigMaps are plain v1 ConfigMap resources.
 	ConfigMaps []ConfigMap
 	// Secrets are plain v1 Secret resources.
@@ -185,6 +187,11 @@ func (s *ResourceSnapshot) dispatch(path string, node *yaml.Node) {
 		if err := node.Decode(&repo); err == nil {
 			s.OCIRepositories = append(s.OCIRepositories, repo)
 		}
+	case kind == KindGitRepository && isSourceAPI(apiVersion):
+		var repo GitRepository
+		if err := node.Decode(&repo); err == nil {
+			s.GitRepositories = append(s.GitRepositories, repo)
+		}
 	case kind == "ConfigMap" && apiVersion == "v1":
 		var cm ConfigMap
 		if err := node.Decode(&cm); err != nil {
@@ -236,6 +243,15 @@ func (p *Parser) ParseOCIRepositories(ctx context.Context) ([]OCIRepository, err
 		return nil, err
 	}
 	return snap.OCIRepositories, nil
+}
+
+// ParseGitRepositories discovers all Flux GitRepository resources under the root path.
+func (p *Parser) ParseGitRepositories(ctx context.Context) ([]GitRepository, error) {
+	snap, err := p.snapshotOf(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return snap.GitRepositories, nil
 }
 
 // ParseConfigMaps discovers all Kubernetes ConfigMap resources under the root path.

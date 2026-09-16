@@ -452,7 +452,7 @@ spec:
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	output, err := buildKSContent(ctx, newScanCache(), builder, kustomizations, repoRoot, clusterPath, nil, nil, true, buildCache, nil)
+	output, err := buildKSContent(ctx, newScanCache(), builder, kustomizations, repoRoot, clusterPath, nil, nil, true, buildCache, nil, nil)
 	if err != nil {
 		t.Fatalf("buildKSContent: %v", err)
 	}
@@ -524,7 +524,7 @@ spec:
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	output, err := buildAllKustomizations(ctx, newScanCache(), builder, kustomizations, repoRoot, nil, nil, true, buildCache, nil)
+	output, err := buildAllKustomizations(ctx, newScanCache(), builder, kustomizations, repoRoot, repoRoot, nil, nil, true, buildCache, nil, nil)
 	if err != nil {
 		t.Fatalf("buildAllKustomizations: %v", err)
 	}
@@ -610,7 +610,7 @@ spec:
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	output, err := buildAllKustomizations(ctx, newScanCache(), builder, kustomizations, repoRoot, nil, nil, true, buildCache, nil)
+	output, err := buildAllKustomizations(ctx, newScanCache(), builder, kustomizations, repoRoot, repoRoot, nil, nil, true, buildCache, nil, nil)
 	if err != nil {
 		t.Fatalf("buildAllKustomizations: %v", err)
 	}
@@ -678,7 +678,7 @@ spec:
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	output, err := buildAllKustomizations(ctx, newScanCache(), builder, kustomizations, repoRoot, nil, nil, true, buildCache, nil)
+	output, err := buildAllKustomizations(ctx, newScanCache(), builder, kustomizations, repoRoot, repoRoot, nil, nil, true, buildCache, nil, nil)
 	if err != nil {
 		t.Fatalf("buildAllKustomizations: %v", err)
 	}
@@ -770,7 +770,7 @@ spec:
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	output, err := buildKSContent(ctx, newScanCache(), builder, kustomizations, repoRoot, clusterPath, nil, nil, true, buildCache, nil)
+	output, err := buildKSContent(ctx, newScanCache(), builder, kustomizations, repoRoot, clusterPath, nil, nil, true, buildCache, nil, nil)
 	if err != nil {
 		t.Fatalf("buildKSContent: %v", err)
 	}
@@ -2207,7 +2207,7 @@ spec:
 	cache := make(buildCache)
 
 	stderr := captureStderr(func() {
-		_, _ = buildAllKustomizations(ctx, newScanCache(), builder, kustomizations, repoRoot, nil, nil, true, cache, nil)
+		_, _ = buildAllKustomizations(ctx, newScanCache(), builder, kustomizations, repoRoot, repoRoot, nil, nil, true, cache, nil, nil)
 	})
 
 	// Count "Warning:" lines — should be exactly 1.

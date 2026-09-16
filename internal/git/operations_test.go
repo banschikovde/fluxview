@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
@@ -34,6 +35,82 @@ func TestIsWithinDir(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOriginURL(t *testing.T) {
+	ctx := context.Background()
+
+	newRepoWithRemotes := func(t *testing.T, remotes ...*config.RemoteConfig) *Operations {
+		t.Helper()
+		dir := t.TempDir()
+		repo, err := git.PlainInit(dir, false)
+		if err != nil {
+			t.Fatalf("PlainInit: %v", err)
+		}
+		for _, cfg := range remotes {
+			if _, err := repo.CreateRemote(cfg); err != nil {
+				t.Fatalf("CreateRemote %s: %v", cfg.Name, err)
+			}
+		}
+		ops, err := NewOperations(dir)
+		if err != nil {
+			t.Fatalf("NewOperations: %v", err)
+		}
+		return ops
+	}
+
+	remote := func(name, url string) *config.RemoteConfig {
+		return &config.RemoteConfig{Name: name, URLs: []string{url}}
+	}
+
+	t.Run("origin preferred over other remotes", func(t *testing.T) {
+		ops := newRepoWithRemotes(t,
+			remote("upstream", "https://github.com/fluxcd/flux2.git"),
+			remote("origin", "git@github.com:org/cluster.git"))
+		got, err := ops.OriginURL(ctx)
+		if err != nil {
+			t.Fatalf("OriginURL: %v", err)
+		}
+		if got != "git@github.com:org/cluster.git" {
+			t.Errorf("OriginURL = %q, want the origin URL", got)
+		}
+	})
+
+	t.Run("single remote when no origin", func(t *testing.T) {
+		ops := newRepoWithRemotes(t, remote("upstream", "https://github.com/fluxcd/flux2.git"))
+		got, err := ops.OriginURL(ctx)
+		if err != nil {
+			t.Fatalf("OriginURL: %v", err)
+		}
+		if got != "https://github.com/fluxcd/flux2.git" {
+			t.Errorf("OriginURL = %q, want the single remote URL", got)
+		}
+	})
+
+	t.Run("several remotes without origin are ambiguous", func(t *testing.T) {
+		ops := newRepoWithRemotes(t,
+			remote("upstream", "https://github.com/fluxcd/flux2.git"),
+			remote("fork", "https://github.com/org/flux2.git"))
+		if _, err := ops.OriginURL(ctx); err == nil {
+			t.Fatal("OriginURL with several non-origin remotes must fail")
+		}
+	})
+
+	t.Run("no remotes configured", func(t *testing.T) {
+		ops := newRepoWithRemotes(t)
+		if _, err := ops.OriginURL(ctx); err == nil {
+			t.Fatal("OriginURL on a repo without remotes must fail")
+		}
+	})
+
+	t.Run("cancelled context", func(t *testing.T) {
+		ops := newRepoWithRemotes(t, remote("origin", "https://github.com/org/cluster.git"))
+		cancelled, cancel := context.WithCancel(ctx)
+		cancel()
+		if _, err := ops.OriginURL(cancelled); err == nil {
+			t.Fatal("OriginURL with a cancelled context must fail")
+		}
+	})
 }
 
 // TestCloneToDir_SymlinkEscape creates a real git repo with a malicious

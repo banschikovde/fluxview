@@ -56,6 +56,16 @@ metadata:
 spec:
   url: oci://registry.example.com/charts/podinfo
 ---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: kyverno
+  namespace: kyverno
+spec:
+  url: https://github.com/kyverno/kyverno.git
+  ref:
+    tag: v1.19.1
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -98,6 +108,16 @@ metadata:
 	}
 	if len(snap.OCIRepositories) != 1 || snap.OCIRepositories[0].Metadata.Name != "podinfo-oci" {
 		t.Errorf("OCIRepositories = %+v, want one named podinfo-oci", snap.OCIRepositories)
+	}
+	if len(snap.GitRepositories) != 1 {
+		t.Fatalf("GitRepositories = %+v, want one", snap.GitRepositories)
+	}
+	gr := snap.GitRepositories[0]
+	if gr.Metadata.Name != "kyverno" || gr.Spec.URL != "https://github.com/kyverno/kyverno.git" {
+		t.Errorf("GitRepository = %+v, want kyverno at github.com/kyverno/kyverno.git", gr)
+	}
+	if gr.Spec.Ref == nil || gr.Spec.Ref.Tag != "v1.19.1" || !gr.Spec.Ref.IsPinned() {
+		t.Errorf("GitRepository ref = %+v, want pinned tag v1.19.1", gr.Spec.Ref)
 	}
 	if len(snap.ConfigMaps) != 1 || snap.ConfigMaps[0].Metadata.Name != "cluster-settings" {
 		t.Errorf("ConfigMaps = %+v, want one named cluster-settings", snap.ConfigMaps)

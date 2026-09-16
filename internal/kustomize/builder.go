@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"sigs.k8s.io/kustomize/api/krusty"
@@ -25,6 +26,12 @@ type Builder struct {
 	// buildCache caches kustomize build outputs on disk keyed by the input
 	// file state; nil when disabled.
 	buildCache *buildCache
+	// allowMu guards allowRoots (AllowRoot may be called between Builds).
+	allowMu sync.Mutex
+	// allowRoots lists extra read-only roots admitted into every Build's
+	// restricted filesystem, added lazily by AllowRoot (external git source
+	// clones). Same mechanism as the remote cache directory.
+	allowRoots []string
 }
 
 // BuilderOption configures a Builder created via NewBuilder.
@@ -92,6 +99,37 @@ func (b *Builder) RootDir() string {
 	return b.rootDir
 }
 
+// AllowRoot admits one more read-only root into every subsequent Build's
+// restricted filesystem — used for external git source clone directories,
+// which live outside rootDir exactly like the remote resource cache.
+// Reading anywhere outside rootDir ∪ {remote cache dir} ∪ allowed roots
+// stays impossible; writes stay confined to rootDir.
+func (b *Builder) AllowRoot(dir string) {
+	if dir == "" {
+		return
+	}
+	b.allowMu.Lock()
+	defer b.allowMu.Unlock()
+	for _, existing := range b.allowRoots {
+		if existing == dir {
+			return // already admitted
+		}
+	}
+	b.allowRoots = append(b.allowRoots, dir)
+}
+
+// extraRootSnapshot returns every extra read-only root for a Build.
+func (b *Builder) extraRootSnapshot() []string {
+	extra := make([]string, 0, 1+len(b.allowRoots))
+	if b.remote != nil {
+		extra = append(extra, b.remote.dir)
+	}
+	b.allowMu.Lock()
+	extra = append(extra, b.allowRoots...)
+	b.allowMu.Unlock()
+	return extra
+}
+
 // Build runs kustomize build in the given directory and returns YAML output.
 // File access is restricted to the builder's rootDir to prevent path traversal
 // attacks via malicious kustomization.yaml files.
@@ -127,11 +165,12 @@ func (b *Builder) Build(ctx context.Context, dir string) ([]byte, error) {
 		// after the lookup would freeze floating resources until the build
 		// entry itself expired.
 		b.remote.prepare(ctx, b.rootDir)
-		// Cached remote resources are absolute paths outside rootDir; they
-		// contain only public content this tool fetched on the repository's
-		// behalf, so the restricted filesystem admits exactly that directory.
-		extraRoots = append(extraRoots, b.remote.dir)
 	}
+	// External git source clones (AllowRoot) and the remote cache directory
+	// are absolute paths outside rootDir; they contain only public content
+	// this tool fetched on the repository's behalf, so the restricted
+	// filesystem admits exactly those directories, read-only.
+	extraRoots = b.extraRootSnapshot()
 
 	if b.buildCache != nil {
 		if output, ok := b.buildCache.lookup(b.rootDir, dir, kustFile); ok {

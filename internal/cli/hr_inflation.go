@@ -12,6 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/banschikovde/fluxview/internal/flux"
+	"github.com/banschikovde/fluxview/internal/gitsource"
 	"github.com/banschikovde/fluxview/internal/helm"
 	"github.com/banschikovde/fluxview/internal/kustomize"
 	"github.com/cyphar/filepath-securejoin"
@@ -35,11 +36,13 @@ func (o helmCacheOptions) inflaterOptions() []helm.InflaterOption {
 	}
 }
 
-// kustomizeCacheOptions carries the two kustomize caches from CLI flags/env
-// into the kustomize Builder: the remote resource cache
-// (remoteDir/remoteTtl) and the build output cache
-// (buildCacheDir/buildCacheTTL). Independent of the Helm cache. Both follow
-// the same conventions: dir "off"/"none"/"disabled" disables the cache, ttl 0
+// kustomizeCacheOptions carries the kustomize caches from CLI flags/env
+// into the kustomize Builder and the KS pipeline: the remote resource cache
+// (remoteDir/remoteTtl), the build output cache
+// (buildCacheDir/buildCacheTTL) and the external git source clone cache
+// (gitSourceDir/gitSourceTtl, consumed by buildAllKustomizations — not a
+// Builder option). Independent of the Helm cache. All follow the same
+// conventions: dir "off"/"none"/"disabled" disables the cache, ttl 0
 // always bypasses it (entries are still refreshed on disk).
 type kustomizeCacheOptions struct {
 	remoteDir     string
@@ -47,6 +50,8 @@ type kustomizeCacheOptions struct {
 	remoteTimeout time.Duration
 	buildCacheDir string
 	buildCacheTTL time.Duration
+	gitSourceDir  string
+	gitSourceTtl  time.Duration
 }
 
 func (o kustomizeCacheOptions) builderOptions() []kustomize.BuilderOption {
@@ -77,10 +82,12 @@ func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL, down
 //	--<name>-cache-ttl  freshness window; 0 always bypasses (still writes)
 //
 // Here <name> is "remote" (resources fetched by URL, referenced by
-// kustomizations) and "build" (kustomize build outputs). Defaults come from
+// kustomizations), "build" (kustomize build outputs) and "git-source"
+// (clones of external GitRepository sources). Defaults come from
 // kustomize.DefaultRemoteCacheDir()/DefaultRemoteCacheTTL()/
-// DefaultRemoteCacheTimeout()/DefaultBuildCacheDir()/DefaultBuildCacheTTL().
-func registerKustomizeCacheFlags(cmd *cobra.Command, remoteDir *string, remoteTtl, remoteTimeout *time.Duration, buildCacheDir *string, buildCacheTTL *time.Duration) {
+// DefaultRemoteCacheTimeout()/DefaultBuildCacheDir()/DefaultBuildCacheTTL()/
+// gitsource.DefaultCacheDir()/DefaultTTL().
+func registerKustomizeCacheFlags(cmd *cobra.Command, remoteDir *string, remoteTtl, remoteTimeout *time.Duration, buildCacheDir *string, buildCacheTTL *time.Duration, gitSourceDir *string, gitSourceTtl *time.Duration) {
 	cmd.Flags().StringVar(remoteDir, "remote-cache-dir", kustomize.DefaultRemoteCacheDir(),
 		"Cache directory for remote resources referenced by kustomizations; off/none disables")
 	cmd.Flags().DurationVar(remoteTtl, "remote-cache-ttl", kustomize.DefaultRemoteCacheTTL(),
@@ -91,6 +98,10 @@ func registerKustomizeCacheFlags(cmd *cobra.Command, remoteDir *string, remoteTt
 		"Cache directory for kustomize build outputs, reused while input files are unchanged; off/none disables (env: FLUXVIEW_BUILD_CACHE_DIR)")
 	cmd.Flags().DurationVar(buildCacheTTL, "build-cache-ttl", kustomize.DefaultBuildCacheTTL(),
 		"How long cached kustomize build outputs stay usable; 0 always rebuilds (entries are still refreshed) (env: FLUXVIEW_BUILD_CACHE_TTL)")
+	cmd.Flags().StringVar(gitSourceDir, "git-source-cache-dir", gitsource.DefaultCacheDir(),
+		"Cache directory for clones of external GitRepository sources; off/none disables reuse (env: FLUXVIEW_GIT_SOURCE_CACHE_DIR)")
+	cmd.Flags().DurationVar(gitSourceTtl, "git-source-cache-ttl", gitsource.DefaultTTL(),
+		"How long floating external source resolutions (branch/semver/HEAD) stay fresh; pinned commit/tag clones never expire; 0 always re-resolves (env: FLUXVIEW_GIT_SOURCE_CACHE_TTL)")
 }
 
 // buildHRInflation discovers HelmReleases through the Flux Kustomization pipeline
@@ -104,7 +115,10 @@ func registerKustomizeCacheFlags(cmd *cobra.Command, remoteDir *string, remoteTt
 // strict (diff mode) turns skip-worthy inflation failures into a returned
 // error instead of a warning + skip, so an unbuildable state never produces a
 // misleading partial diff.
-func buildHRInflation(ctx context.Context, scans *scanCache, clusterPath, repoRoot, name, namespace string, quiet, strict bool, helmCache helmCacheOptions, ksCache kustomizeCacheOptions) ([]byte, error) {
+//
+// gitSources enables external GitRepository source fetching for the
+// Kustomization pipeline stage (nil keeps it local-only).
+func buildHRInflation(ctx context.Context, scans *scanCache, clusterPath, repoRoot, name, namespace string, quiet, strict bool, helmCache helmCacheOptions, ksCache kustomizeCacheOptions, gitSources *gitSourceEnv) ([]byte, error) {
 	kustomizations, err := scans.parserFor(clusterPath).ParseKustomizations(ctx)
 	if err != nil {
 		return nil, nil // no Flux KS — valid for diff
@@ -115,7 +129,7 @@ func buildHRInflation(ctx context.Context, scans *scanCache, clusterPath, repoRo
 	configMaps := resolveConfigMaps(ctx, scans, clusterPath, builder, buildCache)
 	secrets := resolveSecrets(ctx, scans, clusterPath, builder, buildCache)
 
-	output, err := buildKSContent(ctx, scans, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, true, buildCache, nil)
+	output, err := buildKSContent(ctx, scans, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, true, buildCache, nil, gitSources)
 	if err != nil {
 		return nil, err
 	}

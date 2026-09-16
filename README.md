@@ -115,6 +115,7 @@ Behavior:
 - Resources without a matching schema are silently skipped; an unreadable `--schema-dir` — or one containing a malformed CRD YAML file or a schema that cannot be converted — fails the run, so typos and corrupt schema sources don't silently disable CRD validation.
 - `--kubernetes-version` must be a full `X.Y.Z` version (or `master`); anything else fails fast (exit 2) — a short form like `1.36` would 404 every native-kind schema and look like a green run while validating nothing. If the registry has no schema for any of the fetched kinds (a published-but-wrong version looks exactly like that), validate warns about the mass skip.
 - A failed kustomize build or a Kustomization whose `spec.path` is missing from the repository (suspended ones exempt) fails the run (exit 2) — a validation gate must not report success on a partial build.
+- Kustomizations whose `sourceRef` names an **external** `GitRepository` (a repository other than the local origin, e.g. a dedicated CRDs upstream like `kyverno/kyverno`) are fetched into the [git source cache](docs/caching.md) and their resources are built, diffed and validated like local ones — including directories of loose YAML files without a `kustomization.yaml`. The path always resolves against the upstream clone (Flux source-first semantics), even when a same-name directory exists locally. A broken manifest in the upstream fails the gate; an unreachable upstream fails validate (exit 2) and warns-and-skips in build/diff. OCIRepository/Bucket sources stay outside the checkout and keep the missing-path behavior.
 - `--output json` / `--output junit` emit a machine-readable report to stdout for CI.
 
 ## Flags
@@ -135,7 +136,7 @@ Behavior:
 | `--skip-kind` | validate | Kinds to skip (repeatable or comma-separated): `Deployment` (any apiVersion) or `apps/v1/Deployment` |
 | `--output` | validate | Output format: `text` (default, stderr), `json` or `junit` (stdout, per-resource statuses + summary) |
 
-Cache flags (`--helm-*`, `--remote-*`, `--build-*`) share one pattern: `--<name>-cache-dir` (`off`/`none` disables) and `--<name>-cache-ttl` (`0` always bypasses). On slow networks, `--helm-download-timeout` and `--remote-cache-timeout` (`0` = no limit) let downloads wait as long as the link needs instead of being cut off after `2m`/`30s` — see [docs/caching.md](docs/caching.md).
+Cache flags (`--helm-*`, `--remote-*`, `--build-*`, `--git-source-*`) share one pattern: `--<name>-cache-dir` (`off`/`none` disables) and `--<name>-cache-ttl` (`0` always bypasses). On slow networks, `--helm-download-timeout` and `--remote-cache-timeout` (`0` = no limit) let downloads wait as long as the link needs instead of being cut off after `2m`/`30s` — see [docs/caching.md](docs/caching.md).
 
 ## Exit codes
 
@@ -148,7 +149,7 @@ Cache flags (`--helm-*`, `--remote-*`, `--build-*`) share one pattern: `--<name>
 
 ## Caching
 
-Four independent on-disk caches — Helm charts, remote kustomize resources, kustomize build outputs, downloaded validation schemas — all under `~/.cache/fluxview/` by default, so a single volume mount covers them. Both sides of a `diff` share one warm copy of everything. Defaults: indexes and floating remote refs re-check every `10m`, build outputs valid for `24h`, validation schemas never expire (they are version-pinned); schemas converted from CRD YAML manifests are cached too, reconverted only when a source file changes.
+Six independent on-disk caches — Helm charts, remote kustomize resources, kustomize build outputs, clones of external GitRepository sources, downloaded validation schemas, CRD schemas converted from YAML — all under `~/.cache/fluxview/` by default, so a single volume mount covers them. Both sides of a `diff` share one warm copy of everything. Defaults: indexes, floating remote refs and floating external source resolutions re-check every `10m`, build outputs valid for `24h`, validation schemas never expire (they are version-pinned); pinned external source clones (tag/commit) are immutable and never re-fetched.
 
 Details, caveats, and per-cache flags/env vars: [docs/caching.md](docs/caching.md).
 

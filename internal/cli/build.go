@@ -34,6 +34,8 @@ type BuildFlags struct {
 	RemoteCacheTimeout  time.Duration
 	BuildCacheDir       string
 	BuildCacheTTL       time.Duration
+	GitSourceCacheDir   string
+	GitSourceCacheTTL   time.Duration
 }
 
 func newBuildCmd() *cobra.Command {
@@ -65,7 +67,7 @@ Examples:
 	cmd.Flags().BoolVar(&flags.SkipCRDs, "skip-crds", false, "Skip CustomResourceDefinition resources in output")
 	cmd.Flags().StringVar(&flags.StripAttrs, "strip-attrs", "", "Comma-separated keys to strip from output (e.g. helm.sh/chart,status)")
 	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL, &flags.HelmDownloadTimeout)
-	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.RemoteCacheTimeout, &flags.BuildCacheDir, &flags.BuildCacheTTL)
+	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.RemoteCacheTimeout, &flags.BuildCacheDir, &flags.BuildCacheTTL, &flags.GitSourceCacheDir, &flags.GitSourceCacheTTL)
 
 	return cmd
 }
@@ -128,13 +130,16 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return NewExitError(fmt.Errorf("parsing Kustomization resources: %w", err), ExitCodeError)
 	}
 
-	builder := kustomize.NewBuilder(repoRoot, kustomizeCacheOptions{
+	ksCache := kustomizeCacheOptions{
 		remoteDir:     flags.RemoteCacheDir,
 		remoteTtl:     flags.RemoteCacheTTL,
 		remoteTimeout: flags.RemoteCacheTimeout,
 		buildCacheDir: flags.BuildCacheDir,
 		buildCacheTTL: flags.BuildCacheTTL,
-	}.builderOptions()...)
+		gitSourceDir:  flags.GitSourceCacheDir,
+		gitSourceTtl:  flags.GitSourceCacheTTL,
+	}
+	builder := kustomize.NewBuilder(repoRoot, ksCache.builderOptions()...)
 	buildCache := make(buildCache)
 	configMaps := resolveConfigMaps(ctx, scans, clusterPath, builder, buildCache)
 	secrets := resolveSecrets(ctx, scans, clusterPath, builder, buildCache)
@@ -153,7 +158,9 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		}
 	}
 
-	output, err := buildKSContent(ctx, scans, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, false, buildCache, nil)
+	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache)
+	defer gitEnv.Close()
+	output, err := buildKSContent(ctx, scans, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, false, buildCache, nil, gitEnv)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}
@@ -194,15 +201,20 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return NewExitError(fmt.Errorf("no Kustomization files found in %s", clusterPath), ExitCodeError)
 	}
 
+	ksCache := kustomizeCacheOptions{
+		remoteDir:     flags.RemoteCacheDir,
+		remoteTtl:     flags.RemoteCacheTTL,
+		remoteTimeout: flags.RemoteCacheTimeout,
+		buildCacheDir: flags.BuildCacheDir,
+		buildCacheTTL: flags.BuildCacheTTL,
+		gitSourceDir:  flags.GitSourceCacheDir,
+		gitSourceTtl:  flags.GitSourceCacheTTL,
+	}
+	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache)
+	defer gitEnv.Close()
 	output, err := buildHRInflation(ctx, newScanCache(), clusterPath, repoRoot, name, flags.Namespace, false, false,
 		helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout},
-		kustomizeCacheOptions{
-			remoteDir:     flags.RemoteCacheDir,
-			remoteTtl:     flags.RemoteCacheTTL,
-			remoteTimeout: flags.RemoteCacheTimeout,
-			buildCacheDir: flags.BuildCacheDir,
-			buildCacheTTL: flags.BuildCacheTTL,
-		})
+		ksCache, gitEnv)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}
@@ -276,11 +288,13 @@ type buildCache map[string]buildResult
 
 // buildReport collects non-fatal build anomalies that a strict validation
 // gate treats as failures: Flux Kustomizations whose declared spec.path is
-// absent from the local repository, whose resources are then silently
-// missing from the build output. A nil report means "don't collect" —
-// build and diff stay lenient (warn only).
+// absent from the local repository (or from the fetched external source
+// clone), and external sources that could not be fetched — in both cases
+// the resources are silently missing from the build output. A nil report
+// means "don't collect" — build and diff stay lenient (warn only).
 type buildReport struct {
 	missingPaths []missingPath
+	fetchErrors  []fetchError
 }
 
 // missingPath is one Flux Kustomization pointing at a path that could not
@@ -288,6 +302,14 @@ type buildReport struct {
 type missingPath struct {
 	ks   string // "namespace/name"
 	path string // the declared spec.path
+}
+
+// fetchError is one Flux Kustomization whose external GitRepository source
+// could not be fetched, so its resources are missing from the output.
+type fetchError struct {
+	ks     string // "namespace/name"
+	source string // e.g. "GitRepository kyverno/kyverno"
+	err    string
 }
 
 // buildDirCached runs builder.Build(dir) at most once per dir per cache

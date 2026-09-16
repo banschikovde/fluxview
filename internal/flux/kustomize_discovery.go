@@ -252,6 +252,7 @@ type ParsedResources struct {
 	HelmReleases     []HelmRelease
 	HelmRepositories []HelmRepository
 	OCIRepositories  []OCIRepository
+	GitRepositories  []GitRepository
 	ConfigMaps       []ConfigMap
 	Secrets          []Secret
 }
@@ -300,6 +301,11 @@ func (r *ParsedResources) dispatch(kind, apiVersion string, node *yaml.Node) {
 		if err := node.Decode(&repo); err == nil {
 			r.OCIRepositories = append(r.OCIRepositories, repo)
 		}
+	case kind == KindGitRepository && isSourceAPI(apiVersion):
+		var repo GitRepository
+		if err := node.Decode(&repo); err == nil {
+			r.GitRepositories = append(r.GitRepositories, repo)
+		}
 	case kind == "ConfigMap" && apiVersion == "v1":
 		var cm ConfigMap
 		if err := node.Decode(&cm); err == nil {
@@ -328,6 +334,12 @@ func ParseSecretsFromBytes(data []byte) []Secret {
 func ParseKustomizationsFromBytes(data []byte) []Kustomization {
 	return parseResourcesFromBytes[Kustomization](data, func(kind, api string) bool {
 		return kind == KindKustomization && isKustomizeAPI(api)
+	})
+}
+
+func ParseGitRepositoriesFromBytes(data []byte) []GitRepository {
+	return parseResourcesFromBytes[GitRepository](data, func(kind, api string) bool {
+		return kind == KindGitRepository && isSourceAPI(api)
 	})
 }
 

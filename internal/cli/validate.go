@@ -44,6 +44,8 @@ type ValidateFlags struct {
 	RemoteCacheTimeout    time.Duration
 	BuildCacheDir         string
 	BuildCacheTTL         time.Duration
+	GitSourceCacheDir     string
+	GitSourceCacheTTL     time.Duration
 
 	// disableDefaultSchemas drops the default HTTP schema registry. It has
 	// no flag — only tests set it, to keep them offline.
@@ -119,7 +121,7 @@ Examples:
 	cmd.Flags().BoolVar(&flags.Strict, "strict", false, "Reject duplicated YAML keys; strict schemas for the default registry also reject unknown fields")
 	cmd.Flags().StringSliceVar(&flags.SkipKinds, "skip-kind", nil, "Kinds to skip (repeatable or comma-separated): Kind (e.g. Deployment, any apiVersion) or apiVersion/Kind (e.g. apps/v1/Deployment)")
 	cmd.Flags().StringVar(&flags.Output, "output", "text", "Output format: text, json or junit (machine formats go to stdout)")
-	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.RemoteCacheTimeout, &flags.BuildCacheDir, &flags.BuildCacheTTL)
+	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.RemoteCacheTimeout, &flags.BuildCacheDir, &flags.BuildCacheTTL, &flags.GitSourceCacheDir, &flags.GitSourceCacheTTL)
 
 	return cmd
 }
@@ -194,19 +196,24 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 		return NewExitError(fmt.Errorf("parsing Kustomization resources: %w", err), ExitCodeError)
 	}
 
-	builder := kustomize.NewBuilder(repoRoot, kustomizeCacheOptions{
+	ksCache := kustomizeCacheOptions{
 		remoteDir:     flags.RemoteCacheDir,
 		remoteTtl:     flags.RemoteCacheTTL,
 		remoteTimeout: flags.RemoteCacheTimeout,
 		buildCacheDir: flags.BuildCacheDir,
 		buildCacheTTL: flags.BuildCacheTTL,
-	}.builderOptions()...)
+		gitSourceDir:  flags.GitSourceCacheDir,
+		gitSourceTtl:  flags.GitSourceCacheTTL,
+	}
+	builder := kustomize.NewBuilder(repoRoot, ksCache.builderOptions()...)
 	buildCache := make(buildCache)
 	var report buildReport
 	configMaps := resolveConfigMaps(ctx, scans, absClusterPath, builder, buildCache)
 	secrets := resolveSecrets(ctx, scans, absClusterPath, builder, buildCache)
 
-	output, err := buildKSContent(ctx, scans, builder, kustomizations, repoRoot, absClusterPath, configMaps, secrets, false, buildCache, &report)
+	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache)
+	defer gitEnv.Close()
+	output, err := buildKSContent(ctx, scans, builder, kustomizations, repoRoot, absClusterPath, configMaps, secrets, false, buildCache, &report, gitEnv)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}
@@ -230,6 +237,19 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 		}
 		return NewExitError(fmt.Errorf(
 			"%d Kustomization(s) point to a path missing from the repository, cannot validate: %s",
+			len(parts), strings.Join(parts, ", ")), ExitCodeError)
+	}
+
+	// And for external GitRepository sources that could not be fetched:
+	// validating the surviving subset would report success while the
+	// external resources went unchecked.
+	if len(report.fetchErrors) > 0 {
+		parts := make([]string, len(report.fetchErrors))
+		for i, fe := range report.fetchErrors {
+			parts[i] = fe.ks + " (" + fe.source + ": " + fe.err + ")"
+		}
+		return NewExitError(fmt.Errorf(
+			"%d Kustomization(s) failed to fetch their external source, cannot validate: %s",
 			len(parts), strings.Join(parts, ", ")), ExitCodeError)
 	}
 

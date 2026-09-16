@@ -393,18 +393,32 @@ metadata:
   namespace: flux-system
 spec:
   url: oci://registry.example.com/charts/podinfo
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: kyverno
+  namespace: kyverno
+spec:
+  url: https://github.com/kyverno/kyverno.git
+  ref:
+    tag: v1.19.1
 `
 	data := []byte(input)
 	all := ParseAllFromBytes(data)
 
 	cms := ParseConfigMapsFromBytes(data)
 	secrets := ParseSecretsFromBytes(data)
+	grs := ParseGitRepositoriesFromBytes(data)
 
 	if !reflect.DeepEqual(all.ConfigMaps, cms) {
 		t.Errorf("ConfigMaps mismatch: %+v vs %+v", all.ConfigMaps, cms)
 	}
 	if !reflect.DeepEqual(all.Secrets, secrets) {
 		t.Errorf("Secrets mismatch: %+v vs %+v", all.Secrets, secrets)
+	}
+	if !reflect.DeepEqual(all.GitRepositories, grs) {
+		t.Errorf("GitRepositories mismatch: %+v vs %+v", all.GitRepositories, grs)
 	}
 
 	// Spot-check the extracted values themselves.
@@ -417,8 +431,56 @@ spec:
 	if len(all.OCIRepositories) != 1 || all.OCIRepositories[0].Spec.URL != "oci://registry.example.com/charts/podinfo" {
 		t.Errorf("OCIRepositories = %+v, want one podinfo OCI repo URL", all.OCIRepositories)
 	}
+	if len(all.GitRepositories) != 1 || all.GitRepositories[0].Spec.Ref == nil || all.GitRepositories[0].Spec.Ref.Tag != "v1.19.1" {
+		t.Errorf("GitRepositories = %+v, want one kyverno at tag v1.19.1", all.GitRepositories)
+	}
 	if len(all.ConfigMaps) != 1 || all.ConfigMaps[0].Data["CLUSTER_NAME"] != "prod" {
 		t.Errorf("ConfigMaps = %+v, want one with CLUSTER_NAME=prod", all.ConfigMaps)
+	}
+}
+
+func TestParseGitRepositoriesFromBytes(t *testing.T) {
+	input := `apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: fleet
+  namespace: flux-system
+spec:
+  url: https://github.com/org/cluster.git
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: kyverno
+  namespace: kyverno
+spec:
+  url: https://github.com/kyverno/kyverno.git
+  ref:
+    branch: release-1.19
+---
+# wrong group — must not match
+apiVersion: example.com/v1
+kind: GitRepository
+metadata:
+  name: fake
+spec:
+  url: https://example.com/repo.git
+`
+	repos := ParseGitRepositoriesFromBytes([]byte(input))
+	if len(repos) != 2 {
+		t.Fatalf("got %d GitRepositories, want 2: %+v", len(repos), repos)
+	}
+	if repos[0].Metadata.Name != "fleet" || repos[0].Spec.Ref != nil {
+		t.Errorf("repos[0] = %+v, want fleet with no ref (HEAD)", repos[0])
+	}
+	if repos[1].Metadata.Name != "kyverno" || repos[1].Spec.Ref == nil || repos[1].Spec.Ref.Branch != "release-1.19" {
+		t.Errorf("repos[1] = %+v, want kyverno at branch release-1.19", repos[1])
+	}
+}
+
+func TestParseGitRepositoriesFromBytes_Empty(t *testing.T) {
+	if repos := ParseGitRepositoriesFromBytes(nil); repos != nil {
+		t.Errorf("ParseGitRepositoriesFromBytes(nil) = %+v, want nil", repos)
 	}
 }
 

@@ -122,3 +122,72 @@ func TestRestrictedFs_BlocksSymlinkEscape(t *testing.T) {
 		t.Error("expected error reading symlink that escapes rootDir")
 	}
 }
+
+// TestBuilderAllowRoot builds from an external git source clone admitted
+// via AllowRoot: a kustomization inside the clone builds successfully, a
+// reference to a directory that is neither rootDir nor an allowed root
+// stays blocked, and the clone itself stays read-only (no writes escape
+// rootDir even into allowed roots).
+func TestBuilderAllowRoot(t *testing.T) {
+	rootDir := t.TempDir()
+
+	// The "clone": a kustomization tree outside rootDir, plus a neighbor
+	// directory that is NOT allowed.
+	cloneDir := t.TempDir()
+	crdsDir := filepath.Join(cloneDir, "config", "crds")
+	writeTestFile(t, filepath.Join(crdsDir, "crd.yaml"),
+		"apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: policies.kyverno.io\n")
+	writeTestFile(t, filepath.Join(crdsDir, "kustomization.yaml"),
+		"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - crd.yaml\n")
+
+	forbiddenDir := t.TempDir()
+	writeTestFile(t, filepath.Join(forbiddenDir, "secret.yaml"),
+		"apiVersion: v1\nkind: Secret\nmetadata:\n  name: leaked\n")
+
+	// An overlay in rootDir that mixes the clone (allowed) with the
+	// forbidden neighbor (must stay blocked).
+	mixDir := filepath.Join(rootDir, "mix")
+	relClone, err := filepath.Rel(mixDir, crdsDir)
+	if err != nil {
+		t.Fatalf("filepath.Rel: %v", err)
+	}
+	writeTestFile(t, filepath.Join(mixDir, "kustomization.yaml"),
+		"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - "+relClone+"\n")
+
+	builder := NewBuilder(rootDir)
+
+	// Before AllowRoot the clone is unreachable.
+	if _, err := builder.Build(context.Background(), crdsDir); err == nil {
+		t.Fatal("build from a foreign directory must fail before AllowRoot")
+	}
+
+	builder.AllowRoot(cloneDir)
+
+	// After AllowRoot the clone builds.
+	output, err := builder.Build(context.Background(), crdsDir)
+	if err != nil {
+		t.Fatalf("build from allowed clone failed: %v", err)
+	}
+	if !strings.Contains(string(output), "policies.kyverno.io") {
+		t.Errorf("expected the CRD in the clone build output, got: %s", output)
+	}
+
+	// The root overlay referencing the allowed clone works too.
+	if _, err := builder.Build(context.Background(), mixDir); err != nil {
+		t.Errorf("root overlay referencing the allowed clone failed: %v", err)
+	}
+
+	// A directory outside rootDir ∪ allowed roots stays blocked.
+	blockedDir := filepath.Join(forbiddenDir, "sub")
+	writeTestFile(t, filepath.Join(blockedDir, "kustomization.yaml"),
+		"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - ../secret.yaml\n")
+	if _, err := builder.Build(context.Background(), blockedDir); err == nil {
+		t.Fatal("build from a non-allowed foreign directory must stay blocked")
+	}
+
+	// Writes into an allowed root stay forbidden (extra roots are read-only).
+	fs := newRestrictedFs(rootDir, cloneDir)
+	if err := fs.WriteFile(filepath.Join(cloneDir, "evil.yaml"), []byte("x")); err == nil {
+		t.Error("writing into an allowed root must be rejected")
+	}
+}

@@ -18,6 +18,7 @@ import (
 	"github.com/banschikovde/fluxview/internal/helm"
 	"github.com/banschikovde/fluxview/internal/kustomize"
 	"github.com/banschikovde/fluxview/internal/yamlutil"
+	"github.com/cyphar/filepath-securejoin"
 	"gopkg.in/yaml.v3"
 )
 
@@ -42,6 +43,8 @@ type DiffFlags struct {
 	RemoteCacheTimeout  time.Duration
 	BuildCacheDir       string
 	BuildCacheTTL       time.Duration
+	GitSourceCacheDir   string
+	GitSourceCacheTTL   time.Duration
 }
 
 func newDiffCmd() *cobra.Command {
@@ -77,7 +80,7 @@ Examples:
 	cmd.Flags().BoolVar(&flags.SkipCRDs, "skip-crds", false, "Skip CustomResourceDefinition resources in diff")
 	cmd.Flags().StringVar(&flags.StripAttrs, "strip-attrs", "", "Comma-separated keys to strip from diff (e.g. helm.sh/chart,status)")
 	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL, &flags.HelmDownloadTimeout)
-	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.RemoteCacheTimeout, &flags.BuildCacheDir, &flags.BuildCacheTTL)
+	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.RemoteCacheTimeout, &flags.BuildCacheDir, &flags.BuildCacheTTL, &flags.GitSourceCacheDir, &flags.GitSourceCacheTTL)
 	return cmd
 }
 
@@ -148,7 +151,6 @@ func runDiff(ctx context.Context, args []string, flags *DiffFlags) error {
 		return NewExitError(fmt.Errorf("unsupported resource type %q (use 'ks'/'kustomization' or 'hr'/'helmrelease')", resourceType), ExitCodeError)
 	}
 }
-
 func runDiffKS(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, compareCommit string, flags *DiffFlags) error {
 	scans := newScanCache()
 	ksCache := kustomizeCacheOptions{
@@ -157,13 +159,20 @@ func runDiffKS(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 		remoteTimeout: flags.RemoteCacheTimeout,
 		buildCacheDir: flags.BuildCacheDir,
 		buildCacheTTL: flags.BuildCacheTTL,
+		gitSourceDir:  flags.GitSourceCacheDir,
+		gitSourceTtl:  flags.GitSourceCacheTTL,
 	}
-	currentOutput, err := buildKSOutput(ctx, scans, clusterPath, repoRoot, name, ksCache)
+	// External source identity comes from the real repository (the git ops
+	// handle), never from the comparison worktree — it has no remotes.
+	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache)
+	defer gitEnv.Close()
+
+	currentOutput, err := buildKSOutput(ctx, scans, clusterPath, repoRoot, name, ksCache, gitEnv)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building current state: %w", err), ExitCodeError)
 	}
 
-	compareOutput, err := buildKSOutputAtRevision(ctx, scans, gitOps, clusterPath, repoRoot, name, compareCommit, ksCache)
+	compareOutput, err := buildKSOutputAtRevision(ctx, scans, gitOps, clusterPath, repoRoot, name, compareCommit, ksCache, gitEnv)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, err), ExitCodeError)
 	}
@@ -185,6 +194,19 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	// side silently missing its resources would show up as a false
 	// "added" (green) / "removed" (red) diff.
 	scans := newScanCache()
+	// One git source env for both diff sides: the same origin identity, and
+	// the shared clone cache keeps pinned external sources byte-identical
+	// across the comparison (floating refs honor the cache TTL).
+	gitEnv := newGitSourceEnv(ctx, repoRoot, kustomizeCacheOptions{
+		remoteDir:     flags.RemoteCacheDir,
+		remoteTtl:     flags.RemoteCacheTTL,
+		remoteTimeout: flags.RemoteCacheTimeout,
+		buildCacheDir: flags.BuildCacheDir,
+		buildCacheTTL: flags.BuildCacheTTL,
+		gitSourceDir:  flags.GitSourceCacheDir,
+		gitSourceTtl:  flags.GitSourceCacheTTL,
+	})
+	defer gitEnv.Close()
 	currentOutput, err := buildHRInflation(ctx, scans, clusterPath, repoRoot, name, flags.Namespace, false, true,
 		helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout},
 		kustomizeCacheOptions{
@@ -193,7 +215,9 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 			remoteTimeout: flags.RemoteCacheTimeout,
 			buildCacheDir: flags.BuildCacheDir,
 			buildCacheTTL: flags.BuildCacheTTL,
-		})
+			gitSourceDir:  flags.GitSourceCacheDir,
+			gitSourceTtl:  flags.GitSourceCacheTTL,
+		}, gitEnv)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building current state: %w", err), ExitCodeError)
 	}
@@ -222,7 +246,9 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 				remoteTimeout: flags.RemoteCacheTimeout,
 				buildCacheDir: flags.BuildCacheDir,
 				buildCacheTTL: flags.BuildCacheTTL,
-			})
+				gitSourceDir:  flags.GitSourceCacheDir,
+				gitSourceTtl:  flags.GitSourceCacheTTL,
+			}, gitEnv)
 		if err != nil {
 			// A HelmRelease selected by name may legitimately not exist at the
 			// comparison revision (added in this branch) — that's a valid
@@ -242,7 +268,7 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 }
 
 // buildKSOutput builds the Kustomization output for the current working tree.
-func buildKSOutput(ctx context.Context, scans *scanCache, clusterPath, repoRoot, name string, ksCache kustomizeCacheOptions) ([]byte, error) {
+func buildKSOutput(ctx context.Context, scans *scanCache, clusterPath, repoRoot, name string, ksCache kustomizeCacheOptions, gitSources *gitSourceEnv) ([]byte, error) {
 	// Check that the path contains Kustomization files directly (not just in subdirectories)
 	hasDirectKS, err := hasDirectKustomizations(clusterPath)
 	if err != nil {
@@ -271,11 +297,11 @@ func buildKSOutput(ctx context.Context, scans *scanCache, clusterPath, repoRoot,
 	configMaps := resolveConfigMaps(ctx, scans, clusterPath, builder, buildCache)
 	secrets := resolveSecrets(ctx, scans, clusterPath, builder, buildCache)
 
-	return buildKSContent(ctx, scans, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, false, buildCache, nil)
+	return buildKSContent(ctx, scans, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, false, buildCache, nil, gitSources)
 }
 
 // buildKSOutputAtRevision builds the Kustomization output at a specific git revision.
-func buildKSOutputAtRevision(ctx context.Context, scans *scanCache, gitOps *git.Operations, clusterPath, repoRoot, name, revision string, ksCache kustomizeCacheOptions) ([]byte, error) {
+func buildKSOutputAtRevision(ctx context.Context, scans *scanCache, gitOps *git.Operations, clusterPath, repoRoot, name, revision string, ksCache kustomizeCacheOptions, gitSources *gitSourceEnv) ([]byte, error) {
 	// Create a git worktree at the target revision.
 	worktreePath, err := gitOps.CloneToDir(ctx, revision)
 	if err != nil {
@@ -325,18 +351,20 @@ func buildKSOutputAtRevision(ctx context.Context, scans *scanCache, gitOps *git.
 	secrets := resolveSecrets(ctx, scans, worktreeClusterPath, builder, buildCache)
 
 	// Use worktreePath as repoRoot so that recursive discovery and postBuild
-	// substitution work identically to the current state. External GitRepository
-	// resolution is disabled for diff (too expensive — clones remote repos).
-	return buildKSContent(ctx, scans, builder, kustomizations, worktreePath, worktreeClusterPath, configMaps, secrets, true, buildCache, nil)
+	// substitution work identically to the current state. External
+	// GitRepository sources are fetched for both diff sides through the same
+	// git source env (identity from the real repository, shared clone cache).
+	return buildKSContent(ctx, scans, builder, kustomizations, worktreePath, worktreeClusterPath, configMaps, secrets, true, buildCache, nil, gitSources)
 }
 
 // buildKSContent is the shared build logic for Flux Kustomization resources,
 // used by both build and diff commands. It runs buildAllKustomizations (which
 // follows Flux controller behavior: recursive discovery, postBuild substitution,
-// optional external GitRepository resolution) and then appends native kustomize
-// overlay outputs.
-func buildKSContent(ctx context.Context, scans *scanCache, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot, clusterPath string, configMaps []flux.ConfigMap, secrets []flux.Secret, quiet bool, cache buildCache, report *buildReport) ([]byte, error) {
-	output, err := buildAllKustomizations(ctx, scans, builder, kustomizations, repoRoot, configMaps, secrets, quiet, cache, report)
+// external GitRepository source fetching) and then appends native kustomize
+// overlay outputs. gitSources enables building from external GitRepository
+// upstreams; nil keeps everything strictly local.
+func buildKSContent(ctx context.Context, scans *scanCache, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot, clusterPath string, configMaps []flux.ConfigMap, secrets []flux.Secret, quiet bool, cache buildCache, report *buildReport, gitSources *gitSourceEnv) ([]byte, error) {
+	output, err := buildAllKustomizations(ctx, scans, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, quiet, cache, report, gitSources)
 	if err != nil {
 		return nil, err
 	}
@@ -364,11 +392,30 @@ func buildKSContent(ctx context.Context, scans *scanCache, builder *kustomize.Bu
 // buildAllKustomizations runs kustomize build for all Kustomization resources,
 // applies postBuild variable substitution from configMaps and secrets, and
 // recursively discovers and builds new Kustomization resources found in the
-// output (following Flux Kustomize controller behavior).
-func buildAllKustomizations(ctx context.Context, scans *scanCache, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot string, configMaps []flux.ConfigMap, secrets []flux.Secret, quiet bool, cache buildCache, report *buildReport) ([]byte, error) {
+// output (following Flux Kustomize controller behavior). A Kustomization
+// whose path is missing locally but whose sourceRef names an external
+// GitRepository (a repository other than the local origin) is fetched and
+// built from the upstream clone instead — the mini source-controller.
+func buildAllKustomizations(ctx context.Context, scans *scanCache, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot, clusterPath string, configMaps []flux.ConfigMap, secrets []flux.Secret, quiet bool, cache buildCache, report *buildReport, gitSources *gitSourceEnv) ([]byte, error) {
 	// Track already-processed KS by "namespace/name" to prevent duplicates.
 	seen := make(map[string]bool)
 	var results []string
+
+	// Known GitRepository sources: parsed from the cluster path (with a
+	// repoRoot fallback) plus everything recursively discovered in build
+	// outputs — an external clone's output may reference further sources.
+	knownRepos := map[string]flux.GitRepository{}
+	if gitSources != nil {
+		stderr := func(format string, args ...any) {
+			if !quiet {
+				fmt.Fprintf(os.Stderr, format, args...)
+			}
+		}
+		for _, gr := range parseWithRootFallback(scans, clusterPath, repoRoot, "GitRepositories",
+			func(p *flux.Parser) ([]flux.GitRepository, error) { return p.ParseGitRepositories(ctx) }, stderr) {
+			knownRepos[gr.Metadata.Namespace+"/"+gr.Metadata.Name] = gr
+		}
+	}
 
 	// Queue of KS to process.
 	queue := make([]flux.Kustomization, len(kustomizations))
@@ -406,21 +453,76 @@ func buildAllKustomizations(ctx context.Context, scans *scanCache, builder *kust
 			ksEnc.Close()
 			ksYAML := ksYAMLBuf.Bytes()
 
-			// Resolve source path from local repo.
-			sourcePath := resolveSourcePath(repoRoot, ks)
-			if sourcePath != "" {
-				if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
-					sourcePath = ""
+			// Resolve the source path with Flux source-first semantics:
+			// spec.path always resolves against the repository named by
+			// sourceRef. An external GitRepository (other than the local
+			// origin) means the upstream clone — even when a directory of
+			// the same name happens to exist locally, it is a different
+			// repository's content. Everything else (local GitRepository,
+			// OCIRepository, Bucket, unknown source) resolves locally.
+			var sourcePath string
+			readRoot := repoRoot
+			externalSource := ""
+			if ks.Spec.Path != "" {
+				if gr, ok := gitSources.lookupExternal(knownRepos, ks); ok {
+					externalSource = describeSource(ks)
+					// The fetch is silent: for the user an external source
+					// must behave exactly like a local one — the
+					// "Building ns/name" line below is the only progress
+					// output, identical to local Kustomizations.
+					cloneDir, err := gitSources.ensure(ctx, gr)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: fetching %s for %s/%s failed: %v — skipping its resources\n",
+							externalSource, ks.Metadata.Namespace, ks.Metadata.Name, err)
+						if report != nil {
+							report.fetchErrors = append(report.fetchErrors, fetchError{
+								ks:     key,
+								source: externalSource,
+								err:    err.Error(),
+							})
+						}
+						if ksYAML != nil {
+							results = append(results, string(ksYAML))
+						}
+						continue
+					}
+					builder.AllowRoot(cloneDir)
+					if resolved, err := securejoin.SecureJoin(cloneDir, ks.Spec.Path); err == nil {
+						if _, statErr := os.Stat(resolved); statErr == nil {
+							sourcePath = resolved
+							// Loose-file reads under the clone are scoped to
+							// the clone directory (the clone is the walk
+							// root's own "repository"), not repoRoot.
+							readRoot = cloneDir
+						}
+					}
+				} else {
+					sourcePath = resolveSourcePath(repoRoot, ks)
+					if sourcePath != "" {
+						if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
+							sourcePath = ""
+						}
+					}
 				}
 			}
 
 			if sourcePath == "" {
-				// Source not found locally — warn and include the KS
-				// resource only. Validate additionally fails on this: its
-				// resources would be silently absent from the checked set.
+				// Source not found — in the external clone or locally, per
+				// the resolution above. Warn and include the KS resource
+				// only. Validate additionally fails on this: its resources
+				// would be silently absent from the checked set.
 				if ks.Spec.Path != "" {
-					fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally, skipping its resources\n",
-						ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path)
+					switch {
+					case externalSource != "":
+						fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found in external source %s, skipping its resources\n",
+							ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, externalSource)
+					case ks.Spec.SourceRef.Kind == flux.KindOCIRepository || ks.Spec.SourceRef.Kind == flux.KindBucket:
+						fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally (source kind %s is not fetched externally), skipping its resources\n",
+							ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, ks.Spec.SourceRef.Kind)
+					default:
+						fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally, skipping its resources\n",
+							ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path)
+					}
 					if report != nil {
 						report.missingPaths = append(report.missingPaths, missingPath{
 							ks:   fmt.Sprintf("%s/%s", ks.Metadata.Namespace, ks.Metadata.Name),
@@ -439,7 +541,7 @@ func buildAllKustomizations(ctx context.Context, scans *scanCache, builder *kust
 					ks.Metadata.Namespace, ks.Metadata.Name)
 			}
 
-			output, err := buildSourcePath(ctx, scans, builder, sourcePath, repoRoot, cache)
+			output, err := buildSourcePath(ctx, scans, builder, sourcePath, readRoot, cache)
 			if err != nil {
 				if !errors.Is(err, errAlreadyWarned) {
 					fmt.Fprintf(os.Stderr, "Warning: build failed for %s/%s: %v\n",
@@ -479,6 +581,14 @@ func buildAllKustomizations(ctx context.Context, scans *scanCache, builder *kust
 			newKS := discoverResourcesFromOutput(output, seen)
 			if len(newKS) > 0 {
 				discoveredKS = append(discoveredKS, newKS...)
+			}
+
+			// Collect GitRepository sources referenced by the output —
+			// recursively discovered Kustomizations may point at them.
+			if gitSources != nil {
+				for _, gr := range flux.ParseGitRepositoriesFromBytes(output) {
+					knownRepos[gr.Metadata.Namespace+"/"+gr.Metadata.Name] = gr
+				}
 			}
 
 			// Prepend the Kustomization resource to the build output.
@@ -535,7 +645,11 @@ func discoverResourcesFromOutput(data []byte, seen map[string]bool) []flux.Kusto
 //  3. If path is a directory without kustomization.yaml → discover and build
 //     subdirectories that have their own kustomization.yaml (applies namespace
 //     and other transformers), then read any remaining loose YAML files
-func buildSourcePath(ctx context.Context, scans *scanCache, builder *kustomize.Builder, sourcePath, repoRoot string, cache buildCache) ([]byte, error) {
+//
+// readRoot is the filesystem boundary for loose-file reads in case 3: the
+// repository root for local paths, or the external source clone directory —
+// os.Root scoping rejects symlinks resolving outside that boundary.
+func buildSourcePath(ctx context.Context, scans *scanCache, builder *kustomize.Builder, sourcePath, readRoot string, cache buildCache) ([]byte, error) {
 	info, err := os.Stat(sourcePath)
 	if err != nil {
 		return nil, fmt.Errorf("source path %s: %w", sourcePath, err)
@@ -557,7 +671,7 @@ func buildSourcePath(ctx context.Context, scans *scanCache, builder *kustomize.B
 	}
 
 	// Case 3: Directory without kustomization.yaml — discover subdirectories
-	return buildSubdirectoriesAndLooseFiles(ctx, scans, builder, sourcePath, repoRoot, cache)
+	return buildSubdirectoriesAndLooseFiles(ctx, scans, builder, sourcePath, readRoot, cache)
 }
 
 // readYAMLFilesRecursive reads all .yaml/.yml files in a directory recursively

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/go-git/go-git/v5"
@@ -181,6 +182,49 @@ func (g *Operations) CloneToDir(ctx context.Context, revision string) (string, e
 // leaks on disk.
 func (g *Operations) RemoveWorktree(_ context.Context, worktreePath string) error {
 	return os.RemoveAll(worktreePath)
+}
+
+// OriginURL returns the fetch URL of the "origin" remote, or of the single
+// configured remote when there is no origin. It identifies the repository
+// this checkout belongs to: a Flux GitRepository source pointing at a
+// different repository (per SameGitRepo) is an external upstream. Several
+// remotes without an origin are ambiguous — an error names them all rather
+// than picking one nondeterministically.
+func (g *Operations) OriginURL(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	remotes, err := g.repo.Remotes()
+	if err != nil {
+		return "", fmt.Errorf("listing remotes: %w", err)
+	}
+
+	var chosen *git.Remote
+	var names []string
+	for _, r := range remotes {
+		names = append(names, r.Config().Name)
+		if r.Config().Name == "origin" {
+			chosen = r
+			break
+		}
+	}
+	if chosen == nil {
+		switch len(remotes) {
+		case 0:
+			return "", fmt.Errorf("no git remotes configured")
+		case 1:
+			chosen = remotes[0]
+		default:
+			sort.Strings(names)
+			return "", fmt.Errorf("no origin remote and %d remotes configured (%s): cannot identify the local repository",
+				len(names), strings.Join(names, ", "))
+		}
+	}
+	urls := chosen.Config().URLs
+	if len(urls) == 0 {
+		return "", fmt.Errorf("git remote %s has no URLs", chosen.Config().Name)
+	}
+	return urls[0], nil
 }
 
 // FindRepoRoot searches upward from the given path to find the git repository root.
