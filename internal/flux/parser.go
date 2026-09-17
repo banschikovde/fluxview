@@ -12,6 +12,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/banschikovde/fluxview/internal/git"
 	"github.com/banschikovde/fluxview/internal/yamlutil"
 )
 
@@ -61,7 +62,8 @@ func isChartRoot(dir string) bool {
 }
 
 // walkYAMLFiles walks rootPath, skipping the entire subtree of any directory
-// that is a Helm chart root, and invokes fn for every YAML file found.
+// that must not be scanned (see skipDir), and invokes fn for every YAML file
+// found.
 //
 // Skipping chart roots (via filepath.SkipDir) prevents the parser from
 // descending into templates/ and trying to decode Go-template files as YAML.
@@ -69,6 +71,7 @@ func isChartRoot(dir string) bool {
 // (filepath.SkipDir skips just the current file). The walk honors ctx
 // cancellation.
 func walkYAMLFiles(ctx context.Context, rootPath string, fn func(path string) error) error {
+	walkRoot := filepath.Clean(rootPath)
 	return filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -77,7 +80,10 @@ func walkYAMLFiles(ctx context.Context, rootPath string, fn func(path string) er
 			return ctx.Err()
 		}
 		if d.IsDir() {
-			if isChartRoot(path) {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			if filepath.Clean(path) != walkRoot && skipDir(path) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -87,6 +93,15 @@ func walkYAMLFiles(ctx context.Context, rootPath string, fn func(path string) er
 		}
 		return fn(path)
 	})
+}
+
+// skipDir reports whether the subtree of a directory (other than the walk
+// root) must not be walked: Helm chart roots hold template files that are
+// not standalone YAML, and nested git repository roots — external source
+// clones cached inside the working tree, which CI often keeps under the
+// checkout — are foreign repository content, not fleet manifests.
+func skipDir(path string) bool {
+	return isChartRoot(path) || git.IsRepoRoot(path)
 }
 
 // ResourceSnapshot holds every resource type discovered by a single tree

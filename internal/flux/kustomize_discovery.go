@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/banschikovde/fluxview/internal/git"
 )
 
 // nativeKustomization represents a native kustomize Kustomization resource
@@ -49,6 +51,7 @@ func DiscoverKustomizeDirsAndFiles(ctx context.Context, rootPath string) (buildD
 	if real, err := filepath.EvalSymlinks(absRootResolved); err == nil {
 		absRootResolved = real
 	}
+	walkRoot := filepath.Clean(rootPath)
 
 	err = filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
 		// A read error on a single entry (permission denied on a subdir, broken
@@ -66,6 +69,20 @@ func DiscoverKustomizeDirsAndFiles(ctx context.Context, rootPath string) (buildD
 		}
 		if !d.IsDir() {
 			return nil
+		}
+		// Never cross a repository boundary: skip the .git directory itself
+		// and nested git repository roots — external source clones cached
+		// inside the working tree (CI often keeps the fluxview cache under
+		// the checkout) are foreign content, never fleet overlays. Chart
+		// roots are deliberately NOT skipped here: unlike the raw resource
+		// parser, discovery must find kustomization files inside vendored
+		// charts (and register their directories, keeping the loose-file
+		// walker out of chart templates).
+		if d.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		if filepath.Clean(path) != walkRoot && git.IsRepoRoot(path) {
+			return filepath.SkipDir
 		}
 
 		absPath, _ := filepath.Abs(path)

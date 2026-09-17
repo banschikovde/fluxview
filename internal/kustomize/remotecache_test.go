@@ -420,6 +420,42 @@ func TestRemoteCache_ScanSkipsGitDir(t *testing.T) {
 	}
 }
 
+// TestRemoteCache_ScanSkipsNestedGitRepos: kustomization files inside a
+// nested git repository (an external source clone cached under the
+// repository root, as CI keeps the fluxview cache inside the checkout) are
+// foreign content — their remote refs are not ours to prefetch.
+func TestRemoteCache_ScanSkipsNestedGitRepos(t *testing.T) {
+	cs := newCountingServer(t, "/manifests/main/crd.yaml", remoteCRDBody)
+	url := cs.URL + "/manifests/main/crd.yaml"
+	repo := t.TempDir()
+	writeRemoteKustomization(t, filepath.Join(repo, "overlay"), url)
+
+	// A "clone" with a .git entry and a kustomization referencing a bogus
+	// URL: without the boundary check the cache would try to download it
+	// and warn on every build.
+	clone := filepath.Join(repo, ".cache-fluxview", "git-sources", "data", "deadbeef", "scripts", "config", "kwok")
+	if err := os.MkdirAll(filepath.Join(clone, ".git"), 0755); err != nil {
+		t.Fatalf("mkdir clone .git: %v", err)
+	}
+	writeRemoteKustomization(t, clone, "http://127.0.0.1:1/kwok?ref=v0.2.0")
+
+	fileRefs, dirRefs := scanRemoteRefs(repo)
+	if len(fileRefs) != 1 || !fileRefs[url] {
+		t.Fatalf("expected only the overlay ref, got: files=%v dirs=%v", fileRefs, dirRefs)
+	}
+
+	rc := newRemoteCache(t.TempDir(), time.Hour, 30*time.Second)
+	stderr := captureStderr(t, func() {
+		rc.prepare(context.Background(), repo)
+	})
+	if strings.Contains(stderr, "kwok") || strings.Contains(stderr, "could not download") {
+		t.Fatalf("scan descended into the nested git repo:\n%s", stderr)
+	}
+	if cs.getsCount() != 1 {
+		t.Fatalf("expected exactly 1 GET for the overlay ref, got %d", cs.getsCount())
+	}
+}
+
 // TestRemoteCache_ComponentsNotCachedWarns: components must resolve to
 // directories (kustomize clones them); the cache only warns and leaves them
 // untouched.

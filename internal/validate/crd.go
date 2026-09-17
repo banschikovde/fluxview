@@ -15,6 +15,8 @@ import (
 	"k8s.io/apiextensions-apiserver/pkg/apiserver/validation"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/kube-openapi/pkg/validation/spec"
+
+	"github.com/banschikovde/fluxview/internal/git"
 )
 
 // CRDYAMLToSchemaDir reads CRD definition files (.yaml/.yml, any depth) from
@@ -52,9 +54,20 @@ func CRDYAMLToSchemaDir(dir, cacheRoot string) (string, error) {
 	meta := loadCRDCacheMeta(out)
 	seen := make(map[string]struct{})
 
+	walkRoot := filepath.Clean(dir)
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+		if err != nil {
 			return err
+		}
+		if info.IsDir() {
+			// Never cross a repository boundary: the .git directory itself
+			// and nested git repository roots (external source clones cached
+			// inside the working tree) hold no CRD sources, and their
+			// template YAML would fail conversion below.
+			if info.Name() == ".git" || (filepath.Clean(path) != walkRoot && git.IsRepoRoot(path)) {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		name := info.Name()
 		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {

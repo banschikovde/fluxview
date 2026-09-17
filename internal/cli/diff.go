@@ -686,6 +686,7 @@ func readYAMLFilesRecursive(ctx context.Context, dir, repoRoot string) ([]byte, 
 
 	var buf bytes.Buffer
 
+	walkRoot := filepath.Clean(dir)
 	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -694,6 +695,12 @@ func readYAMLFilesRecursive(ctx context.Context, dir, repoRoot string) ([]byte, 
 			return err
 		}
 		if info.IsDir() {
+			// Never cross a repository boundary: the .git directory itself
+			// and nested git repository roots (external source clones cached
+			// inside the working tree) are not fleet content.
+			if info.Name() == ".git" || (filepath.Clean(path) != walkRoot && git.IsRepoRoot(path)) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(path))

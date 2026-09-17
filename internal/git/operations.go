@@ -248,6 +248,18 @@ func FindRepoRoot(startPath string) (string, error) {
 	}
 }
 
+// IsRepoRoot reports whether dir is the root of a git repository: it holds a
+// .git entry (a directory for a plain clone, a file for a worktree). Tree
+// walks compare directories against it to avoid crossing a repository
+// boundary — external source clones cached inside the working tree (CI often
+// keeps the fluxview cache under the checkout) are foreign repository
+// content, not fleet manifests, and must not be scanned, parsed or built as
+// if they were.
+func IsRepoRoot(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
+}
+
 // isWithinDir checks if path stays within dir after resolution.
 // Both path and dir should be absolute.
 func isWithinDir(path, dir string) bool {

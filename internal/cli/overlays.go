@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/banschikovde/fluxview/internal/git"
 	"github.com/banschikovde/fluxview/internal/kustomize"
 )
 
@@ -84,6 +85,7 @@ func walkOverlaysAndLooseFiles(ctx context.Context, scans *scanCache, builder *k
 	defer rootFS.Close()
 
 	// Read loose YAML files not inside any kustomization directory.
+	walkRoot := filepath.Clean(root)
 	walkErr := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
@@ -92,6 +94,12 @@ func walkOverlaysAndLooseFiles(ctx context.Context, scans *scanCache, builder *k
 			// Prune directories that have a kustomization file (regardless of
 			// build success/failure) or fall under an excluded path.
 			if kustDirs[path] || isExcludedDir(path, opts.excludePaths) {
+				return filepath.SkipDir
+			}
+			// Never cross a repository boundary: the .git directory itself and
+			// nested git repository roots (external source clones cached
+			// inside the working tree) hold no loose fleet files.
+			if info.Name() == ".git" || (filepath.Clean(path) != walkRoot && git.IsRepoRoot(path)) {
 				return filepath.SkipDir
 			}
 			return nil

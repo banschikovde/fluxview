@@ -162,6 +162,69 @@ metadata:
 	}
 }
 
+// TestDiscoverKustomizeDirs_BoundaryRules pins the two boundary rules of
+// discovery: a nested git repository root (an external source clone cached
+// inside the walked tree) is skipped entirely, while a Helm chart root is
+// NOT — a vendored chart carrying its own kustomization.yaml is still a
+// buildable overlay (only the raw resource parser skips chart subtrees).
+func TestDiscoverKustomizeDirs_BoundaryRules(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	kust := `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cm.yaml
+`
+
+	// A nested "clone": .git marks the repository boundary; its
+	// kustomization must stay invisible.
+	clone := filepath.Join(tmpDir, ".cache-fluxview", "git-sources", "data", "deadbeef")
+	if err := os.MkdirAll(filepath.Join(clone, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(clone, "kustomization.yaml"), []byte(kust), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A vendored chart with its own kustomization.yaml: discovered.
+	chartDir := filepath.Join(tmpDir, "vendors", "mychart")
+	if err := os.MkdirAll(chartDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(chartDir, "Chart.yaml"), []byte("apiVersion: v2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(chartDir, "kustomization.yaml"), []byte(kust), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirs, fileDirs, err := DiscoverKustomizeDirsAndFiles(context.Background(), tmpDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var foundChart, foundClone bool
+	for _, d := range dirs {
+		switch filepath.Base(d) {
+		case "mychart":
+			foundChart = true
+		case "deadbeef":
+			foundClone = true
+		}
+	}
+	if !foundChart {
+		t.Errorf("kustomization inside the vendored chart must be discovered, got: %v", dirs)
+	}
+	if foundClone {
+		t.Errorf("kustomization inside the nested git repo must be skipped, got: %v", dirs)
+	}
+	for _, d := range fileDirs {
+		if filepath.Base(d) == "deadbeef" {
+			t.Errorf("nested git repo must not be registered as a kustomization file dir: %v", fileDirs)
+		}
+	}
+}
+
 func TestDiscoverKustomizeDirs_NoKustomizeDirs(t *testing.T) {
 	tmpDir := t.TempDir()
 

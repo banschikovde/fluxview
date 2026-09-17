@@ -2501,6 +2501,50 @@ metadata:
 	}
 }
 
+// TestBuildSubdirectoriesAndLooseFiles_VendoredChartKustomizationBuilt pins
+// the discovery boundary introduced with the nested-git-repo fix: Helm
+// chart roots must NOT be skipped by kustomization discovery (only the raw
+// resource parser skips them). A vendored chart carrying its own
+// kustomization.yaml — a common packaging of chart + CRDs — is still
+// discovered and built as a native overlay (transformations apply), and
+// its templates never leak into the loose-file output.
+func TestBuildSubdirectoriesAndLooseFiles_VendoredChartKustomizationBuilt(t *testing.T) {
+	// sourcePath has NO kustomization.yaml itself (case 3 of buildSourcePath).
+	sourcePath := t.TempDir()
+
+	chartDir := filepath.Join(sourcePath, "vendors", "mychart")
+	writeHelper(t, chartDir, "Chart.yaml", "apiVersion: v2\nname: mychart\n")
+	writeHelper(t, chartDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namePrefix: vendored-
+resources:
+  - cm.yaml
+`)
+	writeHelper(t, chartDir, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chart-cm
+`)
+	// Chart template: invalid YAML (block-form Go template) — must never be
+	// reachable as a loose file.
+	writeHelper(t, filepath.Join(chartDir, "templates"), "tpl.yaml",
+		"metadata:\n  name: x\n{{- if .Values.enabled }}\n  annotations:\n{{- end }}\n")
+
+	builder := kustomize.NewBuilder(sourcePath)
+	output, err := buildSubdirectoriesAndLooseFiles(context.Background(), newScanCache(), builder, sourcePath, sourcePath, make(buildCache))
+	if err != nil {
+		t.Fatalf("buildSubdirectoriesAndLooseFiles: %v", err)
+	}
+	combined := string(output)
+
+	if !strings.Contains(combined, "vendored-chart-cm") {
+		t.Errorf("the chart's kustomization must be built with its namePrefix applied, output:\n%s", combined)
+	}
+	if strings.Contains(combined, "{{- if") {
+		t.Errorf("chart template leaked into the loose-file output:\n%s", combined)
+	}
+}
+
 // makeUnreadable sets path to mode 0 so reads fail (EACCES) for a non-root
 // caller, and restores the mode on cleanup so TempDir teardown works.
 func makeUnreadable(t *testing.T, path string) {

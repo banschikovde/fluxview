@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/banschikovde/fluxview/internal/git"
 )
 
 // Remote resource cache.
@@ -389,19 +391,22 @@ func (c *remoteCache) warnf(key, format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "Warning: "+format+"\n", args...)
 }
 
-// scanRemoteRefs walks rootDir (skipping .git) and collects remote references
-// from every kustomization file: http(s) entries in `resources:` are
-// file-fetchable, entries in `components:` are directory bases that only
+// scanRemoteRefs walks rootDir (skipping .git and nested git repository
+// roots — external source clones cached inside the working tree are foreign
+// content, their remote refs are not ours to prefetch) and collects remote
+// references from every kustomization file: http(s) entries in `resources:`
+// are file-fetchable, entries in `components:` are directory bases that only
 // kustomize itself (via git) can resolve.
 func scanRemoteRefs(rootDir string) (fileRefs, dirRefs map[string]bool) {
 	fileRefs = make(map[string]bool)
 	dirRefs = make(map[string]bool)
+	walkRoot := filepath.Clean(rootDir)
 	_ = filepath.WalkDir(rootDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil // unreadable entry: skip, keep walking
 		}
 		if d.IsDir() {
-			if d.Name() == ".git" {
+			if d.Name() == ".git" || (filepath.Clean(path) != walkRoot && git.IsRepoRoot(path)) {
 				return filepath.SkipDir
 			}
 			return nil

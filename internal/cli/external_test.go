@@ -879,3 +879,94 @@ func gitOutput(t *testing.T, dir string, args ...string) string {
 	}
 	return string(out)
 }
+
+// TestBuildKS_InRepoGitSourceCacheStaysInvisible reproduces the CI layout
+// that polluted builds after the external-source feature: the fluxview
+// git-source cache lives INSIDE the fleet checkout (.cache-fluxview/...),
+// and the tree walks — resource parsing with the repoRoot fallback, the
+// remote-ref prefetch scan, loose-file reads — descended into the cached
+// upstream clones, warning about their Go-template YAML, their
+// mis-shaped ConfigMaps and their kustomizations' remote refs. Walks must
+// never cross a repository boundary, wherever the cache is placed.
+func TestBuildKS_InRepoGitSourceCacheStaysInvisible(t *testing.T) {
+	f := newExternalFixture(t)
+
+	// Move the GitRepository out of the cluster path (a sources/ dir at the
+	// fleet root): resolving it now requires the repoRoot-fallback walk —
+	// the walk that used to descend into the in-repo cache.
+	if err := os.Remove(filepath.Join(f.clusterDir, "gitrepository.yaml")); err != nil {
+		t.Fatalf("remove cluster gitrepository.yaml: %v", err)
+	}
+	writeHelper(t, filepath.Join(f.fleetDir, "sources"), "gitrepository.yaml", `apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: kyverno
+  namespace: flux-system
+spec:
+  url: `+f.upstreamURL()+`
+  ref:
+    tag: v1.0.0
+`)
+
+	// CI layout: the git-source cache under the checkout. A leftover clone
+	// under a foreign content key mirrors any previously fetched upstream:
+	// a .git entry (repository boundary) plus the kinds of files that made
+	// the pre-fix runs warn.
+	clone := filepath.Join(f.fleetDir, ".cache-fluxview", "git-sources", "data", "deadbeef")
+	if err := os.MkdirAll(filepath.Join(clone, ".git"), 0755); err != nil {
+		t.Fatalf("mkdir clone .git: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(clone, "cmd", "cli", "templates"), 0755); err != nil {
+		t.Fatalf("mkdir clone templates: %v", err)
+	}
+	// Unparseable Go-template YAML ("YAML parse error" pre-fix). A bare
+	// "{{ ... }}" line parses as a flow mapping — the block form is what
+	// actually breaks the decoder, as the real kyverno templates do.
+	if err := os.WriteFile(filepath.Join(clone, ".krew.yaml"),
+		[]byte("metadata:\n  name: krew\n{{- if .Values.enabled }}\n  annotations:\n{{- end }}\n"), 0644); err != nil {
+		t.Fatalf("write .krew.yaml: %v", err)
+	}
+	// A ConfigMap whose data values are maps ("could not parse ConfigMap
+	// document" pre-fix).
+	if err := os.WriteFile(filepath.Join(clone, "cmd", "cli", "templates", "metrics-config.yaml"),
+		[]byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: metrics-config\ndata:\n  o:\n    app: kyverno\n"), 0644); err != nil {
+		t.Fatalf("write metrics-config.yaml: %v", err)
+	}
+	// A kustomization with a remote ref ("could not download remote
+	// resource" pre-fix); the bogus port fails fast if ever attempted.
+	if err := os.MkdirAll(filepath.Join(clone, "scripts", "config", "kwok"), 0755); err != nil {
+		t.Fatalf("mkdir kwok dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(clone, "scripts", "config", "kwok", "kustomization.yaml"),
+		[]byte("apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - http://127.0.0.1:1/kwok?ref=v0.2.0\n"), 0644); err != nil {
+		t.Fatalf("write kwok kustomization: %v", err)
+	}
+
+	flags := buildFlagsFor(f)
+	flags.GitSourceCacheDir = filepath.Join(f.fleetDir, ".cache-fluxview", "git-sources")
+
+	var runErr error
+	var stderr string
+	stdout := captureStdout(func() {
+		stderr = captureStderr(func() {
+			runErr = runBuild(context.Background(), []string{"ks"}, flags)
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("build ks with an in-repo git-source cache failed: %v", runErr)
+	}
+	for _, unwanted := range []string{
+		"YAML parse error",
+		"could not parse ConfigMap",
+		"could not download remote resource",
+	} {
+		if strings.Contains(stderr, unwanted) {
+			t.Errorf("the in-repo cached clone leaked into the build (%q):\n%s", unwanted, stderr)
+		}
+	}
+	// The external source itself must still be fetched (into the same
+	// in-repo cache) and built.
+	if !strings.Contains(stdout, "policies.kyverno.io") {
+		t.Errorf("external CRD missing from the build output:\n%s", stdout)
+	}
+}

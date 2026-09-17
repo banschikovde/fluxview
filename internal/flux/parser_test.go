@@ -623,6 +623,91 @@ func captureStderr(f func()) string {
 	return buf.String()
 }
 
+// TestWalkYAMLFiles_SkipsNestedGitRepos verifies the walker never crosses a
+// repository boundary: a directory holding a .git entry (an external source
+// clone cached inside the walked tree — CI often keeps the fluxview cache
+// under the checkout) is foreign repository content and must not be scanned,
+// even when its YAML files look like resources or fail to parse.
+func TestWalkYAMLFiles_SkipsNestedGitRepos(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Top-level YAML file (visited).
+	if err := os.WriteFile(filepath.Join(tmpDir, "top.yaml"), []byte("a: 1\n"), 0644); err != nil {
+		t.Fatalf("write top.yaml: %v", err)
+	}
+	// A nested "clone": .git marks the repository boundary.
+	clone := filepath.Join(tmpDir, ".cache-fluxview", "git-sources", "data", "deadbeef")
+	cloneDir := filepath.Join(clone, "cmd", "templates")
+	if err := os.MkdirAll(cloneDir, 0755); err != nil {
+		t.Fatalf("mkdir clone: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(clone, ".git"), 0755); err != nil {
+		t.Fatalf("mkdir clone .git: %v", err)
+	}
+	// Go-template YAML (unparseable — the block form breaks the decoder,
+	// like real chart/kyverno templates) and a resource-looking document:
+	// both must stay invisible to the walk.
+	if err := os.WriteFile(filepath.Join(cloneDir, "aggregated-role.yaml"),
+		[]byte("metadata:\n  name: role\n{{- if .Values.enabled }}\n  annotations:\n{{- end }}\n"), 0644); err != nil {
+		t.Fatalf("write template: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(clone, "configmap.yaml"), []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: foreign\n"), 0644); err != nil {
+		t.Fatalf("write foreign configmap: %v", err)
+	}
+	// A sibling YAML file outside the clone (visited).
+	if err := os.MkdirAll(filepath.Join(tmpDir, "flux"), 0755); err != nil {
+		t.Fatalf("mkdir flux: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "flux", "kustomization.yaml"), []byte("b: 2\n"), 0644); err != nil {
+		t.Fatalf("write kustomization.yaml: %v", err)
+	}
+
+	var visited []string
+	err := walkYAMLFiles(context.Background(), tmpDir, func(path string) error {
+		rel, _ := filepath.Rel(tmpDir, path)
+		visited = append(visited, rel)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walkYAMLFiles: %v", err)
+	}
+
+	for _, p := range visited {
+		if strings.HasPrefix(p, filepath.Join(".cache-fluxview")) {
+			t.Errorf("walker descended into nested git repo: visited %q", p)
+		}
+	}
+	want := map[string]bool{"top.yaml": false, filepath.Join("flux", "kustomization.yaml"): false}
+	for _, p := range visited {
+		if _, ok := want[p]; ok {
+			want[p] = true
+		}
+	}
+	for p, seen := range want {
+		if !seen {
+			t.Errorf("expected walker to visit %q, it did not (visited: %v)", p, visited)
+		}
+	}
+
+	// The full resource walk must not warn about the clone's template YAML
+	// nor pick up its resources.
+	var snap *ResourceSnapshot
+	stderr := captureStderr(func() {
+		snap, err = WalkResources(context.Background(), tmpDir)
+	})
+	if err != nil {
+		t.Fatalf("WalkResources: %v", err)
+	}
+	if strings.Contains(stderr, "YAML parse error") {
+		t.Errorf("WalkResources warned about files inside the nested git repo:\n%s", stderr)
+	}
+	for _, cm := range snap.ConfigMaps {
+		if cm.Metadata.Name == "foreign" {
+			t.Errorf("ConfigMap from nested git repo leaked into the snapshot")
+		}
+	}
+}
+
 // makeUnreadable sets path to mode 0 so subsequent reads fail (EACCES) for a
 // non-root caller, and restores the mode on cleanup so TempDir teardown works.
 func makeUnreadable(t *testing.T, path string) {

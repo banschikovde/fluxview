@@ -457,6 +457,31 @@ func TestCRDYAMLToSchemaDir_NoCRDs(t *testing.T) {
 	}
 }
 
+// TestCRDYAMLToSchemaDir_SkipsNestedGitRepos: a nested git repository under
+// the schema dir (an external source clone cached inside the working tree)
+// holds no CRD sources, and its template YAML would fail conversion as a
+// hard error — the walk must not cross the repository boundary.
+func TestCRDYAMLToSchemaDir_SkipsNestedGitRepos(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "nested/crd.yaml", testCRDYAML)
+
+	clone := filepath.Join(dir, ".cache-fluxview", "git-sources", "data", "deadbeef")
+	if err := os.MkdirAll(filepath.Join(clone, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, clone, "template.yaml", "metadata:\n  name: x\n{{- if .Values.enabled }}\n  annotations:\n{{- end }}\n")
+
+	out, err := CRDYAMLToSchemaDir(dir, "")
+	if err != nil {
+		t.Fatalf("nested git repo leaked into CRD conversion: %v", err)
+	}
+
+	entries, _ := os.ReadDir(out)
+	if len(entries) != 1 {
+		t.Errorf("expected exactly 1 converted schema, got %d", len(entries))
+	}
+}
+
 // TestCRDYAMLToSchemaDir_ExoticSchemaConverts pins that valid CRDs using
 // exotic-but-legal schema constructs convert fine — the conversion failure
 // branches are hard errors, so a regression here must never fire on a
