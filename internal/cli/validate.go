@@ -46,6 +46,10 @@ type ValidateFlags struct {
 	BuildCacheTTL         time.Duration
 	GitSourceCacheDir     string
 	GitSourceCacheTTL     time.Duration
+	// GitSourceSSHKnownHosts and GitSourceSSHAcceptNew are the external
+	// git source auth policy knobs (credentials stay env-only).
+	GitSourceSSHKnownHosts string
+	GitSourceSSHAcceptNew  bool
 
 	// disableDefaultSchemas drops the default HTTP schema registry. It has
 	// no flag — only tests set it, to keep them offline.
@@ -109,6 +113,7 @@ Examples:
   fluxview validate --path clusters/prod/ --output json`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			applyGitSourceAuthFlags(cmd.Flags(), flags.GitSourceSSHKnownHosts, flags.GitSourceSSHAcceptNew)
 			return runValidate(cmd.Context(), flags)
 		},
 	}
@@ -122,6 +127,7 @@ Examples:
 	cmd.Flags().StringSliceVar(&flags.SkipKinds, "skip-kind", nil, "Kinds to skip (repeatable or comma-separated): Kind (e.g. Deployment, any apiVersion) or apiVersion/Kind (e.g. apps/v1/Deployment)")
 	cmd.Flags().StringVar(&flags.Output, "output", "text", "Output format: text, json or junit (machine formats go to stdout)")
 	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.RemoteCacheTimeout, &flags.BuildCacheDir, &flags.BuildCacheTTL, &flags.GitSourceCacheDir, &flags.GitSourceCacheTTL)
+	registerGitSourceAuthFlags(cmd, &flags.GitSourceSSHKnownHosts, &flags.GitSourceSSHAcceptNew)
 
 	return cmd
 }

@@ -2,13 +2,24 @@ package cli
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/skeema/knownhosts"
+	"github.com/spf13/cobra"
+	gossh "golang.org/x/crypto/ssh"
+
+	"github.com/banschikovde/fluxview/internal/gitsource"
+	"github.com/banschikovde/fluxview/internal/gitsource/gitsourcetest"
 )
 
 // externalFixture assembles the two repositories the external-source
@@ -968,5 +979,297 @@ spec:
 	// in-repo cache) and built.
 	if !strings.Contains(stdout, "policies.kyverno.io") {
 		t.Errorf("external CRD missing from the build output:\n%s", stdout)
+	}
+}
+
+// clearGitAuthEnv neutralizes the git-source auth environment so e2e
+// tests never see the developer machine's credentials.
+func clearGitAuthEnv(t *testing.T) {
+	t.Helper()
+	for _, v := range []string{
+		"FLUXVIEW_GIT_SSH_KEY", "FLUXVIEW_GIT_SSH_PASSPHRASE",
+		"FLUXVIEW_GIT_SSH_KNOWN_HOSTS", "FLUXVIEW_GIT_SSH_ACCEPT_NEW",
+		"FLUXVIEW_GIT_USERNAME", "FLUXVIEW_GIT_PASSWORD",
+		"FLUXVIEW_GIT_TOKEN", "SSH_AUTH_SOCK",
+	} {
+		t.Setenv(v, "")
+	}
+	t.Setenv("HOME", t.TempDir())
+}
+
+// defaultBranchOf names the upstream's default branch (git CLI fixtures
+// may default to either master or main depending on the machine).
+func defaultBranchOf(t *testing.T, dir string) string {
+	t.Helper()
+	return strings.TrimSpace(gitOutput(t, dir, "symbolic-ref", "--short", "HEAD"))
+}
+
+// TestBuildKS_ExternalHTTPSBasicAuth pins the https e2e of ТЗ-1: a
+// private upstream behind basic auth builds cleanly once the env pair is
+// set, and the external CRD lands in the output.
+func TestBuildKS_ExternalHTTPSBasicAuth(t *testing.T) {
+	clearGitAuthEnv(t)
+	f := newExternalFixture(t)
+
+	bare := gitsourcetest.BareClone(t, f.upstreamDir, "upstream")
+	base := gitsourcetest.HTTPSBasicAuth(t, filepath.Dir(bare), "fluxview", "s3cret")
+	writeHelper(t, f.clusterDir, "gitrepository.yaml", `apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: kyverno
+  namespace: flux-system
+spec:
+  url: `+base+`/upstream.git
+  ref:
+    tag: v1.0.0
+`)
+	t.Setenv("FLUXVIEW_GIT_USERNAME", "fluxview")
+	t.Setenv("FLUXVIEW_GIT_PASSWORD", "s3cret")
+
+	var runErr error
+	stdout := captureStdout(func() {
+		_ = captureStderr(func() {
+			runErr = runBuild(context.Background(), []string{"ks"}, buildFlagsFor(f))
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("build ks against a basic-auth upstream failed: %v", runErr)
+	}
+	if !strings.Contains(stdout, "policies.kyverno.io") {
+		t.Errorf("external CRD missing from the build output:\n%s", stdout)
+	}
+}
+
+// TestRunValidate_ExternalHTTPSNoCreds_Fails pins the 401 case of ТЗ-1:
+// without credentials the private upstream fails validate with exit 2
+// and the distinct bad-credentials message.
+func TestRunValidate_ExternalHTTPSNoCreds_Fails(t *testing.T) {
+	clearGitAuthEnv(t)
+	f := newExternalFixture(t)
+
+	bare := gitsourcetest.BareClone(t, f.upstreamDir, "upstream")
+	base := gitsourcetest.HTTPSBasicAuth(t, filepath.Dir(bare), "fluxview", "s3cret")
+	writeHelper(t, f.clusterDir, "gitrepository.yaml", `apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: kyverno
+  namespace: flux-system
+spec:
+  url: `+base+`/upstream.git
+  ref:
+    tag: v1.0.0
+`)
+
+	var runErr error
+	_ = captureStderr(func() {
+		runErr = runValidate(context.Background(), &ValidateFlags{
+			Path:                  f.clusterDir,
+			disableDefaultSchemas: true,
+			GitSourceCacheDir:     filepath.Join(t.TempDir(), "git-sources"),
+			GitSourceCacheTTL:     time.Hour,
+		})
+	})
+	exitErr, ok := runErr.(*DiffExitError)
+	if !ok {
+		t.Fatalf("expected *DiffExitError, got %v", runErr)
+	}
+	if exitErr.ExitCode != ExitCodeError {
+		t.Errorf("exit code = %d, want %d", exitErr.ExitCode, ExitCodeError)
+	}
+	for _, want := range []string{
+		"failed to fetch their external source",
+		"private repository or bad credentials",
+	} {
+		if !strings.Contains(exitErr.Error(), want) {
+			t.Errorf("error must contain %q, got: %v", want, exitErr.Error())
+		}
+	}
+}
+
+// TestRunValidate_ExternalSSHSource_Passes pins the ssh e2e of ТЗ-1: a
+// private upstream over ssh (client key from env, strict known_hosts)
+// validates green — including a floating branch ref, which resolves
+// through the authenticated ls-remote.
+func TestRunValidate_ExternalSSHSource_Passes(t *testing.T) {
+	clearGitAuthEnv(t)
+	f := newExternalFixture(t)
+
+	bare := gitsourcetest.BareClone(t, f.upstreamDir, "upstream")
+
+	keyPath, pub := newSSHClientKey(t)
+	base, hostSigner := gitsourcetest.SSHGitServer(t, pub)
+
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	kh, err := os.Create(khPath)
+	if err != nil {
+		t.Fatalf("creating known_hosts: %v", err)
+	}
+	if err := knownhosts.WriteKnownHost(kh, strings.TrimPrefix(base, "ssh://git@"), &net.TCPAddr{}, hostSigner.PublicKey()); err != nil {
+		t.Fatalf("WriteKnownHost: %v", err)
+	}
+	kh.Close()
+
+	t.Setenv("FLUXVIEW_GIT_SSH_KNOWN_HOSTS", khPath)
+	t.Setenv("FLUXVIEW_GIT_SSH_KEY", keyPath)
+
+	writeHelper(t, f.clusterDir, "gitrepository.yaml", `apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: kyverno
+  namespace: flux-system
+spec:
+  url: `+base+bare+`
+  ref:
+    branch: `+defaultBranchOf(t, f.upstreamDir)+`
+`)
+
+	var runErr error
+	stderr := captureStderr(func() {
+		runErr = runValidate(context.Background(), &ValidateFlags{
+			Path:                  f.clusterDir,
+			disableDefaultSchemas: true,
+			GitSourceCacheDir:     filepath.Join(t.TempDir(), "git-sources"),
+			GitSourceCacheTTL:     time.Hour,
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("validate over ssh with a key must pass, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+	if strings.Contains(stderr, "not found") {
+		t.Errorf("no 'not found' warnings expected, got:\n%s", stderr)
+	}
+}
+
+// newSSHClientKey generates a client key pair and writes the private key
+// to a temp file; returns the path and the public key.
+func newSSHClientKey(t *testing.T) (string, gossh.PublicKey) {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("ed25519.GenerateKey: %v", err)
+	}
+	signer, err := gossh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatalf("NewSignerFromKey: %v", err)
+	}
+	block, err := gossh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatalf("MarshalPrivateKey: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "id_e2e")
+	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatalf("writing client key: %v", err)
+	}
+	return path, signer.PublicKey()
+}
+
+// TestGitSourceAuthFlags_Wiring pins the flag plumbing: a flag the user
+// actually passed is pushed into the env the auth resolver reads; flags
+// left at their (env-derived) defaults never touch the env.
+func TestGitSourceAuthFlags_Wiring(t *testing.T) {
+	clearGitAuthEnv(t)
+
+	newCmd := func(t *testing.T) (*cobra.Command, *string, *bool) {
+		t.Helper()
+		var knownHosts string
+		var acceptNew bool
+		cmd := &cobra.Command{
+			RunE: func(cmd *cobra.Command, args []string) error {
+				applyGitSourceAuthFlags(cmd.Flags(), knownHosts, acceptNew)
+				return nil
+			},
+		}
+		registerGitSourceAuthFlags(cmd, &knownHosts, &acceptNew)
+		return cmd, &knownHosts, &acceptNew
+	}
+
+	t.Run("explicit flags are pushed to the env", func(t *testing.T) {
+		cmd, _, _ := newCmd(t)
+		cmd.SetArgs([]string{"--git-source-ssh-known-hosts", "/custom/kh", "--git-source-ssh-accept-new"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+		if got := os.Getenv(gitsource.EnvSSHKnownHosts); got != "/custom/kh" {
+			t.Errorf("env %s = %q, want /custom/kh", gitsource.EnvSSHKnownHosts, got)
+		}
+		if got := os.Getenv(gitsource.EnvSSHAcceptNew); got != "true" {
+			t.Errorf("env %s = %q, want true", gitsource.EnvSSHAcceptNew, got)
+		}
+	})
+
+	t.Run("unset flags leave the env alone", func(t *testing.T) {
+		t.Setenv(gitsource.EnvSSHKnownHosts, "/from/env")
+		cmd, _, _ := newCmd(t)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+		if got := os.Getenv(gitsource.EnvSSHKnownHosts); got != "/from/env" {
+			t.Errorf("env must stay %q, got %q", "/from/env", got)
+		}
+	})
+
+	t.Run("flag defaults come from the env", func(t *testing.T) {
+		t.Setenv(gitsource.EnvSSHAcceptNew, "yes")
+		cmd, _, acceptNew := newCmd(t)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+		if !*acceptNew {
+			t.Error("accept-new flag default must pick up the env value")
+		}
+	})
+}
+
+// TestRunValidate_ExternalSSHAcceptNewFlag chains the whole policy path:
+// --git-source-ssh-accept-new (pushed as an explicit flag) lets validate
+// clone an ssh upstream whose host key is nowhere in known_hosts — TOFU
+// through the real flag wiring, with no known_hosts file at all.
+func TestRunValidate_ExternalSSHAcceptNewFlag(t *testing.T) {
+	clearGitAuthEnv(t)
+	f := newExternalFixture(t)
+	bare := gitsourcetest.BareClone(t, f.upstreamDir, "upstream")
+
+	keyPath, pub := newSSHClientKey(t)
+	base, _ := gitsourcetest.SSHGitServer(t, pub)
+	t.Setenv("FLUXVIEW_GIT_SSH_KEY", keyPath)
+
+	// Simulate the cobra path: an explicitly passed flag lands in the env
+	// before the pipeline runs.
+	var knownHosts string
+	var acceptNew bool
+	flagCmd := &cobra.Command{
+		RunE: func(cmd *cobra.Command, args []string) error {
+			applyGitSourceAuthFlags(cmd.Flags(), knownHosts, acceptNew)
+			return nil
+		},
+	}
+	registerGitSourceAuthFlags(flagCmd, &knownHosts, &acceptNew)
+	flagCmd.SetArgs([]string{"--git-source-ssh-accept-new"})
+	if err := flagCmd.Execute(); err != nil {
+		t.Fatalf("flag wiring: %v", err)
+	}
+
+	writeHelper(t, f.clusterDir, "gitrepository.yaml", `apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: kyverno
+  namespace: flux-system
+spec:
+  url: `+base+bare+`
+  ref:
+    branch: `+defaultBranchOf(t, f.upstreamDir)+`
+`)
+
+	var runErr error
+	stderr := captureStderr(func() {
+		runErr = runValidate(context.Background(), &ValidateFlags{
+			Path:                  f.clusterDir,
+			disableDefaultSchemas: true,
+			GitSourceCacheDir:     filepath.Join(t.TempDir(), "git-sources"),
+			GitSourceCacheTTL:     time.Hour,
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("validate with --git-source-ssh-accept-new must pass without known_hosts, got: %v\nstderr:\n%s", runErr, stderr)
 	}
 }

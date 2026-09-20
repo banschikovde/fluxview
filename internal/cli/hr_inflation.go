@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
 
 	"github.com/banschikovde/fluxview/internal/flux"
@@ -102,6 +104,34 @@ func registerKustomizeCacheFlags(cmd *cobra.Command, remoteDir *string, remoteTt
 		"Cache directory for clones of external GitRepository sources; off/none disables reuse (env: FLUXVIEW_GIT_SOURCE_CACHE_DIR)")
 	cmd.Flags().DurationVar(gitSourceTtl, "git-source-cache-ttl", gitsource.DefaultTTL(),
 		"How long floating external source resolutions (branch/semver/HEAD) stay fresh; pinned commit/tag clones never expire; 0 always re-resolves (env: FLUXVIEW_GIT_SOURCE_CACHE_TTL)")
+}
+
+// registerGitSourceAuthFlags registers the external git source auth flags
+// shared by the commands — policy knobs only. The credential variables
+// (FLUXVIEW_GIT_SSH_KEY, FLUXVIEW_GIT_SSH_PASSPHRASE,
+// FLUXVIEW_GIT_USERNAME/PASSWORD, FLUXVIEW_GIT_TOKEN) deliberately have
+// no flags: secrets must not appear on command lines. Defaults come from
+// the environment, so an explicit flag overrides the env var per run.
+func registerGitSourceAuthFlags(cmd *cobra.Command, knownHosts *string, acceptNew *bool) {
+	cmd.Flags().StringVar(knownHosts, "git-source-ssh-known-hosts", gitsource.DefaultSSHKnownHostsFile(),
+		"known_hosts file for SSH host key verification of external git sources; empty = ~/.ssh/known_hosts plus /etc/ssh/ssh_known_hosts (env: FLUXVIEW_GIT_SSH_KNOWN_HOSTS)")
+	cmd.Flags().BoolVar(acceptNew, "git-source-ssh-accept-new", gitsource.DefaultSSHAcceptNew(),
+		"Accept unknown SSH host keys of external git sources on first use (TOFU; remembered in memory for the run, known_hosts files are never written) (env: FLUXVIEW_GIT_SSH_ACCEPT_NEW)")
+}
+
+// applyGitSourceAuthFlags pushes explicitly passed git-source auth flags
+// into the environment the auth resolver reads. Defaults already come
+// from the env, so only flags the user actually set (Changed) are
+// exported; direct run* callers keep full control of the environment.
+// Keeps NewFetcher's signature and the env-only credential channel
+// intact.
+func applyGitSourceAuthFlags(flags *pflag.FlagSet, knownHosts string, acceptNew bool) {
+	if flags.Changed("git-source-ssh-known-hosts") {
+		os.Setenv(gitsource.EnvSSHKnownHosts, knownHosts)
+	}
+	if flags.Changed("git-source-ssh-accept-new") {
+		os.Setenv(gitsource.EnvSSHAcceptNew, strconv.FormatBool(acceptNew))
+	}
 }
 
 // buildHRInflation discovers HelmReleases through the Flux Kustomization pipeline

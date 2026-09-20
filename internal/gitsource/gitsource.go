@@ -31,6 +31,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,6 +42,7 @@ import (
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/storage/memory"
 
 	"github.com/banschikovde/fluxview/internal/flux"
@@ -132,13 +134,22 @@ type Fetcher struct {
 	// instead of racing it with a duplicate.
 	mu       sync.Mutex
 	inflight map[string]chan struct{}
+
+	// auth resolves environment credentials (SSH keys, agent, basic auth)
+	// for every network operation of this Fetcher; closed by Close. Nil
+	// falls back to the process-shared resolver (a nil Fetcher still
+	// fetches, and has no Close to manage a resolver with).
+	auth *authResolver
 }
 
 // NewFetcher creates a Fetcher over the given cache directory and TTL.
 // A dir of "off"/"none"/"disabled" (or empty) disables clone reuse.
 // A negative ttl is normalized to zero (always re-resolve floating refs).
 func NewFetcher(cacheDir string, ttl time.Duration) *Fetcher {
-	f := &Fetcher{inflight: make(map[string]chan struct{})}
+	f := &Fetcher{
+		inflight: make(map[string]chan struct{}),
+		auth:     newAuthResolver(),
+	}
 	if !cacheDisabled(cacheDir) {
 		f.dir = cacheDir
 	}
@@ -149,7 +160,8 @@ func NewFetcher(cacheDir string, ttl time.Duration) *Fetcher {
 	return f
 }
 
-// Close removes the temporary clones made while the cache was disabled.
+// Close removes the temporary clones made while the cache was disabled
+// and releases the auth resources (the ssh-agent connection, if any).
 // Cached clones (the data/ tree) are kept — they are the point of the
 // cache. Safe on a nil Fetcher and safe to call twice.
 func (f *Fetcher) Close() error {
@@ -159,10 +171,46 @@ func (f *Fetcher) Close() error {
 	f.mu.Lock()
 	offDir := f.offDir
 	f.mu.Unlock()
-	if offDir == "" {
-		return nil
+
+	var errs []error
+	if offDir != "" {
+		errs = append(errs, os.RemoveAll(offDir))
 	}
-	return os.RemoveAll(offDir)
+	if f.auth != nil {
+		errs = append(errs, f.auth.Close())
+	}
+	return errors.Join(errs...)
+}
+
+// resolveAuthFor returns the auth outcome for url: the Fetcher's own
+// resolver, or the process-shared one when no Fetcher exists.
+func (f *Fetcher) resolveAuthFor(url string) (authOutcome, error) {
+	if f != nil && f.auth != nil {
+		return f.auth.resolve(url)
+	}
+	return sharedAuth().resolve(url)
+}
+
+var (
+	sharedAuthOnce sync.Once
+	sharedAuthRes  *authResolver
+)
+
+// sharedAuth is the process-wide fallback resolver for Fetcher-less
+// fetches; its resources, if any, live for the process lifetime.
+func sharedAuth() *authResolver {
+	sharedAuthOnce.Do(func() { sharedAuthRes = newAuthResolver() })
+	return sharedAuthRes
+}
+
+// explainAuthFailure decorates transport-level authentication failures
+// with their distinct class and remedy, keeping the existing URL+ref
+// error wrapper; other errors pass through unchanged.
+func explainAuthFailure(res authOutcome, err error) error {
+	if msg := res.authFailureMsg(err); msg != "" {
+		return fmt.Errorf("%v; %s", err, msg)
+	}
+	return err
 }
 
 // offTempDir returns the base directory for cache-disabled clones, creating
@@ -196,6 +244,16 @@ func (f *Fetcher) Ensure(ctx context.Context, repo flux.GitRepository) (string, 
 	refSpec := repo.Spec.Ref.RefString()
 	pinned := repo.Spec.Ref.IsPinned()
 
+	// Auth for every network operation below — floating-ref resolution and
+	// clones alike — resolved once (memoized per host) so both see the same
+	// credentials. A resolution failure (no credentials, unreadable key,
+	// no known_hosts) fails before any network happens.
+	res, aerr := f.resolveAuthFor(url)
+	if aerr != nil {
+		return "", aerr
+	}
+	auth := res.auth
+
 	// Resolution: pinned refs are their own resolved form; floating refs go
 	// through the pointer (network only when it is missing or expired).
 	// cloneRef names the remote ref to clone shallowly when the resolved
@@ -213,9 +271,9 @@ func (f *Fetcher) Ensure(ctx context.Context, repo flux.GitRepository) (string, 
 			}
 		}
 		if !resolvedFresh {
-			r, ref, err := resolveFloating(ctx, url, repo.Spec.Ref)
+			r, ref, err := resolveFloating(ctx, url, repo.Spec.Ref, auth)
 			if err != nil {
-				return "", err
+				return "", explainAuthFailure(res, err)
 			}
 			resolved, cloneRef = r, ref
 		}
@@ -236,7 +294,11 @@ func (f *Fetcher) Ensure(ctx context.Context, repo flux.GitRepository) (string, 
 		if err != nil {
 			return "", fmt.Errorf("preparing git source clone: %w", err)
 		}
-		return cloneOnce(ctx, url, resolved, cloneRef, dst)
+		dir, err := cloneOnce(ctx, url, resolved, cloneRef, dst, auth)
+		if err != nil {
+			return "", explainAuthFailure(res, err)
+		}
+		return dir, nil
 	}
 
 	dir := filepath.Join(f.dir, "data", cacheKey(url, resolved))
@@ -245,8 +307,8 @@ func (f *Fetcher) Ensure(ctx context.Context, repo flux.GitRepository) (string, 
 		return dir, nil
 	}
 
-	if err := f.cloneSynced(ctx, url, resolved, cloneRef, dir); err != nil {
-		return "", err
+	if err := f.cloneSynced(ctx, url, resolved, cloneRef, dir, auth); err != nil {
+		return "", explainAuthFailure(res, err)
 	}
 	f.rememberPointer(url, refSpec, resolved, resolvedFresh)
 	return dir, nil
@@ -254,7 +316,7 @@ func (f *Fetcher) Ensure(ctx context.Context, repo flux.GitRepository) (string, 
 
 // cloneSynced clones url at resolved into dir, deduplicating concurrent
 // clones of the same directory within this process.
-func (f *Fetcher) cloneSynced(ctx context.Context, url, resolved, cloneRef, dir string) error {
+func (f *Fetcher) cloneSynced(ctx context.Context, url, resolved, cloneRef, dir string, auth transport.AuthMethod) error {
 	key := cacheKey(url, resolved)
 
 	f.mu.Lock()
@@ -269,13 +331,13 @@ func (f *Fetcher) cloneSynced(ctx context.Context, url, resolved, cloneRef, dir 
 			return nil
 		}
 		// The first clone failed; try again ourselves.
-		return f.cloneSynced(ctx, url, resolved, cloneRef, dir)
+		return f.cloneSynced(ctx, url, resolved, cloneRef, dir, auth)
 	}
 	done := make(chan struct{})
 	f.inflight[key] = done
 	f.mu.Unlock()
 
-	err := cloneAtomic(ctx, f.dir, url, resolved, cloneRef, dir)
+	err := cloneAtomic(ctx, f.dir, url, resolved, cloneRef, dir, auth)
 
 	f.mu.Lock()
 	delete(f.inflight, key)
@@ -316,16 +378,16 @@ func (f *Fetcher) fresh(m meta) bool {
 // is the remote ref name the clone should fetch shallowly (empty when the
 // resolved form is enough — tags, or HEAD over a server that advertises a
 // real HEAD hash, where the default clone already lands on it).
-func resolveFloating(ctx context.Context, url string, ref *flux.GitRepositoryRef) (resolved, cloneRef string, err error) {
+func resolveFloating(ctx context.Context, url string, ref *flux.GitRepositoryRef, auth transport.AuthMethod) (resolved, cloneRef string, err error) {
 	switch {
 	case ref != nil && ref.Branch != "":
-		sha, err := lsRemoteHash(ctx, url, "refs/heads/"+ref.Branch)
+		sha, err := lsRemoteHash(ctx, url, "refs/heads/"+ref.Branch, auth)
 		if err != nil {
 			return "", "", fmt.Errorf("resolving branch %q of %s: %w", ref.Branch, url, err)
 		}
 		return "commit:" + sha, "refs/heads/" + ref.Branch, nil
 	case ref != nil && ref.Semver != "":
-		refs, err := listRefs(ctx, url)
+		refs, err := listRefs(ctx, url, auth)
 		if err != nil {
 			return "", "", fmt.Errorf("listing tags of %s for semver %q: %w", url, ref.Semver, err)
 		}
@@ -335,7 +397,7 @@ func resolveFloating(ctx context.Context, url string, ref *flux.GitRepositoryRef
 		}
 		return "tag:" + tag, "", nil
 	default:
-		sha, branch, err := lsRemoteHead(ctx, url)
+		sha, branch, err := lsRemoteHead(ctx, url, auth)
 		if err != nil {
 			return "", "", fmt.Errorf("resolving HEAD of %s: %w", url, err)
 		}
@@ -353,7 +415,7 @@ func resolveFloating(ctx context.Context, url string, ref *flux.GitRepositoryRef
 // exist or holds a complete clone with a valid seed. A rename race with a
 // concurrent process is fine — the loser discards its temp and reuses the
 // winner's directory.
-func cloneAtomic(ctx context.Context, cacheDir, url, resolved, cloneRef, dir string) error {
+func cloneAtomic(ctx context.Context, cacheDir, url, resolved, cloneRef, dir string, auth transport.AuthMethod) error {
 	if err := os.MkdirAll(filepath.Join(cacheDir, "tmp"), 0o755); err != nil {
 		return fmt.Errorf("preparing git source cache: %w", err)
 	}
@@ -366,7 +428,7 @@ func cloneAtomic(ctx context.Context, cacheDir, url, resolved, cloneRef, dir str
 	if err != nil {
 		return fmt.Errorf("preparing git source clone: %w", err)
 	}
-	if _, err := cloneOnce(ctx, url, resolved, cloneRef, tmp); err != nil {
+	if _, err := cloneOnce(ctx, url, resolved, cloneRef, tmp, auth); err != nil {
 		os.RemoveAll(tmp)
 		return err
 	}
@@ -401,7 +463,8 @@ func cloneAtomic(ctx context.Context, cacheDir, url, resolved, cloneRef, dir str
 // dst. cloneRef, when set, names the remote ref to fetch instead of the
 // resolved commit — used for branch/HEAD resolutions so the tip clone can
 // be shallow (depth 1): the resolved sha IS the tip, the tree is identical,
-// the content-addressed key is unchanged.
+// the content-addressed key is unchanged. auth, when non-nil, carries the
+// environment-resolved credentials for private repositories.
 //
 // Shallow clones (depth 1) are used for the protocols whose servers
 // guarantee them (http/https/git); file and other transports do a full
@@ -409,10 +472,10 @@ func cloneAtomic(ctx context.Context, cacheDir, url, resolved, cloneRef, dir str
 // correctness beats the bandwidth. A commit checkout without a cloneRef
 // (ref.commit from a manifest) always needs the full history: shallow
 // fetch of an arbitrary SHA is not guaranteed by any server.
-func cloneOnce(ctx context.Context, url, resolved, cloneRef, dst string) (string, error) {
+func cloneOnce(ctx context.Context, url, resolved, cloneRef, dst string, auth transport.AuthMethod) (string, error) {
 	kind, value, _ := strings.Cut(resolved, ":")
 
-	opts := &gogit.CloneOptions{URL: url}
+	opts := &gogit.CloneOptions{URL: url, Auth: auth}
 	shallow := supportsShallow(url) && (kind != "commit" || cloneRef != "")
 	switch {
 	case cloneRef != "":
@@ -473,8 +536,9 @@ func supportsShallow(url string) bool {
 }
 
 // listRefs runs one ls-remote against url over an in-memory repository —
-// no local clone or state needed.
-func listRefs(ctx context.Context, url string) ([]*plumbing.Reference, error) {
+// no local clone or state needed. auth, when non-nil, carries the
+// environment-resolved credentials for private repositories.
+func listRefs(ctx context.Context, url string, auth transport.AuthMethod) ([]*plumbing.Reference, error) {
 	repo, err := gogit.Init(memory.NewStorage(), nil)
 	if err != nil {
 		return nil, err
@@ -483,12 +547,12 @@ func listRefs(ctx context.Context, url string) ([]*plumbing.Reference, error) {
 	if err != nil {
 		return nil, err
 	}
-	return remote.ListContext(ctx, &gogit.ListOptions{})
+	return remote.ListContext(ctx, &gogit.ListOptions{Auth: auth})
 }
 
 // lsRemoteHash resolves one exact ref name to its commit sha.
-func lsRemoteHash(ctx context.Context, url, refName string) (string, error) {
-	refs, err := listRefs(ctx, url)
+func lsRemoteHash(ctx context.Context, url, refName string, auth transport.AuthMethod) (string, error) {
+	refs, err := listRefs(ctx, url, auth)
 	if err != nil {
 		return "", err
 	}
@@ -508,8 +572,8 @@ func lsRemoteHash(ctx context.Context, url, refName string) (string, error) {
 // existing branch is the fallback, then the conventional default branch
 // names (main, master); several branches without any of those are an
 // explicit error rather than a guess.
-func lsRemoteHead(ctx context.Context, url string) (sha, branch string, err error) {
-	refs, err := listRefs(ctx, url)
+func lsRemoteHead(ctx context.Context, url string, auth transport.AuthMethod) (sha, branch string, err error) {
+	refs, err := listRefs(ctx, url, auth)
 	if err != nil {
 		return "", "", err
 	}

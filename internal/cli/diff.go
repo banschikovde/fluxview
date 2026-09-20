@@ -45,6 +45,10 @@ type DiffFlags struct {
 	BuildCacheTTL       time.Duration
 	GitSourceCacheDir   string
 	GitSourceCacheTTL   time.Duration
+	// GitSourceSSHKnownHosts and GitSourceSSHAcceptNew are the external
+	// git source auth policy knobs (credentials stay env-only).
+	GitSourceSSHKnownHosts string
+	GitSourceSSHAcceptNew  bool
 }
 
 func newDiffCmd() *cobra.Command {
@@ -68,6 +72,7 @@ Examples:
   fluxview diff ks --path clusters/dev/ --branch-orig main --strip-attrs helm.sh/chart,status --skip-crds`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			applyGitSourceAuthFlags(cmd.Flags(), flags.GitSourceSSHKnownHosts, flags.GitSourceSSHAcceptNew)
 			return runDiff(cmd.Context(), args, flags)
 		},
 	}
@@ -81,6 +86,7 @@ Examples:
 	cmd.Flags().StringVar(&flags.StripAttrs, "strip-attrs", "", "Comma-separated keys to strip from diff (e.g. helm.sh/chart,status)")
 	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL, &flags.HelmDownloadTimeout)
 	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.RemoteCacheTimeout, &flags.BuildCacheDir, &flags.BuildCacheTTL, &flags.GitSourceCacheDir, &flags.GitSourceCacheTTL)
+	registerGitSourceAuthFlags(cmd, &flags.GitSourceSSHKnownHosts, &flags.GitSourceSSHAcceptNew)
 	return cmd
 }
 

@@ -2,6 +2,9 @@ package gitsource
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +15,7 @@ import (
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport"
 
 	"github.com/banschikovde/fluxview/internal/flux"
 )
@@ -517,4 +521,132 @@ func TestFetcher_DisabledFetcherStillFetches(t *testing.T) {
 	if got := readCloneFile(t, dir, "file.txt"); got != "pinned\n" {
 		t.Errorf("nil Fetcher clone holds %q", got)
 	}
+}
+
+func TestEnsure_SSHResolutionErrorFailsBeforeNetwork(t *testing.T) {
+	clearAuthEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	emptyKnownHosts(t)
+
+	f := NewFetcher(t.TempDir(), time.Hour)
+	_, err := f.Ensure(context.Background(), flux.GitRepository{
+		Metadata: flux.ObjectMeta{Name: "upstream", Namespace: "test"},
+		Spec:     flux.GitRepositorySpec{URL: "ssh://git@git.example.com/platform/crds.git"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "no SSH credentials found for git@git.example.com:22") {
+		t.Fatalf("Ensure must surface the auth resolution error, got: %v", err)
+	}
+}
+
+// closedPort returns a loopback host:port that just stopped listening, so
+// a connect attempt fails fast with connection refused (offline test of
+// the transport path).
+func closedPort(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+	return addr
+}
+
+func TestEnsure_SSHAuthThreadsToTransport(t *testing.T) {
+	clearAuthEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	emptyKnownHosts(t)
+	keyPath := writeKeyFile(t, filepath.Join(t.TempDir(), "id_custom"), mustPriv(t), "")
+	t.Setenv(envSSHKey, keyPath)
+
+	url := "ssh://git@" + closedPort(t) + "/platform/crds.git"
+	f := NewFetcher(t.TempDir(), time.Hour)
+	_, err := f.Ensure(context.Background(), flux.GitRepository{
+		Metadata: flux.ObjectMeta{Name: "upstream", Namespace: "test"},
+		Spec:     flux.GitRepositorySpec{URL: url, Ref: &flux.GitRepositoryRef{Branch: "main"}},
+	})
+	if err == nil {
+		t.Fatal("Ensure against a closed port must fail")
+	}
+	// The URL+ref wrapper is preserved and the failure is the transport's
+	// (connection refused), not an auth-resolution one: the resolved key
+	// and host key callback were handed to the dialer.
+	for _, want := range []string{url, "connection refused"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q must mention %q", err, want)
+		}
+	}
+}
+
+func TestFetcher_CloseClosesAgentConnection(t *testing.T) {
+	clearAuthEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	emptyKnownHosts(t)
+	sock, live := startTestAgent(t, true)
+	t.Setenv("SSH_AUTH_SOCK", sock)
+
+	f := NewFetcher(t.TempDir(), time.Hour)
+	if _, err := f.resolveAuthFor("git@git.example.com:crds.git"); err != nil {
+		t.Fatalf("resolveAuthFor: %v", err)
+	}
+	waitFor(t, "agent dialed through the Fetcher", func() bool { return live.Load() == 1 })
+
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	waitFor(t, "agent connection closed by Fetcher.Close", func() bool { return live.Load() == 0 })
+}
+
+func TestExplainAuthFailure(t *testing.T) {
+	sshRejected := errors.New("ssh: handshake failed: ssh: unable to authenticate, attempted methods [publickey], no supported methods remain")
+
+	t.Run("ssh rejected names the credential source", func(t *testing.T) {
+		res := authOutcome{ssh: true, keySource: "ssh-agent"}
+		err := explainAuthFailure(res, sshRejected)
+		for _, want := range []string{"SSH authentication failed", "ssh-agent"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q must mention %q", err, want)
+			}
+		}
+		if !strings.Contains(err.Error(), "unable to authenticate") {
+			t.Errorf("the transport error must stay in the message: %v", err)
+		}
+	})
+
+	t.Run("http 401 suggests credentials", func(t *testing.T) {
+		res := authOutcome{}
+		err := explainAuthFailure(res, fmt.Errorf("listing refs: %w", transport.ErrAuthenticationRequired))
+		for _, want := range []string{"private repository or bad credentials", envGitUsername, ".netrc"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q must mention %q", err, want)
+			}
+		}
+	})
+
+	t.Run("http 403 too", func(t *testing.T) {
+		res := authOutcome{}
+		err := explainAuthFailure(res, fmt.Errorf("cloning: %w", transport.ErrAuthorizationFailed))
+		if !strings.Contains(err.Error(), "private repository or bad credentials") {
+			t.Errorf("error %q must name the auth problem", err)
+		}
+	})
+
+	t.Run("other errors pass through", func(t *testing.T) {
+		plain := errors.New("dial tcp: connection refused")
+		for _, res := range []authOutcome{
+			{ssh: true, keySource: "ssh-agent"},
+			{},
+		} {
+			if got := explainAuthFailure(res, plain); got != plain {
+				t.Errorf("non-auth error must pass through unchanged, got: %v", got)
+			}
+		}
+	})
+
+	t.Run("resolution-error outcomes never decorate", func(t *testing.T) {
+		res := authOutcome{ssh: true, err: errors.New("no SSH credentials found")}
+		if got := explainAuthFailure(res, sshRejected); got != sshRejected {
+			t.Errorf("a failed resolution must not decorate transport errors, got: %v", got)
+		}
+	})
 }

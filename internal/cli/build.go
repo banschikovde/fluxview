@@ -36,6 +36,10 @@ type BuildFlags struct {
 	BuildCacheTTL       time.Duration
 	GitSourceCacheDir   string
 	GitSourceCacheTTL   time.Duration
+	// GitSourceSSHKnownHosts and GitSourceSSHAcceptNew are the external
+	// git source auth policy knobs (credentials stay env-only).
+	GitSourceSSHKnownHosts string
+	GitSourceSSHAcceptNew  bool
 }
 
 func newBuildCmd() *cobra.Command {
@@ -58,6 +62,7 @@ Examples:
   fluxview build hr --path clusters/prod/flux/
   fluxview build hr podinfo --path clusters/prod/flux/`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			applyGitSourceAuthFlags(cmd.Flags(), flags.GitSourceSSHKnownHosts, flags.GitSourceSSHAcceptNew)
 			return runBuild(cmd.Context(), args, flags)
 		},
 	}
@@ -68,6 +73,7 @@ Examples:
 	cmd.Flags().StringVar(&flags.StripAttrs, "strip-attrs", "", "Comma-separated keys to strip from output (e.g. helm.sh/chart,status)")
 	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL, &flags.HelmDownloadTimeout)
 	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.RemoteCacheTimeout, &flags.BuildCacheDir, &flags.BuildCacheTTL, &flags.GitSourceCacheDir, &flags.GitSourceCacheTTL)
+	registerGitSourceAuthFlags(cmd, &flags.GitSourceSSHKnownHosts, &flags.GitSourceSSHAcceptNew)
 
 	return cmd
 }
