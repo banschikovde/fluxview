@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-git/go-git/v5/plumbing/transport"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	gitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/skeema/knownhosts"
@@ -26,7 +27,8 @@ func clearAuthEnv(t *testing.T) {
 	t.Helper()
 	for _, v := range []string{
 		envSSHKey, envSSHPassphrase, EnvSSHKnownHosts, EnvSSHAcceptNew,
-		envGitUsername, envGitPassword, envGitToken, "SSH_AUTH_SOCK",
+		envGitUsername, envGitPassword, envGitToken,
+		envGitCredentialHosts, "SSH_AUTH_SOCK",
 	} {
 		t.Setenv(v, "")
 	}
@@ -496,11 +498,12 @@ func TestResolve_RecordsCredentialSource(t *testing.T) {
 	})
 
 	t.Run("http outcome is not ssh", func(t *testing.T) {
+		t.Setenv(envGitCredentialHosts, "git.example.com")
 		t.Setenv(envGitUsername, "alice")
 		t.Setenv(envGitPassword, "pw")
 		out, err := newAuthResolver().resolve("https://git.example.com/crds.git")
-		if err != nil || out.ssh {
-			t.Errorf("http outcome = %+v, %v; want a non-ssh one", out, err)
+		if err != nil || out.ssh || out.auth == nil {
+			t.Errorf("http outcome = %+v, %v; want a non-ssh one with auth", out, err)
 		}
 	})
 }
@@ -547,6 +550,7 @@ func TestResolveAuth_MemoizationSeparatesTransports(t *testing.T) {
 	t.Setenv(envGitUsername, "alice")
 	t.Setenv(envGitPassword, "hunter2")
 	t.Setenv(envSSHKey, keyPath)
+	t.Setenv(envGitCredentialHosts, "git.example.com")
 
 	t.Run("https first must not leak basic auth into ssh", func(t *testing.T) {
 		r := newAuthResolver()
@@ -605,6 +609,7 @@ func TestResolveAuth_HTTP(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	t.Run("username and password", func(t *testing.T) {
+		t.Setenv(envGitCredentialHosts, "git.example.com")
 		t.Setenv(envGitUsername, "alice")
 		t.Setenv(envGitPassword, "hunter2")
 		auth, err := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
@@ -621,6 +626,7 @@ func TestResolveAuth_HTTP(t *testing.T) {
 	})
 
 	t.Run("env pair wins over token", func(t *testing.T) {
+		t.Setenv(envGitCredentialHosts, "git.example.com")
 		t.Setenv(envGitUsername, "alice")
 		t.Setenv(envGitPassword, "hunter2")
 		t.Setenv(envGitToken, "glpat-tok")
@@ -631,6 +637,7 @@ func TestResolveAuth_HTTP(t *testing.T) {
 	})
 
 	t.Run("token becomes oauth2", func(t *testing.T) {
+		t.Setenv(envGitCredentialHosts, "git.example.com")
 		t.Setenv(envGitToken, "glpat-tok")
 		auth, _ := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
 		ba, ok := auth.(*githttp.BasicAuth)
@@ -639,6 +646,66 @@ func TestResolveAuth_HTTP(t *testing.T) {
 		}
 		if ba.Username != "oauth2" || ba.Password != "glpat-tok" {
 			t.Errorf("token auth = %q/%q, want oauth2/glpat-tok", ba.Username, ba.Password)
+		}
+	})
+
+	t.Run("credentials withheld without an allowlist", func(t *testing.T) {
+		t.Setenv(envGitToken, "glpat-tok")
+		auth, err := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
+		if auth != nil || err != nil {
+			t.Fatalf("unset allowlist must withhold env credentials, got %v, %v", auth, err)
+		}
+	})
+
+	t.Run("empty allowlist withholds credentials", func(t *testing.T) {
+		t.Setenv(envGitCredentialHosts, "  ")
+		t.Setenv(envGitUsername, "alice")
+		t.Setenv(envGitPassword, "hunter2")
+		auth, err := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
+		if auth != nil || err != nil {
+			t.Fatalf("empty allowlist must withhold env credentials, got %v, %v", auth, err)
+		}
+	})
+
+	t.Run("host outside the allowlist withholds credentials", func(t *testing.T) {
+		t.Setenv(envGitCredentialHosts, "github.com, GitLab.com ")
+		t.Setenv(envGitToken, "glpat-tok")
+		auth, err := newAuthResolver().resolveAuth("https://attacker.example/repo.git")
+		if auth != nil || err != nil {
+			t.Fatalf("unlisted host must get no credentials, got %v, %v", auth, err)
+		}
+	})
+
+	t.Run("allowlist entry is case-insensitive and port-agnostic", func(t *testing.T) {
+		t.Setenv(envGitCredentialHosts, " GitHub.COM , gitlab.com")
+		t.Setenv(envGitToken, "glpat-tok")
+		auth, _ := newAuthResolver().resolveAuth("https://GiThub.com:443/crds.git")
+		ba, ok := auth.(*githttp.BasicAuth)
+		if !ok {
+			t.Fatalf("listed host (any case, default port) must get the token, got %T", auth)
+		}
+		if ba.Password != "glpat-tok" {
+			t.Errorf("token auth = %q/%q, want oauth2/glpat-tok", ba.Username, ba.Password)
+		}
+	})
+
+	t.Run("withheld host still uses a netrc machine entry", func(t *testing.T) {
+		netrc := "machine git.example.com login bob password netrc-pass\n"
+		if err := os.WriteFile(filepath.Join(home, ".netrc"), []byte(netrc), 0o600); err != nil {
+			t.Fatalf("writing .netrc: %v", err)
+		}
+		t.Setenv(envGitCredentialHosts, "github.com")
+		t.Setenv(envGitToken, "glpat-tok")
+		auth, err := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
+		if err != nil {
+			t.Fatalf("resolveAuth: %v", err)
+		}
+		ba, ok := auth.(*githttp.BasicAuth)
+		if !ok {
+			t.Fatalf("want *http.BasicAuth from netrc machine entry, got %T", auth)
+		}
+		if ba.Username != "bob" || ba.Password != "netrc-pass" {
+			t.Errorf("netrc auth = %q/%q, want bob/netrc-pass", ba.Username, ba.Password)
 		}
 	})
 
@@ -660,12 +727,74 @@ func TestResolveAuth_HTTP(t *testing.T) {
 		}
 	})
 
+	t.Run("netrc default restricted by the allowlist", func(t *testing.T) {
+		netrc := "default login default-user password default-pass\n"
+		netrcPath := filepath.Join(home, ".netrc")
+		if err := os.WriteFile(netrcPath, []byte(netrc), 0o600); err != nil {
+			t.Fatalf("writing .netrc: %v", err)
+		}
+		defer os.Remove(netrcPath) // keep later subtests credential-free
+		t.Run("listed host keeps the default stanza", func(t *testing.T) {
+			t.Setenv(envGitCredentialHosts, "git.example.com")
+			auth, err := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
+			if err != nil {
+				t.Fatalf("resolveAuth: %v", err)
+			}
+			ba, ok := auth.(*githttp.BasicAuth)
+			if !ok {
+				t.Fatalf("want *http.BasicAuth, got %T", auth)
+			}
+			if ba.Username != "default-user" || ba.Password != "default-pass" {
+				t.Errorf("default stanza auth = %q/%q", ba.Username, ba.Password)
+			}
+		})
+		t.Run("unlisted host does not", func(t *testing.T) {
+			t.Setenv(envGitCredentialHosts, "github.com")
+			auth, err := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
+			if auth != nil || err != nil {
+				t.Errorf("default stanza must stay home for unlisted hosts, got %v, %v", auth, err)
+			}
+		})
+		t.Run("unset allowlist keeps the legacy default behavior", func(t *testing.T) {
+			auth, err := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
+			if err != nil {
+				t.Fatalf("resolveAuth: %v", err)
+			}
+			if auth == nil {
+				t.Error("default stanza must keep matching every host while no allowlist is set")
+			}
+		})
+	})
+
 	t.Run("no credentials is nil auth", func(t *testing.T) {
 		auth, err := newAuthResolver().resolveAuth("https://public.example.com/crds.git")
 		if auth != nil || err != nil {
 			t.Errorf("public https must resolve to no auth, got %v, %v", auth, err)
 		}
 	})
+}
+
+// TestResolveAuth_CredsWithheldFailureMsg pins the authFailureMsg remedy of
+// a withheld resolution: a transport authentication failure must point at
+// FLUXVIEW_GIT_CREDENTIAL_HOSTS, never at the credential values.
+func TestResolveAuth_CredsWithheldFailureMsg(t *testing.T) {
+	clearAuthEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(envGitToken, "glpat-tok")
+
+	out, err := newAuthResolver().resolve("https://git.example.com/crds.git")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	msg := out.authFailureMsg(transport.ErrAuthenticationRequired)
+	for _, want := range []string{"FLUXVIEW_GIT_CREDENTIAL_HOSTS", "not allowed for this host"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("failure message %q must mention %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "glpat-tok") {
+		t.Errorf("failure message must not contain the credential: %q", msg)
+	}
 }
 
 // resolvedSSHAuth resolves auth over an env key and returns the wired
@@ -862,22 +991,25 @@ machine macro.example.com login mac password mac-pass
 	tests := []struct {
 		name      string
 		host      string
+		allowDef  bool
 		wantLogin string
 		wantPass  string
 		wantOK    bool
 	}{
-		{"multiline entry", "git.example.com", "alice", "line-broken", true},
-		{"single line entry", "other.example.com", "bob", "other-pass", true},
-		{"default fallback", "unknown.example.com", "default-user", "default-pass", true},
-		{"port is stripped by the caller", "git.example.com", "alice", "line-broken", true},
-		{"entry after macdef", "macro.example.com", "mac", "mac-pass", true},
-		{"no default and no match", "", "", "", false},
+		{"multiline entry", "git.example.com", true, "alice", "line-broken", true},
+		{"single line entry", "other.example.com", true, "bob", "other-pass", true},
+		{"default fallback", "unknown.example.com", true, "default-user", "default-pass", true},
+		{"default disabled", "unknown.example.com", false, "", "", false},
+		{"machine entry survives a disabled default", "git.example.com", false, "alice", "line-broken", true},
+		{"port is stripped by the caller", "git.example.com", true, "alice", "line-broken", true},
+		{"entry after macdef", "macro.example.com", true, "mac", "mac-pass", true},
+		{"no default and no match", "", true, "", "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			login, pass, ok := netrcCredentials(path, tt.host)
+			login, pass, ok := netrcCredentials(path, tt.host, tt.allowDef)
 			if tt.host == "" {
-				login, pass, ok = netrcCredentials(filepath.Join(dir, "missing"), "any.example.com")
+				login, pass, ok = netrcCredentials(filepath.Join(dir, "missing"), "any.example.com", true)
 			}
 			if ok != tt.wantOK || login != tt.wantLogin || pass != tt.wantPass {
 				t.Errorf("netrcCredentials(host=%q) = %q/%q,%v; want %q/%q,%v",

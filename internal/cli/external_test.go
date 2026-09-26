@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,17 @@ import (
 	"github.com/banschikovde/fluxview/internal/gitsource"
 	"github.com/banschikovde/fluxview/internal/gitsource/gitsourcetest"
 )
+
+// hostOf extracts the bare hostname of a test server URL, for the
+// FLUXVIEW_GIT_CREDENTIAL_HOSTS allowlist.
+func hostOf(t *testing.T, raw string) string {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parsing %q: %v", raw, err)
+	}
+	return u.Hostname()
+}
 
 // externalFixture assembles the two repositories the external-source
 // pipeline spans: a fleet ("cluster") repository with an origin remote, and
@@ -990,7 +1002,8 @@ func clearGitAuthEnv(t *testing.T) {
 		"FLUXVIEW_GIT_SSH_KEY", "FLUXVIEW_GIT_SSH_PASSPHRASE",
 		"FLUXVIEW_GIT_SSH_KNOWN_HOSTS", "FLUXVIEW_GIT_SSH_ACCEPT_NEW",
 		"FLUXVIEW_GIT_USERNAME", "FLUXVIEW_GIT_PASSWORD",
-		"FLUXVIEW_GIT_TOKEN", "SSH_AUTH_SOCK",
+		"FLUXVIEW_GIT_TOKEN", "FLUXVIEW_GIT_CREDENTIAL_HOSTS",
+		"SSH_AUTH_SOCK",
 	} {
 		t.Setenv(v, "")
 	}
@@ -1025,6 +1038,7 @@ spec:
 `)
 	t.Setenv("FLUXVIEW_GIT_USERNAME", "fluxview")
 	t.Setenv("FLUXVIEW_GIT_PASSWORD", "s3cret")
+	t.Setenv("FLUXVIEW_GIT_CREDENTIAL_HOSTS", hostOf(t, base))
 
 	var runErr error
 	stdout := captureStdout(func() {
@@ -1037,6 +1051,60 @@ spec:
 	}
 	if !strings.Contains(stdout, "policies.kyverno.io") {
 		t.Errorf("external CRD missing from the build output:\n%s", stdout)
+	}
+}
+
+// TestRunValidate_ExternalHTTPSCredsWithheld_Fails pins the H-1 fail-closed
+// behavior: env credentials set but the host outside
+// FLUXVIEW_GIT_CREDENTIAL_HOSTS must never reach the upstream — validate
+// fails with the allowlist remedy in the message.
+func TestRunValidate_ExternalHTTPSCredsWithheld_Fails(t *testing.T) {
+	clearGitAuthEnv(t)
+	f := newExternalFixture(t)
+
+	bare := gitsourcetest.BareClone(t, f.upstreamDir, "upstream")
+	base := gitsourcetest.HTTPSBasicAuth(t, filepath.Dir(bare), "fluxview", "s3cret")
+	writeHelper(t, f.clusterDir, "gitrepository.yaml", `apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: kyverno
+  namespace: flux-system
+spec:
+  url: `+base+`/upstream.git
+  ref:
+    tag: v1.0.0
+`)
+	t.Setenv("FLUXVIEW_GIT_USERNAME", "fluxview")
+	t.Setenv("FLUXVIEW_GIT_PASSWORD", "s3cret")
+	t.Setenv("FLUXVIEW_GIT_CREDENTIAL_HOSTS", "github.com")
+
+	var runErr error
+	_ = captureStderr(func() {
+		runErr = runValidate(context.Background(), &ValidateFlags{
+			Path:                  f.clusterDir,
+			disableDefaultSchemas: true,
+			GitSourceCacheDir:     filepath.Join(t.TempDir(), "git-sources"),
+			GitSourceCacheTTL:     time.Hour,
+		})
+	})
+	exitErr, ok := runErr.(*DiffExitError)
+	if !ok {
+		t.Fatalf("expected *DiffExitError, got %v", runErr)
+	}
+	if exitErr.ExitCode != ExitCodeError {
+		t.Errorf("exit code = %d, want %d", exitErr.ExitCode, ExitCodeError)
+	}
+	for _, want := range []string{
+		"failed to fetch their external source",
+		"private repository or bad credentials",
+		"FLUXVIEW_GIT_CREDENTIAL_HOSTS",
+	} {
+		if !strings.Contains(exitErr.Error(), want) {
+			t.Errorf("error must contain %q, got: %v", want, exitErr.Error())
+		}
+	}
+	if strings.Contains(exitErr.Error(), "s3cret") {
+		t.Errorf("error must not contain the password: %v", exitErr)
 	}
 }
 

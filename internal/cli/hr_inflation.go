@@ -109,9 +109,10 @@ func registerKustomizeCacheFlags(cmd *cobra.Command, remoteDir *string, remoteTt
 // registerGitSourceAuthFlags registers the external git source auth flags
 // shared by the commands — policy knobs only. The credential variables
 // (FLUXVIEW_GIT_SSH_KEY, FLUXVIEW_GIT_SSH_PASSPHRASE,
-// FLUXVIEW_GIT_USERNAME/PASSWORD, FLUXVIEW_GIT_TOKEN) deliberately have
-// no flags: secrets must not appear on command lines. Defaults come from
-// the environment, so an explicit flag overrides the env var per run.
+// FLUXVIEW_GIT_USERNAME/PASSWORD, FLUXVIEW_GIT_TOKEN) and their host
+// allowlist (FLUXVIEW_GIT_CREDENTIAL_HOSTS) deliberately have no flags:
+// secrets must not appear on command lines. Defaults come from the
+// environment, so an explicit flag overrides the env var per run.
 func registerGitSourceAuthFlags(cmd *cobra.Command, knownHosts *string, acceptNew *bool) {
 	cmd.Flags().StringVar(knownHosts, "git-source-ssh-known-hosts", gitsource.DefaultSSHKnownHostsFile(),
 		"known_hosts file for SSH host key verification of external git sources; empty = ~/.ssh/known_hosts plus /etc/ssh/ssh_known_hosts (env: FLUXVIEW_GIT_SSH_KNOWN_HOSTS)")

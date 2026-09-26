@@ -1,10 +1,13 @@
 // Authentication of external git sources from the machine environment —
 // the same model as native git on a developer box or CI runner: SSH keys
 // (env file, ssh-agent, default identity files) for ssh:// and scp-style
-// URLs, basic auth from env pairs or ~/.netrc for http(s)://. Manifests
-// stay untouched: spec.secretRef is ignored (no cluster access by design)
-// and credentials embedded in URLs are ignored (NormalizeGitURL strips
-// them; the source of credentials is the environment only).
+// URLs, basic auth from env pairs or ~/.netrc for http(s)://. Env and
+// netrc-default credentials apply only to hosts listed in
+// FLUXVIEW_GIT_CREDENTIAL_HOSTS: a URL from a manifest is untrusted input,
+// so a token from CI must never travel to a host the user did not name.
+// Manifests stay untouched: spec.secretRef is ignored (no cluster access
+// by design) and credentials embedded in URLs are ignored (NormalizeGitURL
+// strips them; the source of credentials is the environment only).
 
 package gitsource
 
@@ -42,6 +45,10 @@ const (
 	envGitUsername  = "FLUXVIEW_GIT_USERNAME"
 	envGitPassword  = "FLUXVIEW_GIT_PASSWORD"
 	envGitToken     = "FLUXVIEW_GIT_TOKEN"
+	// envGitCredentialHosts names the CSV list of hosts the env and
+	// netrc-default credentials may travel to; empty means no host at all
+	// (fail-closed). Like the credential variables it never gets a flag.
+	envGitCredentialHosts = "FLUXVIEW_GIT_CREDENTIAL_HOSTS"
 )
 
 // DefaultSSHKnownHostsFile returns the known_hosts file for SSH host key
@@ -171,6 +178,10 @@ type authOutcome struct {
 	// keySource names the credential source in play ("FLUXVIEW_GIT_SSH_KEY",
 	// "ssh-agent", "~/.ssh/id_ed25519"), for error messages.
 	keySource string
+	// credsWithheld marks http resolutions where environment credentials
+	// exist but the host is outside FLUXVIEW_GIT_CREDENTIAL_HOSTS — no auth
+	// is returned, and transport failures name the allowlist as the remedy.
+	credsWithheld bool
 }
 
 // authFailureMsg explains a transport-level error that looks like rejected
@@ -190,6 +201,9 @@ func (o authOutcome) authFailureMsg(err error) string {
 	if errors.Is(err, transport.ErrAuthenticationRequired) ||
 		errors.Is(err, transport.ErrAuthorizationFailed) ||
 		errors.Is(err, transport.ErrInvalidAuthMethod) {
+		if o.credsWithheld {
+			return "private repository or bad credentials (FLUXVIEW_GIT_USERNAME/FLUXVIEW_GIT_TOKEN are set but not allowed for this host; add it to FLUXVIEW_GIT_CREDENTIAL_HOSTS)"
+		}
 		return "private repository or bad credentials (set FLUXVIEW_GIT_USERNAME/FLUXVIEW_GIT_PASSWORD or ~/.netrc)"
 	}
 	return ""
@@ -294,20 +308,63 @@ func (r *authResolver) resolvePerHost(ep gitEndpoint, resolve func(gitEndpoint) 
 	return out, err
 }
 
+// credentialHostAllowed reports whether host (a bare hostname, no port)
+// is listed in FLUXVIEW_GIT_CREDENTIAL_HOSTS. The list is CSV, entries are
+// whitespace-trimmed and matched case-insensitively. An empty or unset
+// list allows nothing: fail-closed, so a URL from an untrusted manifest
+// (a fork redirecting to attacker.example) can never harvest a CI token.
+func credentialHostAllowed(host string) bool {
+	list := os.Getenv(envGitCredentialHosts)
+	if strings.TrimSpace(list) == "" {
+		return false
+	}
+	host = strings.ToLower(strings.TrimSpace(host))
+	for _, entry := range strings.Split(list, ",") {
+		if strings.ToLower(strings.TrimSpace(entry)) == host {
+			return true
+		}
+	}
+	return false
+}
+
+// credentialHostsSet reports whether FLUXVIEW_GIT_CREDENTIAL_HOSTS names
+// any host at all; when it does not, the netrc default stanza keeps its
+// legacy match-everything behavior.
+func credentialHostsSet() bool {
+	return strings.TrimSpace(os.Getenv(envGitCredentialHosts)) != ""
+}
+
 // resolveHTTPAuth resolves basic auth for an http(s) endpoint: the env
 // pair has priority, a forge token is sugar for oauth2:<token>, ~/.netrc
 // (parsed natively — go-git has no netrc support of its own) is the
-// fallback, and public repositories resolve to no auth at all.
+// fallback, and public repositories resolve to no auth at all. The env
+// pair and the token travel only to allowlisted hosts; a netrc default
+// stanza is bound by the same list once it is set (machine stanzas are
+// scoped by their own host entry and never need the list).
 func (r *authResolver) resolveHTTPAuth(ep gitEndpoint) (authOutcome, error) {
-	if u, p := os.Getenv(envGitUsername), os.Getenv(envGitPassword); u != "" && p != "" {
-		return authOutcome{auth: &githttp.BasicAuth{Username: u, Password: p}}, nil
+	host := hostname(ep.host)
+	allowed := credentialHostAllowed(host)
+	u, p := os.Getenv(envGitUsername), os.Getenv(envGitPassword)
+	tok := os.Getenv(envGitToken)
+	if allowed {
+		if u != "" && p != "" {
+			return authOutcome{auth: &githttp.BasicAuth{Username: u, Password: p}, keySource: envGitUsername}, nil
+		}
+		if tok != "" {
+			// GitLab/GitHub PATs authenticate over https as oauth2:<token>.
+			return authOutcome{auth: &githttp.BasicAuth{Username: "oauth2", Password: tok}, keySource: envGitToken}, nil
+		}
 	}
-	if tok := os.Getenv(envGitToken); tok != "" {
-		// GitLab/GitHub PATs authenticate over https as oauth2:<token>.
-		return authOutcome{auth: &githttp.BasicAuth{Username: "oauth2", Password: tok}}, nil
+	// Machine stanzas of ~/.netrc are scoped by their own host and need no
+	// allowlist; the catch-all default stanza obeys the list once set.
+	if login, pass, ok := netrcCredentials(netrcPath(), host, !credentialHostsSet() || allowed); ok {
+		return authOutcome{auth: &githttp.BasicAuth{Username: login, Password: pass}, keySource: "~/.netrc"}, nil
 	}
-	if login, pass, ok := netrcCredentials(netrcPath(), hostname(ep.host)); ok {
-		return authOutcome{auth: &githttp.BasicAuth{Username: login, Password: pass}}, nil
+	if (u != "" && p != "") || tok != "" {
+		// Credentials exist but this host is not on the allowlist and no
+		// scoped netrc entry covers it: they stay home, and a 401 names
+		// the remedy.
+		return authOutcome{credsWithheld: true}, nil
 	}
 	return authOutcome{}, nil
 }
@@ -587,11 +644,13 @@ func parseNetrc(data []byte) []netrcEntry {
 
 // netrcCredentials returns the login/password pair for host from the netrc
 // file at path, if it has one: the first matching machine entry wins, a
-// default entry is the fallback. Matching is by hostname without port —
-// the netrc format has no port field. A missing or unreadable file yields
-// no credentials: go-git has no netrc support of its own, so fluxview
-// parses the file here and stays silent about its absence.
-func netrcCredentials(path, host string) (login, password string, ok bool) {
+// default entry is the fallback — unless allowDefault is false, used when
+// FLUXVIEW_GIT_CREDENTIAL_HOSTS restricts where credentials may travel.
+// Matching is by hostname without port — the netrc format has no port
+// field. A missing or unreadable file yields no credentials: go-git has no
+// netrc support of its own, so fluxview parses the file here and stays
+// silent about its absence.
+func netrcCredentials(path, host string, allowDefault bool) (login, password string, ok bool) {
 	if path == "" {
 		return "", "", false
 	}
@@ -614,7 +673,7 @@ func netrcCredentials(path, host string) (login, password string, ok bool) {
 			defIdx = i
 		}
 	}
-	if defIdx >= 0 {
+	if allowDefault && defIdx >= 0 {
 		return entries[defIdx].login, entries[defIdx].password, true
 	}
 	return "", "", false
