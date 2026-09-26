@@ -422,9 +422,14 @@ func mergeSecretPlaceholder(result map[string]any, secret Secret, valuesKey stri
 		return
 	}
 
+	// Redact into a copy, then deep-merge like every other valuesFrom
+	// source: a later Secret entry with a nested map must not wipe sibling
+	// keys contributed by an earlier entry.
+	redacted := make(map[string]any, len(parsed))
 	for k, v := range parsed {
-		result[k] = redactRecursive(v)
+		redacted[k] = redactRecursive(v)
 	}
+	yamlutil.MergeMaps(result, redacted)
 }
 
 // redactRecursive replaces all scalar leaf values with a YAML-safe placeholder,
