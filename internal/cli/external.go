@@ -89,18 +89,6 @@ func (e *gitSourceEnv) ensure(ctx context.Context, gr flux.GitRepository) (strin
 	return e.fetcher.Ensure(ctx, gr)
 }
 
-// indexGitRepositories indexes GitRepositories by "namespace/name".
-func indexGitRepositories(repos []flux.GitRepository) map[string]flux.GitRepository {
-	if len(repos) == 0 {
-		return nil
-	}
-	m := make(map[string]flux.GitRepository, len(repos))
-	for _, gr := range repos {
-		m[gr.Metadata.Namespace+"/"+gr.Metadata.Name] = gr
-	}
-	return m
-}
-
 // describeSource names a Kustomization's source for warnings and the
 // validation report ("GitRepository kyverno/kyverno" etc.).
 func describeSource(ks flux.Kustomization) string {

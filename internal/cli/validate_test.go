@@ -838,7 +838,7 @@ func TestRunValidate_Prefetch(t *testing.T) {
 
 	// A second run validates from the cache without new registry requests.
 	before := stub.count("/v1.36.1-standalone/configmap-v1.json")
-	stderr = captureStderr(func() {
+	_ = captureStderr(func() {
 		runErr = runValidate(context.Background(), &ValidateFlags{
 			Path:            fixture.clusterDir,
 			testRegistryURL: stub.url,

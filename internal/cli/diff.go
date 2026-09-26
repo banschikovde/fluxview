@@ -136,7 +136,7 @@ func runDiff(ctx context.Context, args []string, flags *DiffFlags) error {
 		// Auto-detect the default branch.
 		compareRevision, err = gitOps.DefaultBranch(ctx)
 		if err != nil {
-			return NewExitError(fmt.Errorf("could not determine default branch (use --branch): %w", err), ExitCodeError)
+			return NewExitError(fmt.Errorf("could not determine default branch (use --branch-orig): %w", err), ExitCodeError)
 		}
 		fmt.Fprintf(os.Stderr, "Comparing against auto-detected default branch: %s\n", compareRevision)
 	} else {
