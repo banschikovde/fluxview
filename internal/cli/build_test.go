@@ -1303,6 +1303,91 @@ spec:
 	}
 }
 
+// TestInflateHelmReleasesShared_ValuesLayersDeepMerge pins the H-2
+// regression: HelmRelease values layers (valuesFiles < valuesFrom < values)
+// deep-merge like in helm-controller — a nested map from a later layer
+// (inline values) must not wipe sibling keys of the same map contributed
+// by an earlier layer (valuesFrom ConfigMap). Before the fix the inline
+// `config: {b: from-inline}` replaced the whole `config` map and the
+// ConfigMap's `a: from-cm` silently fell back to the chart's values.yaml.
+func TestInflateHelmReleasesShared_ValuesLayersDeepMerge(t *testing.T) {
+	repoRoot := t.TempDir()
+
+	chartDir := filepath.Join(repoRoot, "charts", "layered")
+	writeHelper(t, chartDir, "Chart.yaml", `apiVersion: v2
+name: layered
+version: 1.0.0
+`)
+	writeHelper(t, chartDir, "values.yaml", `config:
+  a: chart
+  b: chart
+`)
+	writeHelper(t, filepath.Join(chartDir, "templates"), "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: layered-values
+data:
+  config.yaml: |
+{{ toYaml .Values.config | indent 4 }}
+`)
+
+	hr := []flux.HelmRelease{{
+		Metadata: flux.ObjectMeta{Name: "app", Namespace: "apps"},
+		Spec: flux.HelmReleaseSpec{
+			Chart: flux.HelmReleaseChart{
+				Spec: flux.HelmReleaseChartSpec{
+					Chart: "./charts/layered",
+					SourceRef: struct {
+						Kind      string `yaml:"kind"`
+						Name      string `yaml:"name"`
+						Namespace string `yaml:"namespace,omitempty"`
+					}{
+						Kind: flux.KindGitRepository,
+						Name: "flux-system",
+					},
+				},
+			},
+			ValuesFrom: []any{map[string]any{
+				"kind": "ConfigMap",
+				"name": "layered-cm",
+			}},
+			Values: map[string]any{
+				"config": map[string]any{"b": "from-inline"},
+			},
+		},
+	}}
+	configMaps := []flux.ConfigMap{{
+		APIVersion: "v1",
+		Kind:       "ConfigMap",
+		Metadata:   flux.ObjectMeta{Name: "layered-cm", Namespace: "apps"},
+		Data: map[string]string{
+			"values.yaml": "config:\n  a: from-cm\n  b: from-cm\n",
+		},
+	}}
+
+	inflater, err := helm.NewInflater(helm.WithCacheDir(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+
+	var outputs [][]byte
+	stderr := captureStderr(func() {
+		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, configMaps, nil, inflateOptions{quiet: true, repoRoot: repoRoot})
+	})
+	if len(outputs) != 1 {
+		t.Fatalf("expected 1 rendered output, got %d (stderr:\n%s)", len(outputs), stderr)
+	}
+	rendered := string(outputs[0])
+	for _, want := range []string{"a: from-cm", "b: from-inline"} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("deep-merged values must keep %q (Flux layering):\n%s", want, rendered)
+		}
+	}
+	if strings.Contains(rendered, "from-chart") || strings.Contains(rendered, "a: chart") {
+		t.Errorf("chart defaults must not resurface through a lost valuesFrom key:\n%s", rendered)
+	}
+}
+
 // TestInflateHelmReleasesShared_NamespaceInjectedForChartWithoutReleaseNamespace
 // is a regression test for the bug where `diff hr --namespace X` produced
 // "No resources found in namespace X" even though the HelmRelease was correctly

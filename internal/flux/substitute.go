@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/banschikovde/fluxview/internal/yamlutil"
 )
 
 // substituteFromEntry represents a single entry in the postBuild.substituteFrom list.
@@ -389,16 +391,16 @@ func mergeConfigMapValues(result map[string]any, data map[string]string, valuesK
 	mergeYAMLString(result, raw)
 }
 
-// mergeYAMLString parses a YAML string and merges its top-level keys into dst.
-// If the string is a scalar (not a map), it is silently skipped.
+// mergeYAMLString parses a YAML string and deep-merges it into dst —
+// successive valuesFrom sources layer like in helm-controller, so nested
+// maps from an earlier source keep their sibling keys. If the string is a
+// scalar (not a map), it is silently skipped.
 func mergeYAMLString(dst map[string]any, raw string) {
-	var parsed map[string]interface{}
+	var parsed map[string]any
 	if err := yaml.Unmarshal([]byte(raw), &parsed); err != nil {
 		return
 	}
-	for k, v := range parsed {
-		dst[k] = v
-	}
+	yamlutil.MergeMaps(dst, parsed)
 }
 
 // mergeSecretPlaceholder injects placeholder values for secret-based valuesFrom.

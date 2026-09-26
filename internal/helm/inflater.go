@@ -34,6 +34,7 @@ import (
 	"github.com/Masterminds/semver/v3"
 	fluxtypes "github.com/banschikovde/fluxview/internal/flux"
 	kustomizepkg "github.com/banschikovde/fluxview/internal/kustomize"
+	"github.com/banschikovde/fluxview/internal/yamlutil"
 )
 
 // Inflater renders Helm charts via the Helm Go SDK.
@@ -789,6 +790,9 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 	//   < chart.spec.valuesFiles   (extra values files inside the chart)
 	//   < spec.valuesFrom          (ConfigMaps/Secrets, external)
 	//   < spec.values              (inline, highest priority)
+	// Layers deep-merge (nested maps merge recursively, scalars and lists
+	// overwrite) like helm-controller's mergo-based merge — the Helm SDK
+	// then coalesces the result with the chart's values.yaml.
 	values := make(map[string]interface{})
 
 	for _, vf := range hr.Spec.Chart.Spec.ValuesFiles {
@@ -799,14 +803,10 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 	}
 
 	// valuesFrom (ConfigMaps/Secrets) override chart valuesFiles.
-	for k, v := range fluxtypes.ResolveValuesFrom(hr, configMaps, secrets) {
-		values[k] = v
-	}
+	yamlutil.MergeMaps(values, fluxtypes.ResolveValuesFrom(hr, configMaps, secrets))
 
 	// Inline values have the highest priority.
-	for k, v := range hr.Spec.Values {
-		values[k] = v
-	}
+	yamlutil.MergeMaps(values, hr.Spec.Values)
 
 	// Run template rendering.
 	rel, err := install.RunWithContext(ctx, chartObj, values)
@@ -849,10 +849,10 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 
 // mergeChartValuesFile looks up a values file among the chart's miscellaneous
 // files (chartObj.Files, populated by the Helm SDK uniformly for directory and
-// .tgz-loaded charts) and merges its top-level keys into dst with a shallow
-// merge — the same strategy used for valuesFrom/inline values. Resolving from
-// the in-memory chart object (rather than re-reading from disk via chartPath)
-// is required because chartPath can be a .tgz archive, not a directory, for
+// .tgz-loaded charts) and deep-merges it into dst — the same layering
+// semantics as valuesFrom/inline values. Resolving from the in-memory chart
+// object (rather than re-reading from disk via chartPath) is required because
+// chartPath can be a .tgz archive, not a directory, for
 // HelmRepository-sourced charts. No filesystem access means no path-traversal
 // surface. Missing files return an error so the caller can warn (non-fatal).
 func mergeChartValuesFile(dst map[string]interface{}, acc chart.Accessor, name string) error {
@@ -863,9 +863,7 @@ func mergeChartValuesFile(dst map[string]interface{}, acc chart.Accessor, name s
 			if err := yaml.Unmarshal(f.Data, &parsed); err != nil {
 				return fmt.Errorf("parsing %s: %w", name, err)
 			}
-			for k, v := range parsed {
-				dst[k] = v
-			}
+			yamlutil.MergeMaps(dst, parsed)
 			return nil
 		}
 	}
