@@ -98,7 +98,16 @@ func emptyKnownHosts(t *testing.T) string {
 // agent starts with no keys; withKey adds one.
 func startTestAgent(t *testing.T, withKey bool) (string, *atomic.Int32) {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "agent.sock")
+	// Not t.TempDir(): its Test<Name><random>/003 segments push the socket
+	// path past the 104-byte sun_path limit on macOS (bind: invalid
+	// argument). A short os.TempDir()-relative dir keeps it comfortably
+	// under the limit.
+	dir, err := os.MkdirTemp("", "ag-")
+	if err != nil {
+		t.Fatalf("temp dir for test agent: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "s.sock")
 	l, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatalf("listening for test agent: %v", err)
