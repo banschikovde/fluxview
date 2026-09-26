@@ -708,6 +708,61 @@ func TestWalkYAMLFiles_SkipsNestedGitRepos(t *testing.T) {
 	}
 }
 
+// TestWalkResources_SymlinksOutsideRootNotRead pins M-1: a YAML symlink
+// resolving outside the walk root must be rejected (warned and skipped),
+// never read into the snapshot — a manifest from an untrusted branch must
+// not pull host files into build/diff output. Intra-root symlinks keep
+// working.
+func TestWalkResources_SymlinksOutsideRootNotRead(t *testing.T) {
+	root := t.TempDir()
+
+	// A ConfigMap living outside the walk root.
+	outsideDir := t.TempDir()
+	outsideCM := filepath.Join(outsideDir, "outside-cm.yaml")
+	if err := os.WriteFile(outsideCM,
+		[]byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: outside-leak\n"), 0o644); err != nil {
+		t.Fatalf("write outside CM: %v", err)
+	}
+	if err := os.Symlink(outsideCM, filepath.Join(root, "leak.yaml")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	// A real file plus a relative intra-root symlink to it — both must be
+	// read (git stores intra-repo symlinks as relative paths).
+	if err := os.WriteFile(filepath.Join(root, "inside.yaml"),
+		[]byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: inside\n"), 0o644); err != nil {
+		t.Fatalf("write inside.yaml: %v", err)
+	}
+	if err := os.Symlink("inside.yaml", filepath.Join(root, "alias.yaml")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	var snap *ResourceSnapshot
+	var err error
+	stderr := captureStderr(func() {
+		snap, err = WalkResources(context.Background(), root)
+	})
+	if err != nil {
+		t.Fatalf("WalkResources: %v", err)
+	}
+
+	for _, cm := range snap.ConfigMaps {
+		if cm.Metadata.Name == "outside-leak" {
+			t.Errorf("ConfigMap from outside the root leaked into the snapshot:\n%s", stderr)
+		}
+	}
+	if !strings.Contains(stderr, "leak.yaml") || !strings.Contains(stderr, "Warning: could not read") {
+		t.Errorf("expected a read-rejection warning for leak.yaml, got:\n%s", stderr)
+	}
+	names := make(map[string]int)
+	for _, cm := range snap.ConfigMaps {
+		names[cm.Metadata.Name]++
+	}
+	if names["inside"] != 2 {
+		t.Errorf("intra-root relative symlink must still be read (want 2 'inside' ConfigMaps: file + alias), got %v (stderr:\n%s)", names, stderr)
+	}
+}
+
 // makeUnreadable sets path to mode 0 so subsequent reads fail (EACCES) for a
 // non-root caller, and restores the mode on cleanup so TempDir teardown works.
 func makeUnreadable(t *testing.T, path string) {

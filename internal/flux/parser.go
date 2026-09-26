@@ -12,6 +12,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/banschikovde/fluxview/internal/fsx"
 	"github.com/banschikovde/fluxview/internal/git"
 	"github.com/banschikovde/fluxview/internal/yamlutil"
 )
@@ -131,6 +132,11 @@ type ResourceSnapshot struct {
 // each YAML file once, and dispatches every document by (apiVersion, kind)
 // into the returned snapshot.
 //
+// File reads go through an os.Root scoped to rootPath, so a symlink
+// resolving outside the walk root is rejected instead of followed — the
+// same boundary loose-file reads in internal/cli use; a manifest from an
+// untrusted branch cannot pull YAML of the host machine into the snapshot.
+//
 // Failure handling mirrors the historic per-type parsers: a file that cannot
 // be read is warned on stderr and skipped (the walk continues); a v1
 // ConfigMap/Secret document that fails to decode is warned and skipped; other
@@ -138,11 +144,18 @@ type ResourceSnapshot struct {
 // "walking directory <root>") aborts the whole walk — a cancelled context or
 // an inaccessible root.
 func WalkResources(ctx context.Context, rootPath string) (*ResourceSnapshot, error) {
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return nil, fmt.Errorf("opening root %s: %w", rootPath, err)
+	}
+	defer root.Close()
+	cleanRoot := filepath.Clean(rootPath)
+
 	snap := &ResourceSnapshot{}
-	err := walkYAMLFiles(ctx, rootPath, func(path string) error {
+	err = walkYAMLFiles(ctx, rootPath, func(path string) error {
 		snap.YAMLFilesScanned++
 
-		data, err := os.ReadFile(path)
+		data, err := fsx.ReadRootFile(root, cleanRoot, path)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not read %s: %v\n", path, err)
 			snap.ReadErrors = append(snap.ReadErrors, fmt.Sprintf("%s: reading file: %v", path, err))

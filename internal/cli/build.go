@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -399,24 +398,6 @@ func filterK8sResources(data []byte) []byte {
 		return nil
 	}
 	return []byte(strings.Join(result, "\n---\n"))
-}
-
-// scopedRootReadFile reads absPath by opening it relative to root, so a symlink
-// (or symlink chain) that resolves outside rootPath is rejected instead of
-// followed. This closes the TOCTOU / symlink-escape gap (CWE-367) that a bare
-// os.ReadFile has inside a filepath.Walk callback. root must have been created
-// by os.OpenRoot(rootPath).
-func scopedRootReadFile(root *os.Root, rootPath, absPath string) ([]byte, error) {
-	rel, err := filepath.Rel(rootPath, absPath)
-	if err != nil {
-		return nil, err
-	}
-	f, err := root.Open(rel)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return io.ReadAll(f)
 }
 
 func isExcludedDir(dir string, excludePaths map[string]bool) bool {

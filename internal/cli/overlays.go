@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/banschikovde/fluxview/internal/fsx"
 	"github.com/banschikovde/fluxview/internal/git"
 	"github.com/banschikovde/fluxview/internal/kustomize"
 )
@@ -108,7 +109,7 @@ func walkOverlaysAndLooseFiles(ctx context.Context, scans *scanCache, builder *k
 		if ext != ".yaml" && ext != ".yml" {
 			return nil
 		}
-		data, err := scopedRootReadFile(rootFS, repoRoot, path)
+		data, err := fsx.ReadRootFile(rootFS, repoRoot, path)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not read %s: %v\n", path, err)
 			return nil

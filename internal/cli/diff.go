@@ -14,6 +14,7 @@ import (
 
 	diffpkg "github.com/banschikovde/fluxview/internal/diff"
 	"github.com/banschikovde/fluxview/internal/flux"
+	"github.com/banschikovde/fluxview/internal/fsx"
 	"github.com/banschikovde/fluxview/internal/git"
 	"github.com/banschikovde/fluxview/internal/helm"
 	"github.com/banschikovde/fluxview/internal/kustomize"
@@ -713,7 +714,7 @@ func readYAMLFilesRecursive(ctx context.Context, dir, repoRoot string) ([]byte, 
 		if ext != ".yaml" && ext != ".yml" {
 			return nil
 		}
-		data, err := scopedRootReadFile(root, repoRoot, path)
+		data, err := fsx.ReadRootFile(root, repoRoot, path)
 		if err != nil {
 			return err
 		}
