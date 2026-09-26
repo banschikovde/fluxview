@@ -45,6 +45,7 @@ func TestE2E_HTTPSBasicAuthFetch(t *testing.T) {
 	t.Run("env credentials fetch pinned and floating", func(t *testing.T) {
 		t.Setenv(envGitUsername, "fluxview")
 		t.Setenv(envGitPassword, "s3cret")
+		t.Setenv(envGitCredentialHosts, hostname(parseGitEndpoint(url).host))
 		f := NewFetcher(t.TempDir(), time.Hour)
 
 		// Pinned tag: clone with basic auth, reused on the second call.
@@ -75,6 +76,7 @@ func TestE2E_HTTPSBasicAuthFetch(t *testing.T) {
 	t.Run("wrong password fails the same way", func(t *testing.T) {
 		t.Setenv(envGitUsername, "fluxview")
 		t.Setenv(envGitPassword, "wrong")
+		t.Setenv(envGitCredentialHosts, hostname(parseGitEndpoint(url).host))
 		err := ensureRef(t, NewFetcher(t.TempDir(), time.Hour), url, &flux.GitRepositoryRef{Tag: "v1.0.0"})
 		if err == nil || !strings.Contains(err.Error(), "private repository or bad credentials") {
 			t.Fatalf("rejected password must surface the credentials hint, got: %v", err)
@@ -162,6 +164,7 @@ func TestE2E_CacheStaysCredentialFree(t *testing.T) {
 	url, _ := newHTTPSAuthedUpstream(t)
 	t.Setenv(envGitUsername, "fluxview")
 	t.Setenv(envGitPassword, "s3cret")
+	t.Setenv(envGitCredentialHosts, hostname(parseGitEndpoint(url).host))
 
 	cache := t.TempDir()
 	f := NewFetcher(cache, time.Hour)
