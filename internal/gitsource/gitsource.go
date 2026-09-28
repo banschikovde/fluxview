@@ -85,6 +85,22 @@ func DefaultTTL() time.Duration {
 	return d
 }
 
+// EnvNoFetch turns external git source cloning off for the run: no ls-remote,
+// no clone — Kustomizations pointing at an external GitRepository are skipped
+// with a warning instead (fail the validate gate). The escape hatch for slow
+// or offline networks.
+const EnvNoFetch = "FLUXVIEW_NO_GIT_SOURCE_FETCH"
+
+// DefaultNoFetch reports whether external git source cloning is off by
+// default: env FLUXVIEW_NO_GIT_SOURCE_FETCH (1/true/yes/on).
+func DefaultNoFetch() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvNoFetch))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 // meta is the shared shape of the in-clone seed file and the floating-ref
 // pointer: what was requested, what it resolved to, and when.
 type meta struct {

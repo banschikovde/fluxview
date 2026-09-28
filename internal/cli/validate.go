@@ -56,6 +56,10 @@ type ValidateFlags struct {
 	// git source auth policy knobs (credentials stay env-only).
 	GitSourceSSHKnownHosts string
 	GitSourceSSHAcceptNew  bool
+	// NoGitSourceFetch disables cloning external GitRepository sources
+	// (--no-git-source-fetch): with an external source in the tree the gate
+	// then fails — its resources stay unchecked.
+	NoGitSourceFetch bool
 
 	// disableDefaultSchemas drops the default HTTP schema registry. It has
 	// no flag — only tests set it, to keep them offline.
@@ -146,6 +150,7 @@ Examples:
 	cmd.Flags().StringSliceVar(&flags.SkipKinds, "skip-kind", nil, "Kinds to skip (repeatable or comma-separated): Kind (e.g. Deployment, any apiVersion) or apiVersion/Kind (e.g. apps/v1/Deployment)")
 	cmd.Flags().StringVar(&flags.Output, "output", "text", "Output format: text, json or junit (machine formats go to stdout)")
 	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.RemoteCacheTimeout, &flags.BuildCacheDir, &flags.BuildCacheTTL, &flags.GitSourceCacheDir, &flags.GitSourceCacheTTL)
+	registerNoGitSourceFetchFlag(cmd, &flags.NoGitSourceFetch)
 	flags.SchemaCacheDir = validate.DefaultSchemaCacheDir() // pre-seed: pflag.Var does not set defaults
 	cmd.Flags().Var(cachedir.NewFlag(&flags.SchemaCacheDir), "schema-cache-dir",
 		"Cache directory for schemas downloaded from the default registry, version-pinned; \"disabled\" disables reuse (per-run temp dir) (env: FLUXVIEW_SCHEMA_CACHE_DIR)")
@@ -257,7 +262,7 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 	configMaps := resolveConfigMaps(ctx, scans, absClusterPath, builder, buildCache)
 	secrets := resolveSecrets(ctx, scans, absClusterPath, builder, buildCache)
 
-	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache)
+	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache, flags.NoGitSourceFetch)
 	defer gitEnv.Close()
 	output, err := buildKSContent(ctx, scans, builder, kustomizations, repoRoot, absClusterPath, configMaps, secrets, false, buildCache, &report, gitEnv)
 	if err != nil {
@@ -290,13 +295,25 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 	// validating the surviving subset would report success while the
 	// external resources went unchecked.
 	if len(report.fetchErrors) > 0 {
-		parts := make([]string, len(report.fetchErrors))
-		for i, fe := range report.fetchErrors {
-			parts[i] = fe.ks + " (" + fe.source + ": " + fe.err + ")"
+		// Group by cause (source + error): a single global cause — e.g. the
+		// --no-git-source-fetch kill switch — is then stated once, with all
+		// its Kustomizations listed together, instead of once per KS.
+		var order []string
+		byCause := make(map[string][]string)
+		for _, fe := range report.fetchErrors {
+			cause := fe.source + ": " + fe.err
+			if _, seen := byCause[cause]; !seen {
+				order = append(order, cause)
+			}
+			byCause[cause] = append(byCause[cause], fe.ks)
+		}
+		parts := make([]string, 0, len(order))
+		for _, cause := range order {
+			parts = append(parts, strings.Join(byCause[cause], ", ")+" ("+cause+")")
 		}
 		return NewExitError(fmt.Errorf(
 			"%d Kustomization(s) failed to fetch their external source, cannot validate: %s",
-			len(parts), strings.Join(parts, ", ")), ExitCodeError)
+			len(report.fetchErrors), strings.Join(parts, ", ")), ExitCodeError)
 	}
 
 	if output == nil {

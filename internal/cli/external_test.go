@@ -432,6 +432,152 @@ spec:
 	}
 }
 
+// TestBuildKS_NoGitSourceFetch_SkipsExternal: with --no-git-source-fetch the
+// upstream (perfectly reachable here) must not be touched — no external
+// content in the output, the KS resource itself stays, a warning names the
+// kill switch, and build stays lenient.
+func TestBuildKS_NoGitSourceFetch_SkipsExternal(t *testing.T) {
+	f := newExternalFixture(t)
+	flags := buildFlagsFor(f)
+	flags.NoGitSourceFetch = true
+
+	var runErr error
+	var stderr string
+	stdout := captureStdout(func() {
+		stderr = captureStderr(func() {
+			runErr = runBuild(context.Background(), []string{"ks"}, flags)
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("build must stay lenient with fetching disabled, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+	if strings.Contains(stdout, "policies.kyverno.io") {
+		t.Errorf("nothing external may be built with fetching disabled, got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "kind: Kustomization") {
+		t.Errorf("the KS resource itself must stay in the output, got:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "--no-git-source-fetch") {
+		t.Errorf("the skip warning must name the kill switch, got:\n%s", stderr)
+	}
+}
+
+// TestDiffKS_NoGitSourceFetch: both diff sides skip the external source, so
+// the diff covers only local manifests — no external content, no false
+// added/removed external resources.
+func TestDiffKS_NoGitSourceFetch(t *testing.T) {
+	f := newExternalFixture(t)
+
+	// Cluster repo history: first commit pins v1.0.0, HEAD pins v1.1.0.
+	f.setUpstreamRef("  ref:\n    tag: v1.0.0\n")
+	gitRun(t, f.fleetDir, "add", "-A")
+	gitRun(t, f.fleetDir, "-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "-q", "-m", "pin v1.0.0")
+	firstCommit := strings.TrimSpace(gitOutput(t, f.fleetDir, "rev-parse", "HEAD"))
+
+	f.setUpstreamRef("  ref:\n    tag: v1.1.0\n")
+	gitRun(t, f.fleetDir, "add", "-A")
+	gitRun(t, f.fleetDir, "-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "-q", "-m", "pin v1.1.0")
+
+	var runErr error
+	var stderr string
+	stdout := captureStdout(func() {
+		stderr = captureStderr(func() {
+			runErr = runDiff(context.Background(), []string{"ks"}, &DiffFlags{
+				Path:              f.clusterDir,
+				BranchOrig:        firstCommit,
+				Color:             "never",
+				GitSourceCacheDir: filepath.Join(t.TempDir(), "git-sources"),
+				GitSourceCacheTTL: time.Hour,
+				NoGitSourceFetch:  true,
+			})
+		})
+	})
+	if runErr != nil && !strings.Contains(runErr.Error(), "differences found") {
+		t.Fatalf("diff with fetching disabled must stay lenient, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+	if strings.Contains(stdout, "policies.kyverno.io") || strings.Contains(stdout, "upstream-tag") {
+		t.Errorf("nothing external may appear in the diff, got:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "--no-git-source-fetch") {
+		t.Errorf("the skip warning must name the kill switch, got:\n%s", stderr)
+	}
+}
+
+// TestRunValidate_NoGitSourceFetch_Fails: the disabled fetch reaches the gate
+// through report.fetchErrors — validating the surviving subset would report
+// success while the external resources went unchecked, so validate fails
+// even though the user disabled the fetching themselves.
+func TestRunValidate_NoGitSourceFetch_Fails(t *testing.T) {
+	f := newExternalFixture(t)
+
+	var runErr error
+	_ = captureStderr(func() {
+		runErr = runValidate(context.Background(), &ValidateFlags{
+			Path:                  f.clusterDir,
+			disableDefaultSchemas: true,
+			GitSourceCacheDir:     filepath.Join(t.TempDir(), "git-sources"),
+			GitSourceCacheTTL:     time.Hour,
+			NoGitSourceFetch:      true,
+		})
+	})
+	exitErr, ok := runErr.(*DiffExitError)
+	if !ok {
+		t.Fatalf("expected *DiffExitError, got %v", runErr)
+	}
+	if exitErr.ExitCode != ExitCodeError {
+		t.Errorf("exit code = %d, want %d", exitErr.ExitCode, ExitCodeError)
+	}
+	if !strings.Contains(exitErr.Error(), "failed to fetch their external source") ||
+		!strings.Contains(exitErr.Error(), "--no-git-source-fetch") ||
+		!strings.Contains(exitErr.Error(), "flux-system/kyverno-crds") {
+		t.Errorf("error must name the kill switch and the KS, got: %v", exitErr.Error())
+	}
+}
+
+// TestRunValidate_NoGitSourceFetch_DedupsCause: with several Kustomizations
+// pointing at the same external source, the gate error states the shared
+// cause (the kill switch) once and lists the Kustomizations together.
+func TestRunValidate_NoGitSourceFetch_DedupsCause(t *testing.T) {
+	f := newExternalFixture(t)
+	writeHelper(t, f.clusterDir, "ks2.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: kyverno-crds-2
+  namespace: flux-system
+spec:
+  path: ./config/crds
+  sourceRef:
+    kind: GitRepository
+    name: kyverno
+`)
+
+	var runErr error
+	_ = captureStderr(func() {
+		runErr = runValidate(context.Background(), &ValidateFlags{
+			Path:                  f.clusterDir,
+			disableDefaultSchemas: true,
+			GitSourceCacheDir:     filepath.Join(t.TempDir(), "git-sources"),
+			GitSourceCacheTTL:     time.Hour,
+			NoGitSourceFetch:      true,
+		})
+	})
+	exitErr, ok := runErr.(*DiffExitError)
+	if !ok {
+		t.Fatalf("expected *DiffExitError, got %v", runErr)
+	}
+	if exitErr.ExitCode != ExitCodeError {
+		t.Errorf("exit code = %d, want %d", exitErr.ExitCode, ExitCodeError)
+	}
+	if got := strings.Count(exitErr.Error(), "--no-git-source-fetch"); got != 1 {
+		t.Errorf("the shared cause must be stated exactly once, got %d times: %v", got, exitErr.Error())
+	}
+	for _, ks := range []string{"flux-system/kyverno-crds", "flux-system/kyverno-crds-2"} {
+		if !strings.Contains(exitErr.Error(), ks) {
+			t.Errorf("error must name %s, got: %v", ks, exitErr.Error())
+		}
+	}
+}
+
 // TestRunValidate_ExternalPathMissingInClone_Fails: the upstream is
 // fetched fine but does not contain the declared path — still a gate
 // failure, never a silent skip.
@@ -1284,6 +1430,65 @@ func TestGitSourceAuthFlags_Wiring(t *testing.T) {
 		}
 		if !*acceptNew {
 			t.Error("accept-new flag default must pick up the env value")
+		}
+	})
+}
+
+// TestNoGitSourceFetchFlag_Wiring: the kill switch is registered on all
+// three commands, defaults to fetching enabled, picks up
+// FLUXVIEW_NO_GIT_SOURCE_FETCH, and an explicit flag beats the env.
+func TestNoGitSourceFetchFlag_Wiring(t *testing.T) {
+	newCmd := func(t *testing.T) (*cobra.Command, *bool) {
+		t.Helper()
+		var noFetch bool
+		cmd := &cobra.Command{
+			RunE: func(cmd *cobra.Command, args []string) error { return nil },
+		}
+		registerNoGitSourceFetchFlag(cmd, &noFetch)
+		return cmd, &noFetch
+	}
+
+	t.Run("registered on build, diff and validate", func(t *testing.T) {
+		for name, cmd := range map[string]*cobra.Command{
+			"build": newBuildCmd(), "diff": newDiffCmd(), "validate": newValidateCmd(),
+		} {
+			if cmd.Flags().Lookup("no-git-source-fetch") == nil {
+				t.Errorf("%s must register --no-git-source-fetch", name)
+			}
+		}
+	})
+
+	t.Run("default keeps fetching on", func(t *testing.T) {
+		t.Setenv(gitsource.EnvNoFetch, "")
+		cmd, noFetch := newCmd(t)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+		if *noFetch {
+			t.Error("fetching must be on by default")
+		}
+	})
+
+	t.Run("flag default comes from the env", func(t *testing.T) {
+		t.Setenv(gitsource.EnvNoFetch, "1")
+		cmd, noFetch := newCmd(t)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+		if !*noFetch {
+			t.Error("env must disable fetching by default")
+		}
+	})
+
+	t.Run("explicit flag overrides the env", func(t *testing.T) {
+		t.Setenv(gitsource.EnvNoFetch, "1")
+		cmd, noFetch := newCmd(t)
+		cmd.SetArgs([]string{"--no-git-source-fetch=false"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+		if *noFetch {
+			t.Error("explicit --no-git-source-fetch=false must beat the env")
 		}
 	})
 }

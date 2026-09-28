@@ -50,6 +50,9 @@ type DiffFlags struct {
 	// git source auth policy knobs (credentials stay env-only).
 	GitSourceSSHKnownHosts string
 	GitSourceSSHAcceptNew  bool
+	// NoGitSourceFetch disables cloning external GitRepository sources
+	// (--no-git-source-fetch): the network kill switch for slow links.
+	NoGitSourceFetch bool
 }
 
 func newDiffCmd() *cobra.Command {
@@ -88,6 +91,7 @@ Examples:
 	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL, &flags.HelmDownloadTimeout)
 	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.RemoteCacheTimeout, &flags.BuildCacheDir, &flags.BuildCacheTTL, &flags.GitSourceCacheDir, &flags.GitSourceCacheTTL)
 	registerGitSourceAuthFlags(cmd, &flags.GitSourceSSHKnownHosts, &flags.GitSourceSSHAcceptNew)
+	registerNoGitSourceFetchFlag(cmd, &flags.NoGitSourceFetch)
 	return cmd
 }
 
@@ -171,7 +175,7 @@ func runDiffKS(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	}
 	// External source identity comes from the real repository (the git ops
 	// handle), never from the comparison worktree — it has no remotes.
-	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache)
+	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache, flags.NoGitSourceFetch)
 	defer gitEnv.Close()
 
 	currentOutput, err := buildKSOutput(ctx, scans, clusterPath, repoRoot, name, ksCache, gitEnv)
@@ -212,7 +216,7 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 		buildCacheTTL: flags.BuildCacheTTL,
 		gitSourceDir:  flags.GitSourceCacheDir,
 		gitSourceTtl:  flags.GitSourceCacheTTL,
-	})
+	}, flags.NoGitSourceFetch)
 	defer gitEnv.Close()
 	currentOutput, err := buildHRInflation(ctx, scans, clusterPath, repoRoot, name, flags.Namespace, false, true,
 		helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout},

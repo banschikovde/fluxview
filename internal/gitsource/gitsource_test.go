@@ -650,3 +650,30 @@ func TestExplainAuthFailure(t *testing.T) {
 		}
 	})
 }
+
+// TestDefaultNoFetch pins the env spell: only the affirmative words disable
+// fetching; unset, empty and anything else keep it on.
+func TestDefaultNoFetch(t *testing.T) {
+	for _, tt := range []struct {
+		env  string
+		want bool
+	}{
+		{"", false},
+		{"0", false},
+		{"false", false},
+		{"no", false},
+		{"off", false},
+		{"garbage", false},
+		{"1", true},
+		{"true", true},
+		{"yes", true},
+		{"on", true},
+		{"TRUE", true},
+		{" On ", true},
+	} {
+		t.Setenv(EnvNoFetch, tt.env)
+		if got := DefaultNoFetch(); got != tt.want {
+			t.Errorf("DefaultNoFetch() with %s env = %v, want %v", tt.env, got, tt.want)
+		}
+	}
+}

@@ -39,6 +39,9 @@ type BuildFlags struct {
 	// git source auth policy knobs (credentials stay env-only).
 	GitSourceSSHKnownHosts string
 	GitSourceSSHAcceptNew  bool
+	// NoGitSourceFetch disables cloning external GitRepository sources
+	// (--no-git-source-fetch): the network kill switch for slow links.
+	NoGitSourceFetch bool
 }
 
 func newBuildCmd() *cobra.Command {
@@ -73,6 +76,7 @@ Examples:
 	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL, &flags.HelmDownloadTimeout)
 	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.RemoteCacheTimeout, &flags.BuildCacheDir, &flags.BuildCacheTTL, &flags.GitSourceCacheDir, &flags.GitSourceCacheTTL)
 	registerGitSourceAuthFlags(cmd, &flags.GitSourceSSHKnownHosts, &flags.GitSourceSSHAcceptNew)
+	registerNoGitSourceFetchFlag(cmd, &flags.NoGitSourceFetch)
 
 	return cmd
 }
@@ -163,7 +167,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		}
 	}
 
-	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache)
+	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache, flags.NoGitSourceFetch)
 	defer gitEnv.Close()
 	output, err := buildKSContent(ctx, scans, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, false, buildCache, nil, gitEnv)
 	if err != nil {
@@ -215,7 +219,7 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		gitSourceDir:  flags.GitSourceCacheDir,
 		gitSourceTtl:  flags.GitSourceCacheTTL,
 	}
-	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache)
+	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache, flags.NoGitSourceFetch)
 	defer gitEnv.Close()
 	output, err := buildHRInflation(ctx, newScanCache(), clusterPath, repoRoot, name, flags.Namespace, false, false,
 		helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout},

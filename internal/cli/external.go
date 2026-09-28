@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/spf13/cobra"
+
 	"github.com/banschikovde/fluxview/internal/flux"
 	"github.com/banschikovde/fluxview/internal/git"
 	"github.com/banschikovde/fluxview/internal/gitsource"
@@ -19,8 +21,15 @@ type gitSourceEnv struct {
 	// originURL identifies the local repository ("", when unknown — then
 	// nothing is external).
 	originURL string
-	// fetcher clones external upstreams; never nil on a non-nil env.
+	// fetcher clones external upstreams; never nil on a non-nil env with
+	// fetching enabled.
 	fetcher *gitsource.Fetcher
+	// noFetch disables all network fetching (--no-git-source-fetch): external
+	// sources are still identified (their paths must not resolve against the
+	// local repository), but ensure fails fast instead of cloning. The KS then
+	// follows the ordinary fetch-failure path: warn + skip in build/diff,
+	// gate failure in validate.
+	noFetch bool
 }
 
 // originURLFor best-effort reads the local repository's origin URL. Any
@@ -41,12 +50,19 @@ func originURLFor(ctx context.Context, repoRoot string) string {
 
 // newGitSourceEnv builds the env from the real repository root — even for
 // builds that run in a temporary worktree (diff's comparison side), the
-// identity must come from the repository that has the remotes.
-func newGitSourceEnv(ctx context.Context, realRepoRoot string, ksCache kustomizeCacheOptions) *gitSourceEnv {
-	return &gitSourceEnv{
+// identity must come from the repository that has the remotes. With noFetch
+// the origin identity is still resolved (a local git operation, no network —
+// lookupExternal needs it to keep external paths from resolving locally),
+// but no fetcher is created.
+func newGitSourceEnv(ctx context.Context, realRepoRoot string, ksCache kustomizeCacheOptions, noFetch bool) *gitSourceEnv {
+	e := &gitSourceEnv{
 		originURL: originURLFor(ctx, realRepoRoot),
-		fetcher:   gitsource.NewFetcher(ksCache.gitSourceDir, ksCache.gitSourceTtl),
+		noFetch:   noFetch,
 	}
+	if !noFetch {
+		e.fetcher = gitsource.NewFetcher(ksCache.gitSourceDir, ksCache.gitSourceTtl)
+	}
+	return e
 }
 
 // Close releases the env's resources: temporary clones made while the git
@@ -85,7 +101,14 @@ func (e *gitSourceEnv) lookupExternal(repos map[string]flux.GitRepository, ks fl
 }
 
 // ensure fetches (or reuses) the local clone of an external GitRepository.
+// With fetching disabled it fails before any network: the caller treats it
+// exactly like an unreachable upstream. The message reads through the
+// wrapper ("fetching <source> for <ks> failed: <message>") — keep it a bare
+// cause, not a sentence of its own.
 func (e *gitSourceEnv) ensure(ctx context.Context, gr flux.GitRepository) (string, error) {
+	if e.noFetch {
+		return "", fmt.Errorf("disabled by --no-git-source-fetch or %s", gitsource.EnvNoFetch)
+	}
 	return e.fetcher.Ensure(ctx, gr)
 }
 
@@ -101,4 +124,13 @@ func describeSource(ks flux.Kustomization) string {
 		ns = ks.Metadata.Namespace
 	}
 	return fmt.Sprintf("%s %s/%s", kind, ns, ks.Spec.SourceRef.Name)
+}
+
+// registerNoGitSourceFetchFlag registers the external git source network
+// kill switch shared by the commands. Lives here, next to the gitSourceEnv
+// it toggles. Default from the environment, an explicit flag wins for the
+// run.
+func registerNoGitSourceFetchFlag(cmd *cobra.Command, noFetch *bool) {
+	cmd.Flags().BoolVar(noFetch, "no-git-source-fetch", gitsource.DefaultNoFetch(),
+		"Do not clone external GitRepository sources (no network at all): Kustomizations pointing at them are skipped with a warning, validate fails — for slow or offline networks (env: "+gitsource.EnvNoFetch+")")
 }
