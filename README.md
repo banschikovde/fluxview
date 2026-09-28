@@ -136,7 +136,7 @@ Behavior:
 | `--skip-kind` | validate | Kinds to skip (repeatable or comma-separated): `Deployment` (any apiVersion) or `apps/v1/Deployment` |
 | `--output` | validate | Output format: `text` (default, stderr), `json` or `junit` (stdout, per-resource statuses + summary) |
 
-Cache flags (`--helm-*`, `--remote-*`, `--build-*`, `--git-source-*`) share one pattern: `--<name>-cache-dir` (`off`/`none` disables) and `--<name>-cache-ttl` (`0` always bypasses). On slow networks, `--helm-download-timeout` and `--remote-cache-timeout` (`0` = no limit) let downloads wait as long as the link needs instead of being cut off after `2m`/`30s` — see [docs/caching.md](docs/caching.md).
+Cache flags (`--helm-*`, `--remote-*`, `--kustomize-build-*`, `--git-source-*`, `--schema-*`, `--crd-schema-*`) share one pattern: `--<name>-cache-dir` (`disabled` disables — all of them at once via `FLUXVIEW_CACHE_HOME=disabled`; empty, whitespace-padded and retired `off`/`none` values are rejected at parse time) and `--<name>-cache-ttl` where applicable (`0` always bypasses). On slow networks, `--helm-download-timeout` and `--remote-cache-timeout` (`0` = no limit) let downloads wait as long as the link needs instead of being cut off after `2m`/`30s` — see [docs/caching.md](docs/caching.md).
 
 ## Exit codes
 
@@ -149,7 +149,7 @@ Cache flags (`--helm-*`, `--remote-*`, `--build-*`, `--git-source-*`) share one 
 
 ## Caching
 
-Six independent on-disk caches — Helm charts, remote kustomize resources, kustomize build outputs, clones of external GitRepository sources, downloaded validation schemas, CRD schemas converted from YAML — all under `~/.cache/fluxview/` by default, so a single volume mount covers them. Both sides of a `diff` share one warm copy of everything. Defaults: indexes, floating remote refs and floating external source resolutions re-check every `10m`, build outputs valid for `24h`, validation schemas never expire (they are version-pinned); pinned external source clones (tag/commit) are immutable and never re-fetched.
+Six independent on-disk caches — Helm charts, remote kustomize resources, kustomize build outputs, clones of external GitRepository sources, downloaded validation schemas, CRD schemas converted from YAML — all under `~/.cache/fluxview/` by default (relocatable wholesale via `FLUXVIEW_CACHE_HOME`; per-cache via `FLUXVIEW_<NAME>_CACHE_DIR`), so a single volume mount covers them. Both sides of a `diff` share one warm copy of everything. Defaults: indexes, floating remote refs and floating external source resolutions re-check every `10m`, build outputs valid for `24h`, validation schemas never expire (they are version-pinned); pinned external source clones (tag/commit) are immutable and never re-fetched.
 
 Details, caveats, and per-cache flags/env vars: [docs/caching.md](docs/caching.md).
 

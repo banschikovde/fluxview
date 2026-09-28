@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
 
+	"github.com/banschikovde/fluxview/internal/cachedir"
 	"github.com/banschikovde/fluxview/internal/flux"
 	"github.com/banschikovde/fluxview/internal/gitsource"
 	"github.com/banschikovde/fluxview/internal/helm"
@@ -23,7 +24,9 @@ import (
 // helmCacheOptions carries Helm cache settings from CLI flags/env into the
 // Inflater: where the on-disk Helm cache lives, how long repository
 // indexes stay fresh, and how long one HTTP download may take (0 = no
-// limit). Independent of the kustomize cache.
+// limit). The dir value "disabled" disables reuse (per-process
+// temp dir, removed by Inflater.Close) — the same spell as every other
+// fluxview cache. Independent of the kustomize cache.
 type helmCacheOptions struct {
 	dir             string
 	indexTTL        time.Duration
@@ -44,7 +47,7 @@ func (o helmCacheOptions) inflaterOptions() []helm.InflaterOption {
 // (buildCacheDir/buildCacheTTL) and the external git source clone cache
 // (gitSourceDir/gitSourceTtl, consumed by buildAllKustomizations — not a
 // Builder option). Independent of the Helm cache. All follow the same
-// conventions: dir "off"/"none"/"disabled" disables the cache, ttl 0
+// conventions: dir "disabled" disables the cache, ttl 0
 // always bypasses it (entries are still refreshed on disk).
 type kustomizeCacheOptions struct {
 	remoteDir     string
@@ -69,8 +72,9 @@ func (o kustomizeCacheOptions) builderOptions() []kustomize.BuilderOption {
 // FLUXVIEW_HELM_INDEX_TTL / FLUXVIEW_HELM_DOWNLOAD_TIMEOUT env vars are
 // honored unless overridden by an explicit flag.
 func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL, downloadTimeout *time.Duration) {
-	cmd.Flags().StringVar(cacheDir, "helm-cache-dir", helm.DefaultCacheDir(),
-		"Helm cache directory for repo indexes and downloaded charts (env: FLUXVIEW_HELM_CACHE_DIR)")
+	*cacheDir = helm.DefaultCacheDir() // pre-seed: pflag.Var does not set defaults
+	cmd.Flags().Var(cachedir.NewFlag(cacheDir), "helm-cache-dir",
+		"Helm cache directory for repo indexes and downloaded charts; \"disabled\" disables reuse (per-process temp dir) (env: FLUXVIEW_HELM_CACHE_DIR)")
 	cmd.Flags().DurationVar(indexTTL, "helm-index-ttl", helm.DefaultIndexTTL(),
 		"How long cached Helm repo indexes and OCI tag resolutions stay fresh; 0 always refreshes (env: FLUXVIEW_HELM_INDEX_TTL)")
 	cmd.Flags().DurationVar(downloadTimeout, "helm-download-timeout", helm.DefaultDownloadTimeout(),
@@ -80,7 +84,7 @@ func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL, down
 // registerKustomizeCacheFlags registers the kustomize cache flags shared by
 // the commands, following one convention for every fluxview cache:
 //
-//	--<name>-cache-dir  cache directory; "off"/"none"/"disabled" disables
+//	--<name>-cache-dir  cache directory; "disabled" disables
 //	--<name>-cache-ttl  freshness window; 0 always bypasses (still writes)
 //
 // Here <name> is "remote" (resources fetched by URL, referenced by
@@ -90,18 +94,21 @@ func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL, down
 // DefaultRemoteCacheTimeout()/DefaultBuildCacheDir()/DefaultBuildCacheTTL()/
 // gitsource.DefaultCacheDir()/DefaultTTL().
 func registerKustomizeCacheFlags(cmd *cobra.Command, remoteDir *string, remoteTtl, remoteTimeout *time.Duration, buildCacheDir *string, buildCacheTTL *time.Duration, gitSourceDir *string, gitSourceTtl *time.Duration) {
-	cmd.Flags().StringVar(remoteDir, "remote-cache-dir", kustomize.DefaultRemoteCacheDir(),
-		"Cache directory for remote resources referenced by kustomizations; off/none disables")
+	*remoteDir = kustomize.DefaultRemoteCacheDir() // pre-seed: pflag.Var does not set defaults
+	cmd.Flags().Var(cachedir.NewFlag(remoteDir), "remote-cache-dir",
+		"Cache directory for remote resources referenced by kustomizations; \"disabled\" disables (env: FLUXVIEW_REMOTE_CACHE_DIR)")
 	cmd.Flags().DurationVar(remoteTtl, "remote-cache-ttl", kustomize.DefaultRemoteCacheTTL(),
-		"How long cached remote resources with floating refs (branch/HEAD URLs) stay fresh; pinned version URLs never expire; 0 always re-fetches")
+		"How long cached remote resources with floating refs (branch/HEAD URLs) stay fresh; pinned version URLs never expire; 0 always re-fetches (env: FLUXVIEW_REMOTE_CACHE_TTL)")
 	cmd.Flags().DurationVar(remoteTimeout, "remote-cache-timeout", kustomize.DefaultRemoteCacheTimeout(),
 		"Per-request timeout for downloading remote resources referenced by kustomizations; 0 = no limit, for slow networks (env: FLUXVIEW_REMOTE_CACHE_TIMEOUT)")
-	cmd.Flags().StringVar(buildCacheDir, "build-cache-dir", kustomize.DefaultBuildCacheDir(),
-		"Cache directory for kustomize build outputs, reused while input files are unchanged; off/none disables (env: FLUXVIEW_BUILD_CACHE_DIR)")
-	cmd.Flags().DurationVar(buildCacheTTL, "build-cache-ttl", kustomize.DefaultBuildCacheTTL(),
-		"How long cached kustomize build outputs stay usable; 0 always rebuilds (entries are still refreshed) (env: FLUXVIEW_BUILD_CACHE_TTL)")
-	cmd.Flags().StringVar(gitSourceDir, "git-source-cache-dir", gitsource.DefaultCacheDir(),
-		"Cache directory for clones of external GitRepository sources; off/none disables reuse (env: FLUXVIEW_GIT_SOURCE_CACHE_DIR)")
+	*buildCacheDir = kustomize.DefaultBuildCacheDir() // pre-seed: pflag.Var does not set defaults
+	cmd.Flags().Var(cachedir.NewFlag(buildCacheDir), "kustomize-build-cache-dir",
+		"Cache directory for kustomize build outputs, reused while input files are unchanged; \"disabled\" disables (env: FLUXVIEW_KUSTOMIZE_BUILD_CACHE_DIR)")
+	cmd.Flags().DurationVar(buildCacheTTL, "kustomize-build-cache-ttl", kustomize.DefaultBuildCacheTTL(),
+		"How long cached kustomize build outputs stay usable; 0 always rebuilds (entries are still refreshed) (env: FLUXVIEW_KUSTOMIZE_BUILD_CACHE_TTL)")
+	*gitSourceDir = gitsource.DefaultCacheDir() // pre-seed: pflag.Var does not set defaults
+	cmd.Flags().Var(cachedir.NewFlag(gitSourceDir), "git-source-cache-dir",
+		"Cache directory for clones of external GitRepository sources; \"disabled\" disables reuse (env: FLUXVIEW_GIT_SOURCE_CACHE_DIR)")
 	cmd.Flags().DurationVar(gitSourceTtl, "git-source-cache-ttl", gitsource.DefaultTTL(),
 		"How long floating external source resolutions (branch/semver/HEAD) stay fresh; pinned commit/tag clones never expire; 0 always re-resolves (env: FLUXVIEW_GIT_SOURCE_CACHE_TTL)")
 }
@@ -235,6 +242,9 @@ func buildHRInflation(ctx context.Context, scans *scanCache, clusterPath, repoRo
 	if err != nil {
 		return nil, fmt.Errorf("initializing helm: %w", err)
 	}
+	// A cache-disabled run (--helm-cache-dir=off) inflated from a temp
+	// directory; drop it. A persisted cache is a no-op close.
+	defer inflater.Close()
 
 	return inflateAllHelmReleases(ctx, inflater, sorted, helmRepos, ociRepos, inflationCMs, inflationSecrets, inflateOptions{
 		quiet:    quiet,

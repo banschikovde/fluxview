@@ -245,7 +245,7 @@ func TestEnsure_OffCacheDirDisablesReuse(t *testing.T) {
 	up.commit("file.txt", "pinned\n")
 	up.tag("v1.0.0")
 
-	f := NewFetcher("off", time.Hour)
+	f := NewFetcher("disabled", time.Hour)
 	defer f.Close()
 	ref := &flux.GitRepositoryRef{Tag: "v1.0.0"}
 	first := mustEnsure(t, f, up.url(), ref)

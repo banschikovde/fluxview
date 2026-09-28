@@ -202,13 +202,13 @@ func TestBuildCache_CorruptEntryIsAMiss(t *testing.T) {
 
 func TestBuildCache_DisabledViaDirOff(t *testing.T) {
 	root := writeBuildFixture(t)
-	builder := NewBuilder(root, WithBuildCache("off", time.Hour))
+	builder := NewBuilder(root, WithBuildCache("disabled", time.Hour))
 	if builder.buildCache != nil {
-		t.Fatal("cache must be disabled with dir=off")
+		t.Fatal("cache must be disabled with dir=disabled")
 	}
-	builder = NewBuilder(root, WithBuildCache("NONE", time.Hour))
+	builder = NewBuilder(root, WithBuildCache("DISABLED", time.Hour))
 	if builder.buildCache != nil {
-		t.Fatal("cache must be disabled with dir=NONE")
+		t.Fatal("cache must be disabled with dir=DISABLED (case-insensitive)")
 	}
 }
 

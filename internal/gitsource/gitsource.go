@@ -45,6 +45,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/storage/memory"
 
+	"github.com/banschikovde/fluxview/internal/cachedir"
 	"github.com/banschikovde/fluxview/internal/flux"
 	"github.com/banschikovde/fluxview/internal/git"
 )
@@ -54,21 +55,11 @@ import (
 const seedFileName = ".fluxview-source.json"
 
 // DefaultCacheDir returns the git source cache directory: env
-// FLUXVIEW_GIT_SOURCE_CACHE_DIR, else a sibling of the other fluxview
-// caches under ~/.cache/fluxview. The values "off"/"none"/"disabled"
-// disable the cache (checked in NewFetcher).
+// FLUXVIEW_GIT_SOURCE_CACHE_DIR, else <cachedir.DefaultDir base>/
+// git-sources. The disable word "disabled" disables clone reuse (checked
+// in NewFetcher).
 func DefaultCacheDir() string {
-	if dir := os.Getenv("FLUXVIEW_GIT_SOURCE_CACHE_DIR"); dir != "" {
-		return dir
-	}
-	if base := os.Getenv("XDG_CACHE_HOME"); base != "" {
-		return filepath.Join(base, "fluxview", "git-sources")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), "fluxview-git-sources")
-	}
-	return filepath.Join(home, ".cache", "fluxview", "git-sources")
+	return cachedir.DefaultDir("FLUXVIEW_GIT_SOURCE_CACHE_DIR", "git-sources")
 }
 
 // warnTTLOnce keeps the invalid-env warning to a single line per process
@@ -92,16 +83,6 @@ func DefaultTTL() time.Duration {
 		return def
 	}
 	return d
-}
-
-// cacheDisabled reports whether a cache directory flag value turns the
-// cache off — the same disable spell as every other fluxview cache.
-func cacheDisabled(dir string) bool {
-	switch strings.ToLower(dir) {
-	case "off", "none", "disabled":
-		return true
-	}
-	return false
 }
 
 // meta is the shared shape of the in-clone seed file and the floating-ref
@@ -143,14 +124,14 @@ type Fetcher struct {
 }
 
 // NewFetcher creates a Fetcher over the given cache directory and TTL.
-// A dir of "off"/"none"/"disabled" (or empty) disables clone reuse.
+// A dir of "disabled" (or empty) disables clone reuse.
 // A negative ttl is normalized to zero (always re-resolve floating refs).
 func NewFetcher(cacheDir string, ttl time.Duration) *Fetcher {
 	f := &Fetcher{
 		inflight: make(map[string]chan struct{}),
 		auth:     newAuthResolver(),
 	}
-	if !cacheDisabled(cacheDir) {
+	if !cachedir.Disabled(cacheDir) {
 		f.dir = cacheDir
 	}
 	if ttl < 0 {

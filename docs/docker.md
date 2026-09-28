@@ -32,13 +32,13 @@ See [caching.md](caching.md) for what each cache holds and its flags/env vars.
 
 ## Running as your host user
 
-So a mounted cache is owned correctly, override `--user` and point the caches to a writable path — an arbitrary UID has no writable HOME in the image:
+So a mounted cache is owned correctly, override `--user` and point the caches to a writable path — an arbitrary UID has no writable HOME in the image. `FLUXVIEW_CACHE_HOME` relocates every cache at once:
 
 ```bash
 docker run --rm --user "$(id -u):$(id -g)" \
-  -v $(pwd):/repo -e FLUXVIEW_HELM_CACHE_DIR=/tmp/helm-cache \
+  -v $(pwd):/repo -e FLUXVIEW_CACHE_HOME=/tmp/fluxview-cache \
   -w /repo ghcr.io/banschikovde/fluxview:latest \
-  build hr --path clusters/prod/flux/ --remote-cache-dir /tmp/ks-cache
+  build hr --path clusters/prod/flux/
 ```
 
 ## CRD schemas

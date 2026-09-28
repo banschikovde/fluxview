@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/banschikovde/fluxview/internal/validate"
 )
 
 // gitInit runs `git init` in dir to make it discoverable by FindRepoRoot.
@@ -503,11 +505,11 @@ func TestComposeSchemaLocations(t *testing.T) {
 
 	t.Run("no schema dir yields only the prefetched registry copy", func(t *testing.T) {
 		flags := testFlags()
-		locations, _, err := composeSchemaLocations(flags, "")
+		locations, _, err := composeSchemaLocations(flags, "", flags.schemaCacheDir(), flags.crdSchemaCacheDir())
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := filepath.Join(flags.registryCacheDir(), "{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json")
+		want := filepath.Join(filepath.Join(flags.schemaCacheDir(), "registry"), "{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json")
 		if len(locations) != 1 || locations[0] != want {
 			t.Errorf("locations = %v, want [%s]", locations, want)
 		}
@@ -519,7 +521,7 @@ func TestComposeSchemaLocations(t *testing.T) {
 		writeHelper(t, dir, "crd.yaml", widgetCRDYAML)
 
 		flags := testFlags()
-		locations, _, err := composeSchemaLocations(flags, dir)
+		locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -532,7 +534,7 @@ func TestComposeSchemaLocations(t *testing.T) {
 		if !strings.Contains(locations[1], "{{ .ResourceKind }}{{ .KindSuffix }}.json") {
 			t.Errorf("second location = %q, want a converted-CRD template", locations[1])
 		}
-		if want := filepath.Join(flags.registryCacheDir(), "{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json"); locations[2] != want {
+		if want := filepath.Join(filepath.Join(flags.schemaCacheDir(), "registry"), "{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json"); locations[2] != want {
 			t.Errorf("last location = %q, want the prefetched registry copy %q", locations[2], want)
 		}
 	})
@@ -542,7 +544,7 @@ func TestComposeSchemaLocations(t *testing.T) {
 		writeHelper(t, dir, "widget-test-v1.json", `{"type": "object"}`)
 
 		flags := testFlags()
-		locations, _, err := composeSchemaLocations(flags, dir)
+		locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -552,7 +554,8 @@ func TestComposeSchemaLocations(t *testing.T) {
 	})
 
 	t.Run("disabling the registry yields an empty non-nil list", func(t *testing.T) {
-		locations, _, err := composeSchemaLocations(&ValidateFlags{disableDefaultSchemas: true}, "")
+		flags := &ValidateFlags{disableDefaultSchemas: true}
+		locations, _, err := composeSchemaLocations(flags, "", flags.schemaCacheDir(), flags.crdSchemaCacheDir())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -574,7 +577,7 @@ func TestComposeSchemaLocations_KubernetesJSONSchemaCheckout(t *testing.T) {
 		writeHelper(t, dir, "v1.36.1-standalone/deployment-apps-v1.json", `{"type": "object"}`)
 
 		flags := &ValidateFlags{testCacheBase: t.TempDir()}
-		locations, _, err := composeSchemaLocations(flags, dir)
+		locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -585,7 +588,7 @@ func TestComposeSchemaLocations_KubernetesJSONSchemaCheckout(t *testing.T) {
 		if locations[1] != want {
 			t.Errorf("checkout location = %q,\nwant %q", locations[1], want)
 		}
-		if registry := filepath.Join(flags.registryCacheDir(), "{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json"); locations[2] != registry {
+		if registry := filepath.Join(filepath.Join(flags.schemaCacheDir(), "registry"), "{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json"); locations[2] != registry {
 			t.Errorf("last location = %q, want the prefetched registry copy", locations[2])
 		}
 	})
@@ -597,7 +600,8 @@ func TestComposeSchemaLocations_KubernetesJSONSchemaCheckout(t *testing.T) {
 		}
 		writeHelper(t, dir, "k8s-schemas/v1.36.1-standalone-strict/configmap-v1.json", `{"type": "object"}`)
 
-		locations, _, err := composeSchemaLocations(&ValidateFlags{testCacheBase: t.TempDir()}, dir)
+		flags := &ValidateFlags{testCacheBase: t.TempDir()}
+		locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -617,7 +621,8 @@ func TestComposeSchemaLocations_KubernetesJSONSchemaCheckout(t *testing.T) {
 		// A file that merely matches the pattern.
 		writeHelper(t, dir, "notes-standalone", "not a directory")
 
-		locations, _, err := composeSchemaLocations(&ValidateFlags{testCacheBase: t.TempDir()}, dir)
+		flags := &ValidateFlags{testCacheBase: t.TempDir()}
+		locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -633,7 +638,7 @@ func TestComposeSchemaLocations_CRDCacheAndErrors(t *testing.T) {
 		writeHelper(t, dir, "crd.yaml", widgetCRDYAML)
 
 		flags := &ValidateFlags{disableDefaultSchemas: true, testCacheBase: t.TempDir()}
-		locations, _, err := composeSchemaLocations(flags, dir)
+		locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -642,7 +647,7 @@ func TestComposeSchemaLocations_CRDCacheAndErrors(t *testing.T) {
 		}
 
 		crdDir := filepath.Dir(locations[1])
-		if !strings.HasPrefix(crdDir, filepath.Join(flags.cacheBase(), "crd-schemas")) {
+		if !strings.HasPrefix(crdDir, flags.crdSchemaCacheDir()) {
 			t.Errorf("converted CRDs should live under the cache base, got %s", crdDir)
 		}
 		if _, statErr := os.Stat(filepath.Join(crdDir, "widget-test-v1.json")); statErr != nil {
@@ -650,7 +655,7 @@ func TestComposeSchemaLocations_CRDCacheAndErrors(t *testing.T) {
 		}
 
 		// A second compose reuses the same cache dir.
-		locations2, _, err := composeSchemaLocations(flags, dir)
+		locations2, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -660,9 +665,43 @@ func TestComposeSchemaLocations_CRDCacheAndErrors(t *testing.T) {
 	})
 
 	t.Run("nonexistent schema dir yields an error", func(t *testing.T) {
-		_, _, err := composeSchemaLocations(&ValidateFlags{testCacheBase: t.TempDir()}, "/nonexistent/crd-dir-$$")
+		_, _, err := composeSchemaLocations(&ValidateFlags{testCacheBase: t.TempDir()}, "/nonexistent/crd-dir-$$", "", "")
 		if err == nil {
 			t.Error("expected an error for a nonexistent --schema-dir")
+		}
+	})
+
+	t.Run("cache-off resolution is CacheDirOrTemp's job, compose takes a concrete dir", func(t *testing.T) {
+		// runValidate maps the disable word to a per-run temp dir via
+		// validate.CacheDirOrTemp before calling compose; compose only ever
+		// sees a concrete cacheRoot. Simulate that side here.
+		dir := t.TempDir()
+		writeHelper(t, dir, "crd.yaml", widgetCRDYAML)
+
+		crdRoot, cleanup, err := validate.CacheDirOrTemp("disabled", "fluxview-crd-schemas-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		if !strings.HasPrefix(crdRoot, os.TempDir()) {
+			t.Errorf("crdRoot %q not under the temp root", crdRoot)
+		}
+
+		flags := &ValidateFlags{disableDefaultSchemas: true, testCacheBase: t.TempDir()}
+		locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), crdRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(locations) != 2 {
+			t.Fatalf("locations = %v, want 2 (schema dir, converted CRDs)", locations)
+		}
+		if !strings.HasPrefix(locations[1], crdRoot) {
+			t.Errorf("converted location %q should sit under the resolved dir %q", locations[1], crdRoot)
+		}
+
+		// The persistent cache stays untouched: nothing under crd-schemas.
+		if _, err := os.Stat(flags.crdSchemaCacheDir()); !os.IsNotExist(err) {
+			t.Errorf("persistent CRD cache must not be written with the cache off, stat err = %v", err)
 		}
 	})
 }

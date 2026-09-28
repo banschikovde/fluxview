@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/banschikovde/fluxview/internal/cachedir"
 	"github.com/banschikovde/fluxview/internal/git"
 	"github.com/banschikovde/fluxview/internal/kustomize"
 	"github.com/banschikovde/fluxview/internal/validate"
@@ -46,6 +47,11 @@ type ValidateFlags struct {
 	BuildCacheTTL         time.Duration
 	GitSourceCacheDir     string
 	GitSourceCacheTTL     time.Duration
+	// SchemaCacheDir and CRDSchemaCacheDir override the validate-side
+	// schema caches (downloaded schemas, converted CRDs); the disable spell
+	// turns each into a per-run temp cache (see runValidate).
+	SchemaCacheDir    string
+	CRDSchemaCacheDir string
 	// GitSourceSSHKnownHosts and GitSourceSSHAcceptNew are the external
 	// git source auth policy knobs (credentials stay env-only).
 	GitSourceSSHKnownHosts string
@@ -61,19 +67,32 @@ type ValidateFlags struct {
 	testCacheBase   string
 }
 
-// cacheBase is the root for validate's on-disk caches (downloaded schemas,
-// converted CRDs); tests override it to stay hermetic.
-func (f *ValidateFlags) cacheBase() string {
+// schemaCacheDir resolves the downloaded-schema cache directory: an explicit
+// --schema-cache-dir (or FLUXVIEW_SCHEMA_CACHE_DIR), else the test override,
+// else the default. The value may still be the disable spell — runValidate
+// resolves it via validate.SchemaCacheDirOrTemp.
+func (f *ValidateFlags) schemaCacheDir() string {
 	if f.testCacheBase != "" {
-		return f.testCacheBase
+		return filepath.Join(f.testCacheBase, "schemas")
 	}
-	return validate.DefaultCacheBase()
+	if f.SchemaCacheDir != "" {
+		return f.SchemaCacheDir
+	}
+	return validate.DefaultSchemaCacheDir()
 }
 
-// registryCacheDir caches schemas prefetched from the default registry, in
-// the kubernetes-json-schema layout.
-func (f *ValidateFlags) registryCacheDir() string {
-	return filepath.Join(f.cacheBase(), "schemas", "registry")
+// crdSchemaCacheDir resolves the CRD conversion cache directory the same way.
+// The disable spell maps to an empty cacheRoot (a per-run temp directory
+// inside validate.CRDYAMLToSchemaDir, removed by runValidate after
+// validation).
+func (f *ValidateFlags) crdSchemaCacheDir() string {
+	if f.testCacheBase != "" {
+		return filepath.Join(f.testCacheBase, "crd-schemas")
+	}
+	if f.CRDSchemaCacheDir != "" {
+		return f.CRDSchemaCacheDir
+	}
+	return validate.DefaultCRDSchemaCacheDir()
 }
 
 // schemaDownloadTimeout translates the flag value for the library: the
@@ -127,6 +146,12 @@ Examples:
 	cmd.Flags().StringSliceVar(&flags.SkipKinds, "skip-kind", nil, "Kinds to skip (repeatable or comma-separated): Kind (e.g. Deployment, any apiVersion) or apiVersion/Kind (e.g. apps/v1/Deployment)")
 	cmd.Flags().StringVar(&flags.Output, "output", "text", "Output format: text, json or junit (machine formats go to stdout)")
 	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.RemoteCacheTimeout, &flags.BuildCacheDir, &flags.BuildCacheTTL, &flags.GitSourceCacheDir, &flags.GitSourceCacheTTL)
+	flags.SchemaCacheDir = validate.DefaultSchemaCacheDir() // pre-seed: pflag.Var does not set defaults
+	cmd.Flags().Var(cachedir.NewFlag(&flags.SchemaCacheDir), "schema-cache-dir",
+		"Cache directory for schemas downloaded from the default registry, version-pinned; \"disabled\" disables reuse (per-run temp dir) (env: FLUXVIEW_SCHEMA_CACHE_DIR)")
+	flags.CRDSchemaCacheDir = validate.DefaultCRDSchemaCacheDir() // pre-seed: pflag.Var does not set defaults
+	cmd.Flags().Var(cachedir.NewFlag(&flags.CRDSchemaCacheDir), "crd-schema-cache-dir",
+		"Cache directory for schemas converted from CRD YAML manifests; \"disabled\" disables reuse (reconverted per run) (env: FLUXVIEW_CRD_SCHEMA_CACHE_DIR)")
 	registerGitSourceAuthFlags(cmd, &flags.GitSourceSSHKnownHosts, &flags.GitSourceSSHAcceptNew)
 
 	return cmd
@@ -183,6 +208,21 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 	if schemaDir == "" {
 		schemaDir = defaultSchemaDir()
 	}
+
+	// Schema caches: the disable word turns each into a per-run temp cache.
+	// Both cleanups must run after validation (kubeconform reads schemas
+	// lazily) — plain defers at this function level are exactly that. One
+	// resolution pattern for both caches: validate.CacheDirOrTemp.
+	schemaCacheDir, cleanupSchemas, err := validate.CacheDirOrTemp(flags.schemaCacheDir(), "fluxview-schemas-")
+	if err != nil {
+		return NewExitError(err, ExitCodeError)
+	}
+	defer cleanupSchemas()
+	crdCacheRoot, cleanupCRDCache, err := validate.CacheDirOrTemp(flags.crdSchemaCacheDir(), "fluxview-crd-schemas-")
+	if err != nil {
+		return NewExitError(err, ExitCodeError)
+	}
+	defer cleanupCRDCache()
 
 	// Announce the validation context before the (possibly slow) build, so
 	// it is clear what resources will be validated against while it runs.
@@ -280,7 +320,7 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 		}
 	}
 
-	locations, coverage, err := composeSchemaLocations(flags, schemaDir)
+	locations, coverage, err := composeSchemaLocations(flags, schemaDir, schemaCacheDir, crdCacheRoot)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}
@@ -310,7 +350,7 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 			missing, err := validate.PrefetchDefaultSchemas(ctx, fetchable, validate.PrefetchOptions{
 				KubernetesVersion: flags.KubernetesVersion,
 				Strict:            flags.Strict,
-				CacheDir:          flags.registryCacheDir(),
+				CacheDir:          filepath.Join(schemaCacheDir, "registry"),
 				BaseURL:           flags.testRegistryURL,
 				// Flag semantics: 0 = no limit → the library's negative
 				// sentinel; the flag default is a positive timeout.
@@ -339,7 +379,7 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 		KubernetesVersion: flags.KubernetesVersion,
 		// Downloaded schemas are version-pinned and immutable — cache them
 		// unconditionally; the cache only saves network round-trips.
-		CacheDir:  filepath.Join(flags.cacheBase(), "schemas"),
+		CacheDir:  schemaCacheDir,
 		Strict:    flags.Strict,
 		SkipKinds: flags.SkipKinds,
 	})
@@ -386,10 +426,14 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 // is never nil — an empty non-nil list means "no sources" (tests disable
 // the registry to stay offline) and must not trigger validate.New's
 // default fallback. It also returns the local kind coverage, so the
-// prefetch step knows which kinds to download. A schemaDir that cannot be
-// read yields an error, so typos fail the run instead of silently
-// validating nothing.
-func composeSchemaLocations(flags *ValidateFlags, schemaDir string) (locations []string, coverage validate.KindCoverage, err error) {
+// prefetch step knows which kinds to download. schemaCacheDir is the
+// resolved downloaded-schema cache (its registry/ subdir is a location
+// target); crdCacheRoot is the resolved CRD conversion cache — runValidate
+// already mapped the disable word to a per-run temp directory, so a
+// non-empty value is always passed here. A schemaDir that cannot be read
+// yields an error, so typos fail the run instead of silently validating
+// nothing.
+func composeSchemaLocations(flags *ValidateFlags, schemaDir, schemaCacheDir, crdCacheRoot string) (locations []string, coverage validate.KindCoverage, err error) {
 	locations = []string{}
 	var flatDirs, versionedRoots []string
 
@@ -398,8 +442,7 @@ func composeSchemaLocations(flags *ValidateFlags, schemaDir string) (locations [
 		flatDirs = append(flatDirs, schemaDir)
 		// Converted CRDs persist in the CRD schema cache (keyed by source
 		// size+mtime), so repeated runs skip reconversion.
-		crdCache := filepath.Join(flags.cacheBase(), "crd-schemas")
-		crdDir, cerr := validate.CRDYAMLToSchemaDir(schemaDir, crdCache)
+		crdDir, cerr := validate.CRDYAMLToSchemaDir(schemaDir, crdCacheRoot)
 		if cerr != nil {
 			return nil, coverage, cerr
 		}
@@ -418,7 +461,7 @@ func composeSchemaLocations(flags *ValidateFlags, schemaDir string) (locations [
 	if !flags.disableDefaultSchemas {
 		// The prefetched registry copy sits in the schema cache and is
 		// populated by runValidate before validation runs.
-		locations = append(locations, filepath.Join(flags.registryCacheDir(), kubeconformVersionedTemplate))
+		locations = append(locations, filepath.Join(schemaCacheDir, "registry", kubeconformVersionedTemplate))
 	}
 
 	coverage = validate.NewKindCoverage(flags.KubernetesVersion, flags.Strict, flatDirs, versionedRoots)

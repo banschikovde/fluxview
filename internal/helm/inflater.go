@@ -32,6 +32,7 @@ import (
 	k8syaml "sigs.k8s.io/yaml"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/banschikovde/fluxview/internal/cachedir"
 	fluxtypes "github.com/banschikovde/fluxview/internal/flux"
 	kustomizepkg "github.com/banschikovde/fluxview/internal/kustomize"
 	"github.com/banschikovde/fluxview/internal/yamlutil"
@@ -44,6 +45,10 @@ type Inflater struct {
 	// cacheDir is the root of the on-disk Helm cache (indexes, repositories.yaml,
 	// downloaded chart tarballs).
 	cacheDir string
+	// offDir is the per-process temp cache directory created when the cache
+	// was disabled via the dir word "disabled"; empty on a
+	// persisted cache. Removed by Close.
+	offDir string
 	// indexTTL is how long a cached repository index.yaml stays fresh.
 	// Zero means the index is re-downloaded on every use.
 	indexTTL time.Duration
@@ -91,6 +96,9 @@ type ociTagEntry struct {
 type InflaterOption func(*Inflater)
 
 // WithCacheDir overrides the Helm cache directory (default: DefaultCacheDir()).
+// The value "disabled" (checked by NewInflater) disables reuse:
+// the cache then lives in a per-process temp directory removed by Close —
+// same spell as every other fluxview cache.
 func WithCacheDir(dir string) InflaterOption {
 	return func(in *Inflater) { in.cacheDir = dir }
 }
@@ -110,19 +118,10 @@ func WithDownloadTimeout(d time.Duration) InflaterOption {
 }
 
 // DefaultCacheDir returns the Helm cache directory: $FLUXVIEW_HELM_CACHE_DIR,
-// else $XDG_CACHE_HOME/fluxview/helm, else ~/.cache/fluxview/helm.
+// else <cachedir.DefaultDir base>/helm. The disable word "disabled" turns the
+// cache off (checked in NewInflater).
 func DefaultCacheDir() string {
-	if dir := os.Getenv("FLUXVIEW_HELM_CACHE_DIR"); dir != "" {
-		return dir
-	}
-	if base := os.Getenv("XDG_CACHE_HOME"); base != "" {
-		return filepath.Join(base, "fluxview", "helm")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), "fluxview-helm-cache")
-	}
-	return filepath.Join(home, ".cache", "fluxview", "helm")
+	return cachedir.DefaultDir("FLUXVIEW_HELM_CACHE_DIR", "helm")
 }
 
 // warnEnvTTLOnce keeps the invalid-env warning to a single line per process:
@@ -213,10 +212,23 @@ func NewInflater(opts ...InflaterOption) (*Inflater, error) {
 		fmt.Fprintf(os.Stderr, "Warning: negative Helm download timeout %s, treating as 0 (no limit)\n", in.downloadTimeout)
 		in.downloadTimeout = 0
 	}
-	// An explicitly empty cache dir (e.g. `--helm-cache-dir=`) means "default",
-	// not "relative paths off the CWD".
+	// An empty cache dir means DefaultCacheDir() — reachable only via the
+	// programmatic API; an empty flag value is rejected at parse time, and
+	// it must never mean "relative paths off the CWD".
 	if in.cacheDir == "" {
 		in.cacheDir = DefaultCacheDir()
+	}
+	// The disable spell shared by every fluxview cache. The Helm SDK needs a
+	// real cache directory, so "disabled" here means "not persisted": a
+	// per-process temp directory, removed by Close — same semantics as the
+	// cache-disabled clones of the git source fetcher.
+	if cachedir.Disabled(in.cacheDir) {
+		dir, err := os.MkdirTemp("", "fluxview-helm-*")
+		if err != nil {
+			return nil, fmt.Errorf("preparing helm cache: %w", err)
+		}
+		in.cacheDir = dir
+		in.offDir = dir
 	}
 	// A negative TTL (e.g. --helm-index-ttl=-5m) behaves like 0 — always
 	// refresh — but normalized here so the "> 0" freshness check stays honest.
@@ -244,6 +256,16 @@ func NewInflater(opts ...InflaterOption) (*Inflater, error) {
 	in.loadOCITags()
 
 	return in, nil
+}
+
+// Close releases the Inflater's resources: a cache-disabled run's temporary
+// cache directory is removed; a persisted cache is kept (it is the point of
+// the cache). Safe on a nil Inflater and safe to call twice.
+func (in *Inflater) Close() error {
+	if in == nil || in.offDir == "" {
+		return nil
+	}
+	return os.RemoveAll(in.offDir)
 }
 
 // repoCacheName derives a stable, filesystem-safe repository name from the URL.

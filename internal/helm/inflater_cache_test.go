@@ -159,6 +159,80 @@ func TestInflateHelmRelease_HTTPIndexTTLZero(t *testing.T) {
 	}
 }
 
+// TestInflateHelmRelease_CacheDirDisabled: the disable word "disabled" must not be
+// taken literally as a directory name. The chart still inflates, the cache
+// lives in a per-process temp directory removed by Close, and two runs do not
+// share anything (the tarball is fetched again).
+func TestInflateHelmRelease_CacheDirDisabled(t *testing.T) {
+	srv := newHTTPRepoServer(t)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	inflater, err := NewInflater(WithCacheDir("disabled"), WithIndexTTL(10*time.Minute))
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+	if inflater.cacheDir == "" || inflater.cacheDir == "disabled" {
+		t.Fatalf("cache dir %q must be a temp dir, not the literal spell", inflater.cacheDir)
+	}
+	if !strings.HasPrefix(inflater.cacheDir, os.TempDir()) {
+		t.Errorf("cache dir %q is not under the temp root", inflater.cacheDir)
+	}
+
+	if _, err := inflater.InflateHelmRelease(context.Background(), httpRepoHR(), srv.URL, "", "", nil, nil, ""); err != nil {
+		t.Fatalf("InflateHelmRelease with cache off: %v", err)
+	}
+
+	// Nothing literal was created next to the CWD.
+	if _, err := os.Stat(filepath.Join(cwd, "disabled")); !os.IsNotExist(err) {
+		t.Errorf("literal \"disabled\" directory must not exist, stat err = %v", err)
+	}
+
+	if err := inflater.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(inflater.cacheDir); !os.IsNotExist(err) {
+		t.Errorf("temp cache dir must be removed by Close, stat err = %v", err)
+	}
+	// Close is safe twice.
+	if err := inflater.Close(); err != nil {
+		t.Errorf("second Close: %v", err)
+	}
+
+	// A second run fetches everything again: no reuse across processes.
+	inflateHTTP(t, "disabled", 10*time.Minute, srv.URL)
+	if got := srv.tgzHits.Load(); got != 2 {
+		t.Errorf("chart downloads = %d, want 2 (no reuse with cache off)", got)
+	}
+	if _, err := os.Stat(filepath.Join(cwd, "disabled")); !os.IsNotExist(err) {
+		t.Errorf("literal \"disabled\" directory must still not exist, stat err = %v", err)
+	}
+}
+
+// TestInflateHelmRelease_CacheDirCaseInsensitive: upper- and mixed-case
+// forms of the disable word behave identically to "disabled".
+func TestInflateHelmRelease_CacheDirCaseInsensitive(t *testing.T) {
+	srv := newHTTPRepoServer(t)
+	for _, spell := range []string{"DISABLED", "Disabled"} {
+		inflater, err := NewInflater(WithCacheDir(spell), WithIndexTTL(10*time.Minute))
+		if err != nil {
+			t.Fatalf("NewInflater(%q): %v", spell, err)
+		}
+		if inflater.cacheDir == spell || inflater.offDir == "" {
+			t.Errorf("spell %q must map to a temp dir (got cacheDir %q)", spell, inflater.cacheDir)
+		}
+		if _, err := inflater.InflateHelmRelease(context.Background(), httpRepoHR(), srv.URL, "", "", nil, nil, ""); err != nil {
+			t.Fatalf("InflateHelmRelease(%q): %v", spell, err)
+		}
+		if err := inflater.Close(); err != nil {
+			t.Errorf("Close(%q): %v", spell, err)
+		}
+	}
+}
+
 // cachedIndexPath mirrors how the Inflater lays out a repo's cached index,
 // via the same SDK helper the production code uses.
 func cachedIndexPath(cacheDir, repoURL string) string {

@@ -14,12 +14,13 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 
 	kcresource "github.com/yannh/kubeconform/pkg/resource"
 	kcvalidator "github.com/yannh/kubeconform/pkg/validator"
+
+	"github.com/banschikovde/fluxview/internal/cachedir"
 )
 
 // DefaultSchemaLocation is kubeconform's "default" location: Kubernetes
@@ -32,36 +33,42 @@ const DefaultSchemaLocation = "default"
 // the k8s.io/* modules this project builds against.
 const DefaultKubernetesVersion = "1.36.1"
 
-// DefaultCacheBase returns the fluxview cache base: $XDG_CACHE_HOME/fluxview,
-// else ~/.cache/fluxview. All cache dirs live under it, so one volume
-// mount covers all of them.
-func DefaultCacheBase() string {
-	if base := os.Getenv("XDG_CACHE_HOME"); base != "" {
-		return filepath.Join(base, "fluxview")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), "fluxview-cache")
-	}
-	return filepath.Join(home, ".cache", "fluxview")
-}
-
 // DefaultSchemaCacheDir returns the schema cache directory:
-// $XDG_CACHE_HOME/fluxview/schemas, else ~/.cache/fluxview/schemas.
-// A sibling of the Helm and kustomize caches under the same parent, so one
-// volume mount covers all of them. Downloaded schemas are version-pinned and
-// never expire, so the cache is always on and has no flags.
+// $FLUXVIEW_SCHEMA_CACHE_DIR, else <cachedir.DefaultDir base>/schemas.
+// Downloaded schemas are version-pinned and never expire. The disable word
+// "disabled" disables reuse (CacheDirOrTemp maps it to a per-process
+// temp dir).
 func DefaultSchemaCacheDir() string {
-	return filepath.Join(DefaultCacheBase(), "schemas")
+	return cachedir.DefaultDir("FLUXVIEW_SCHEMA_CACHE_DIR", "schemas")
 }
 
 // DefaultCRDSchemaCacheDir returns the cache directory for schemas converted
-// from CRD YAML manifests: $XDG_CACHE_HOME/fluxview/crd-schemas, else
-// ~/.cache/fluxview/crd-schemas. Conversion results are keyed by source
-// size+mtime and reused across runs, so large CRD sets pay the conversion
-// cost only when something changed.
+// from CRD YAML manifests: $FLUXVIEW_CRD_SCHEMA_CACHE_DIR, else
+// <cachedir.DefaultDir base>/crd-schemas. Conversion results are keyed by
+// source size+mtime and reused across runs, so large CRD sets pay the
+// conversion cost only when something changed. The disable word "disabled"
+// disables reuse: CRD YAML is then reconverted into a per-run temp
+// directory (CRDYAMLToSchemaDir with an empty cacheRoot).
 func DefaultCRDSchemaCacheDir() string {
-	return filepath.Join(DefaultCacheBase(), "crd-schemas")
+	return cachedir.DefaultDir("FLUXVIEW_CRD_SCHEMA_CACHE_DIR", "crd-schemas")
+}
+
+// CacheDirOrTemp resolves a validate-side cache directory value: the
+// disable word "disabled" maps to a fresh per-process temp directory
+// (tempPrefix names it) whose cleanup func removes it — call it after the
+// last lazy schema read; every other value passes through unchanged with a
+// no-op cleanup. The one resolution pattern for every cache with
+// disabled-means-temp semantics — the schema cache and the CRD conversion
+// cache both go through it, so the next cache copies a single known shape.
+func CacheDirOrTemp(dir, tempPrefix string) (string, func(), error) {
+	if !cachedir.Disabled(dir) {
+		return dir, func() {}, nil
+	}
+	tmp, err := os.MkdirTemp("", tempPrefix)
+	if err != nil {
+		return "", nil, fmt.Errorf("preparing cache: %w", err)
+	}
+	return tmp, func() { os.RemoveAll(tmp) }, nil
 }
 
 // Options configures the Validator.

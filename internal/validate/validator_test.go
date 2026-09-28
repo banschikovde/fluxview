@@ -736,3 +736,52 @@ func TestValidateKubernetesVersion(t *testing.T) {
 		t.Errorf("error should show the input and the expected form, got: %v", err)
 	}
 }
+
+// TestCacheDirOrTemp: the disable word maps to a per-process temp
+// directory (named by the prefix) removed by the cleanup func; every other
+// value passes through untouched with a no-op cleanup.
+func TestCacheDirOrTemp(t *testing.T) {
+	t.Run("plain value passes through", func(t *testing.T) {
+		dir, cleanup, err := CacheDirOrTemp("/some/cache", "fluxview-schemas-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dir != "/some/cache" {
+			t.Errorf("dir = %q, want the input unchanged", dir)
+		}
+		cleanup() // must be safe to call on a passthrough
+	})
+
+	t.Run("empty value passes through (means default upstream)", func(t *testing.T) {
+		dir, cleanup, err := CacheDirOrTemp("", "fluxview-schemas-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dir != "" {
+			t.Errorf("dir = %q, want empty", dir)
+		}
+		cleanup()
+	})
+
+	for _, spell := range []string{"disabled", "DISABLED", "Disabled"} {
+		t.Run("spell "+spell, func(t *testing.T) {
+			dir, cleanup, err := CacheDirOrTemp(spell, "fluxview-crd-schemas-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if dir == spell || dir == "" {
+				t.Fatalf("dir = %q, want a temp dir", dir)
+			}
+			if !strings.HasPrefix(dir, os.TempDir()) {
+				t.Errorf("dir %q not under the temp root", dir)
+			}
+			if base := filepath.Base(dir); !strings.HasPrefix(base, "fluxview-crd-schemas-") {
+				t.Errorf("temp dir %q should be named by the prefix", base)
+			}
+			cleanup()
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Errorf("temp dir must be removed by cleanup, stat err = %v", err)
+			}
+		})
+	}
+}

@@ -18,6 +18,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/banschikovde/fluxview/internal/cachedir"
 	"github.com/banschikovde/fluxview/internal/git"
 )
 
@@ -56,25 +57,37 @@ import (
 const maxRemoteResourceBytes = 64 << 20
 
 // DefaultRemoteCacheDir returns the remote resource cache directory:
-// $XDG_CACHE_HOME/fluxview/kustomize-remote, else
-// ~/.cache/fluxview/kustomize-remote. A sibling of the Helm cache under the
-// same parent, so one volume mount covers both. The special values "off",
-// "none" and "disabled" disable the cache (checked in WithRemoteCache).
+// $FLUXVIEW_REMOTE_CACHE_DIR, else <cachedir.DefaultDir base>/
+// kustomize-remote. A sibling of the Helm cache under the same parent, so
+// one volume mount covers both. The disable word "disabled" disables the
+// cache (checked in WithRemoteCache).
 func DefaultRemoteCacheDir() string {
-	if base := os.Getenv("XDG_CACHE_HOME"); base != "" {
-		return filepath.Join(base, "fluxview", "kustomize-remote")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), "fluxview-remote-cache")
-	}
-	return filepath.Join(home, ".cache", "fluxview", "kustomize-remote")
+	return cachedir.DefaultDir("FLUXVIEW_REMOTE_CACHE_DIR", "kustomize-remote")
 }
 
+// warnEnvTTLOnce keeps the invalid-env warning to a single line per process,
+// the same convention as the timeout env var below.
+var warnEnvTTLOnce sync.Once
+
 // DefaultRemoteCacheTTL returns the freshness TTL for floating (non-pinned)
-// remote resources: 10 minutes.
+// remote resources: $FLUXVIEW_REMOTE_CACHE_TTL (Go duration, e.g. "10m"),
+// else 10 minutes. An unparsable value warns once and falls back to the
+// default; zero and negative values flow through and are normalized by
+// newRemoteCache (zero = always re-fetch).
 func DefaultRemoteCacheTTL() time.Duration {
-	return 10 * time.Minute
+	const def = 10 * time.Minute
+	v := os.Getenv("FLUXVIEW_REMOTE_CACHE_TTL")
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		warnEnvTTLOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "Warning: invalid FLUXVIEW_REMOTE_CACHE_TTL %q, using %s\n", v, def)
+		})
+		return def
+	}
+	return d
 }
 
 // warnEnvTimeoutOnce keeps the invalid-env warning to a single line per

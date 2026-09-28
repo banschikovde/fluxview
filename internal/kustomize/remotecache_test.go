@@ -790,7 +790,7 @@ func TestRemoteCache_RelativeCacheDirAnchoredToCWD(t *testing.T) {
 // TestRemoteCacheDisabledViaDir: WithRemoteCache with the shared disable
 // spell leaves the Builder without a remote cache.
 func TestRemoteCacheDisabledViaDir(t *testing.T) {
-	for _, dir := range []string{"off", "none", "DISABLED"} {
+	for _, dir := range []string{"disabled", "DISABLED", "Disabled"} {
 		if b := NewBuilder(t.TempDir(), WithRemoteCache(dir, time.Hour, 30*time.Second)); b.remote != nil {
 			t.Fatalf("remote cache must be disabled with dir=%q", dir)
 		}
@@ -825,14 +825,31 @@ func TestDefaultRemoteCacheTTLAndDir(t *testing.T) {
 		t.Errorf("DefaultRemoteCacheTimeout() = %s, want 0 (env no-limit)", got)
 	}
 
-	t.Setenv("XDG_CACHE_HOME", "/custom-xdg")
-	if got := DefaultRemoteCacheDir(); got != "/custom-xdg/fluxview/kustomize-remote" {
-		t.Errorf("DefaultRemoteCacheDir() = %s, want /custom-xdg/fluxview/kustomize-remote", got)
+	warnEnvTTLOnce = sync.Once{}
+	t.Setenv("FLUXVIEW_REMOTE_CACHE_TTL", "5m")
+	if got := DefaultRemoteCacheTTL(); got != 5*time.Minute {
+		t.Errorf("DefaultRemoteCacheTTL() = %s, want 5m (env)", got)
+	}
+	captureStderr(t, func() {
+		t.Setenv("FLUXVIEW_REMOTE_CACHE_TTL", "bogus")
+		if got := DefaultRemoteCacheTTL(); got != 10*time.Minute {
+			t.Errorf("DefaultRemoteCacheTTL() = %s, want 10m fallback on invalid env", got)
+		}
+	})
+
+	t.Setenv("FLUXVIEW_REMOTE_CACHE_DIR", "/custom/dir")
+	if got := DefaultRemoteCacheDir(); got != "/custom/dir" {
+		t.Errorf("DefaultRemoteCacheDir() = %s, want /custom/dir (env)", got)
+	}
+	t.Setenv("FLUXVIEW_CACHE_HOME", "/cache-home")
+	t.Setenv("FLUXVIEW_REMOTE_CACHE_DIR", "")
+	if got := DefaultRemoteCacheDir(); got != "/cache-home/kustomize-remote" {
+		t.Errorf("DefaultRemoteCacheDir() = %s, want /cache-home/kustomize-remote", got)
 	}
 
-	// An explicitly empty cache dir (e.g. --remote-cache-dir=) means
-	// "default", and negative TTL/timeout values are normalized to 0 with
-	// one explanatory warning each.
+	// An explicitly empty cache dir (programmatic API; an empty flag value
+	// is a parse error) means "default", and negative TTL/timeout values
+	// are normalized to 0 with one explanatory warning each.
 	var rc *remoteCache
 	stderr := captureStderr(t, func() {
 		rc = newRemoteCache("", -time.Minute, -time.Minute)
@@ -843,8 +860,8 @@ func TestDefaultRemoteCacheTTLAndDir(t *testing.T) {
 	if !strings.Contains(stderr, "negative kustomize remote download timeout -1m0s, treating as 0 (no limit)") {
 		t.Errorf("expected negative-timeout warning, got:\n%s", stderr)
 	}
-	if rc.dir != "/custom-xdg/fluxview/kustomize-remote" {
-		t.Errorf("newRemoteCache dir = %s, want default %s", rc.dir, "/custom-xdg/fluxview/kustomize-remote")
+	if rc.dir != "/cache-home/kustomize-remote" {
+		t.Errorf("newRemoteCache dir = %s, want default %s", rc.dir, "/cache-home/kustomize-remote")
 	}
 	if rc.ttl != 0 {
 		t.Errorf("newRemoteCache ttl = %s, want 0 (negative normalized)", rc.ttl)

@@ -13,6 +13,8 @@ import (
 	"sigs.k8s.io/kustomize/api/krusty"
 	"sigs.k8s.io/kustomize/api/types"
 	"sigs.k8s.io/kustomize/kyaml/filesys"
+
+	"github.com/banschikovde/fluxview/internal/cachedir"
 )
 
 // Builder runs kustomize build via the Go SDK and returns YAML manifests.
@@ -43,7 +45,7 @@ type BuilderOption func(*Builder)
 // the per-request download timeout (0 = no limit, for slow links). Pinned
 // version URLs are cached without TTL, floating refs honor the ttl (0 = always
 // re-fetch). An empty cacheDir means DefaultRemoteCacheDir(); the values
-// "off"/"none"/"disabled" disable the cache entirely (same spell as the build
+// "disabled" disables the cache entirely (same word as the build
 // cache).
 //
 // With the cache enabled, builds serve rewritten kustomization content whose
@@ -52,7 +54,7 @@ type BuilderOption func(*Builder)
 // keep their previous behavior — kustomize fetches them itself.
 func WithRemoteCache(cacheDir string, ttl, timeout time.Duration) BuilderOption {
 	return func(b *Builder) {
-		if cacheDirDisabled(cacheDir) {
+		if cachedir.Disabled(cacheDir) {
 			return
 		}
 		b.remote = newRemoteCache(cacheDir, ttl, timeout)
@@ -60,17 +62,18 @@ func WithRemoteCache(cacheDir string, ttl, timeout time.Duration) BuilderOption 
 }
 
 // WithBuildCache enables the on-disk cache of kustomize build outputs:
-// --build-cache-dir / env FLUXVIEW_BUILD_CACHE_DIR, TTL via
-// --build-cache-ttl / FLUXVIEW_BUILD_CACHE_TTL. A cached output is served
+// --kustomize-build-cache-dir / env FLUXVIEW_KUSTOMIZE_BUILD_CACHE_DIR, TTL
+// via --kustomize-build-cache-ttl / FLUXVIEW_KUSTOMIZE_BUILD_CACHE_TTL. A
+// cached output is served
 // only when re-hashing every recorded input file and re-listing every
 // recorded directory reproduces the recorded manifest exactly — identity is
 // content, so entries survive fresh checkouts while any edit or
 // added/removed file invalidates the affected entries. A ttl of 0 always
 // rebuilds but still refreshes entries for later runs; the dir values
-// "off"/"none"/"disabled" disable the cache entirely.
+// "disabled" disables the cache entirely.
 func WithBuildCache(cacheDir string, ttl time.Duration) BuilderOption {
 	return func(b *Builder) {
-		if cacheDirDisabled(cacheDir) {
+		if cachedir.Disabled(cacheDir) {
 			return
 		}
 		b.buildCache = newBuildCache(cacheDir, ttl)

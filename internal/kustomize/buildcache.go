@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/banschikovde/fluxview/internal/cachedir"
 )
 
 // Kustomize build output cache.
@@ -38,7 +40,7 @@ import (
 // Cache key = tool/version salt + build directory + kustomization file name
 // and content hash. The full manifest then verifies the rest of the tree. A
 // TTL bounds staleness as a belt-and-braces safety net, and the cache can be
-// disabled entirely (--build-cache-dir=off).
+// disabled entirely (--kustomize-build-cache-dir=off).
 
 const (
 	// maxBuildCacheEntryBytes skips caching absurdly large build outputs so a
@@ -52,20 +54,10 @@ const (
 )
 
 // DefaultBuildCacheDir returns the build cache directory: env
-// FLUXVIEW_BUILD_CACHE_DIR, else a sibling of the other fluxview caches under
-// ~/.cache/fluxview.
+// FLUXVIEW_KUSTOMIZE_BUILD_CACHE_DIR, else <cachedir.DefaultDir base>/
+// kustomize-builds. The disable word "disabled" disables the cache.
 func DefaultBuildCacheDir() string {
-	if dir := os.Getenv("FLUXVIEW_BUILD_CACHE_DIR"); dir != "" {
-		return dir
-	}
-	if base := os.Getenv("XDG_CACHE_HOME"); base != "" {
-		return filepath.Join(base, "fluxview", "kustomize-builds")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), "fluxview-build-cache")
-	}
-	return filepath.Join(home, ".cache", "fluxview", "kustomize-builds")
+	return cachedir.DefaultDir("FLUXVIEW_KUSTOMIZE_BUILD_CACHE_DIR", "kustomize-builds")
 }
 
 // warnBuildCacheTTLOnce keeps the invalid-env warning to a single line per
@@ -73,33 +65,22 @@ func DefaultBuildCacheDir() string {
 var warnBuildCacheTTLOnce sync.Once
 
 // DefaultBuildCacheTTL returns how long a build cache entry stays usable:
-// env FLUXVIEW_BUILD_CACHE_TTL (Go duration), else 24 hours. Zero or negative
-// effectively disables serving from cache (always rebuild).
+// env FLUXVIEW_KUSTOMIZE_BUILD_CACHE_TTL (Go duration), else 24 hours. Zero
+// or negative effectively disables serving from cache (always rebuild).
 func DefaultBuildCacheTTL() time.Duration {
 	const def = 24 * time.Hour
-	v := os.Getenv("FLUXVIEW_BUILD_CACHE_TTL")
+	v := os.Getenv("FLUXVIEW_KUSTOMIZE_BUILD_CACHE_TTL")
 	if v == "" {
 		return def
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil {
 		warnBuildCacheTTLOnce.Do(func() {
-			fmt.Fprintf(os.Stderr, "Warning: invalid FLUXVIEW_BUILD_CACHE_TTL %q, using %s\n", v, def)
+			fmt.Fprintf(os.Stderr, "Warning: invalid FLUXVIEW_KUSTOMIZE_BUILD_CACHE_TTL %q, using %s\n", v, def)
 		})
 		return def
 	}
 	return d
-}
-
-// cacheDirDisabled reports whether a cache directory flag value turns that
-// cache off. Shared by the remote resource cache and the build cache so every
-// cache has the same disable spell: "off", "none" or "disabled".
-func cacheDirDisabled(dir string) bool {
-	switch strings.ToLower(dir) {
-	case "off", "none", "disabled":
-		return true
-	}
-	return false
 }
 
 // buildCache stores build outputs on disk keyed by their input content.
