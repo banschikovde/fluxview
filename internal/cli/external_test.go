@@ -506,8 +506,7 @@ func TestRunValidate_NoGitSourceFetch_WarnsAndPasses(t *testing.T) {
 	f := newExternalFixture(t)
 
 	var runErr error
-	var stderr string
-	stderr = captureStderr(func() {
+	stderr := captureStderr(func() {
 		runErr = runValidate(context.Background(), &ValidateFlags{
 			Path:                  f.clusterDir,
 			disableDefaultSchemas: true,
@@ -549,8 +548,7 @@ spec:
 `)
 
 	var runErr error
-	var stderr string
-	stderr = captureStderr(func() {
+	stderr := captureStderr(func() {
 		runErr = runValidate(context.Background(), &ValidateFlags{
 			Path:                  f.clusterDir,
 			disableDefaultSchemas: true,
@@ -1232,8 +1230,7 @@ spec:
 	t.Setenv("FLUXVIEW_GIT_CREDENTIAL_HOSTS", "github.com")
 
 	var runErr error
-	var stderr string
-	stderr = captureStderr(func() {
+	stderr := captureStderr(func() {
 		runErr = runValidate(context.Background(), &ValidateFlags{
 			Path:                  f.clusterDir,
 			disableDefaultSchemas: true,
@@ -1279,8 +1276,7 @@ spec:
 `)
 
 	var runErr error
-	var stderr string
-	stderr = captureStderr(func() {
+	stderr := captureStderr(func() {
 		runErr = runValidate(context.Background(), &ValidateFlags{
 			Path:                  f.clusterDir,
 			disableDefaultSchemas: true,
