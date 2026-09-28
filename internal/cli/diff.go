@@ -480,11 +480,17 @@ func buildAllKustomizations(ctx context.Context, scans *scanCache, builder *kust
 					// The fetch is silent: for the user an external source
 					// must behave exactly like a local one — the
 					// "Building ns/name" line below is the only progress
-					// output, identical to local Kustomizations.
+					// output, identical to local Kustomizations. A failed
+					// fetch warns under the same quiet contract as the rest
+					// of the diagnostics: the hr pipeline's discovery stage
+					// is quiet (its output is HelmReleases, the skip is
+					// symmetric), as is the diff comparison side.
 					cloneDir, err := gitSources.ensure(ctx, gr)
 					if err != nil {
-						fmt.Fprintf(os.Stderr, "Warning: fetching %s for %s/%s failed: %v — skipping its resources\n",
-							externalSource, ks.Metadata.Namespace, ks.Metadata.Name, err)
+						if !quiet {
+							fmt.Fprintf(os.Stderr, "Warning: fetching %s for %s/%s failed: %v — skipping its resources\n",
+								externalSource, ks.Metadata.Namespace, ks.Metadata.Name, err)
+						}
 						if report != nil {
 							report.fetchErrors = append(report.fetchErrors, fetchError{
 								ks:     key,

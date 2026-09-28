@@ -499,6 +499,30 @@ func TestDiffKS_NoGitSourceFetch(t *testing.T) {
 	}
 }
 
+// TestBuildHR_NoGitSourceFetch_QuietDiscovery: the hr pipeline's
+// Kustomization discovery stage is quiet — a skipped external source must
+// not print the per-KS fetch warning there. The skip itself stays
+// symmetric and the hr output is unaffected.
+func TestBuildHR_NoGitSourceFetch_QuietDiscovery(t *testing.T) {
+	f := newExternalFixture(t)
+	flags := buildFlagsFor(f)
+	flags.NoGitSourceFetch = true
+
+	var runErr error
+	var stderr string
+	_ = captureStdout(func() {
+		stderr = captureStderr(func() {
+			runErr = runBuild(context.Background(), []string{"hr"}, flags)
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("build hr must stay lenient with fetching disabled, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+	if strings.Contains(stderr, "skipping its resources") || strings.Contains(stderr, "fetching GitRepository") {
+		t.Errorf("hr discovery must not print per-KS fetch warnings, got:\n%s", stderr)
+	}
+}
+
 // TestRunValidate_NoGitSourceFetch_WarnsAndPasses: with the kill switch on
 // the gate names the unchecked Kustomization in a warning and validates the
 // local tree.
