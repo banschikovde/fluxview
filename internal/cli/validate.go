@@ -57,8 +57,8 @@ type ValidateFlags struct {
 	GitSourceSSHKnownHosts string
 	GitSourceSSHAcceptNew  bool
 	// NoGitSourceFetch disables cloning external GitRepository sources
-	// (--no-git-source-fetch): with an external source in the tree the gate
-	// then fails — its resources stay unchecked.
+	// (--no-git-source-fetch): such Kustomizations are named in a warning
+	// and left unchecked by the gate.
 	NoGitSourceFetch bool
 
 	// disableDefaultSchemas drops the default HTTP schema registry. It has
@@ -291,9 +291,11 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 			len(parts), strings.Join(parts, ", ")), ExitCodeError)
 	}
 
-	// And for external GitRepository sources that could not be fetched:
-	// validating the surviving subset would report success while the
-	// external resources went unchecked.
+	// External GitRepository sources that could not be fetched (an
+	// unreachable upstream or the --no-git-source-fetch kill switch) warn
+	// and leave the gate running: external content is best-effort here —
+	// failing would abort every --no-git-source-fetch run outright. The
+	// unchecked Kustomizations are named, grouped by cause.
 	if len(report.fetchErrors) > 0 {
 		// Group by cause (source + error): a single global cause — e.g. the
 		// --no-git-source-fetch kill switch — is then stated once, with all
@@ -311,9 +313,9 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 		for _, cause := range order {
 			parts = append(parts, strings.Join(byCause[cause], ", ")+" ("+cause+")")
 		}
-		return NewExitError(fmt.Errorf(
-			"%d Kustomization(s) failed to fetch their external source, cannot validate: %s",
-			len(report.fetchErrors), strings.Join(parts, ", ")), ExitCodeError)
+		fmt.Fprintf(os.Stderr,
+			"Warning: %d Kustomization(s) left unchecked: %s\n",
+			len(report.fetchErrors), strings.Join(parts, ", "))
 	}
 
 	if output == nil {

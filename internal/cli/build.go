@@ -295,12 +295,12 @@ type buildResult struct {
 // buildCache maps directory path to its build result.
 type buildCache map[string]buildResult
 
-// buildReport collects non-fatal build anomalies that a strict validation
-// gate treats as failures: Flux Kustomizations whose declared spec.path is
-// absent from the local repository (or from the fetched external source
-// clone), and external sources that could not be fetched — in both cases
-// the resources are silently missing from the build output. A nil report
-// means "don't collect" — build and diff stay lenient (warn only).
+// buildReport collects non-fatal build anomalies for the validation gate:
+// Flux Kustomizations whose declared spec.path is absent from the local
+// repository (or from the fetched external source clone) fail the gate —
+// their resources are silently missing from the build output; external
+// sources that could not be fetched only warn (best-effort content). A nil
+// report means "don't collect" — build and diff stay lenient (warn only).
 type buildReport struct {
 	missingPaths []missingPath
 	fetchErrors  []fetchError

@@ -394,10 +394,10 @@ resources:
 	}
 }
 
-// TestRunValidate_ExternalFetchFailure_Fails: an unreachable upstream
-// fails validate through report.fetchErrors — the gate does not report
-// success on a partial check.
-func TestRunValidate_ExternalFetchFailure_Fails(t *testing.T) {
+// TestRunValidate_ExternalFetchFailure_WarnsAndPasses: an unreachable
+// upstream is best-effort for the gate — the Kustomization is named in a
+// warning and left unchecked, the local tree still validates.
+func TestRunValidate_ExternalFetchFailure_WarnsAndPasses(t *testing.T) {
 	f := newExternalFixture(t)
 	writeHelper(t, f.clusterDir, "gitrepository.yaml", `apiVersion: source.toolkit.fluxcd.io/v1
 kind: GitRepository
@@ -411,7 +411,7 @@ spec:
 `)
 
 	var runErr error
-	_ = captureStderr(func() {
+	stderr := captureStderr(func() {
 		runErr = runValidate(context.Background(), &ValidateFlags{
 			Path:                  f.clusterDir,
 			disableDefaultSchemas: true,
@@ -419,16 +419,12 @@ spec:
 			GitSourceCacheTTL:     time.Hour,
 		})
 	})
-	exitErr, ok := runErr.(*DiffExitError)
-	if !ok {
-		t.Fatalf("expected *DiffExitError, got %v", runErr)
+	if runErr != nil {
+		t.Fatalf("an unreachable upstream must not fail the gate, got: %v\nstderr:\n%s", runErr, stderr)
 	}
-	if exitErr.ExitCode != ExitCodeError {
-		t.Errorf("exit code = %d, want %d", exitErr.ExitCode, ExitCodeError)
-	}
-	if !strings.Contains(exitErr.Error(), "failed to fetch their external source") ||
-		!strings.Contains(exitErr.Error(), "flux-system/kyverno-crds") {
-		t.Errorf("error must name the fetch failure and the KS, got: %v", exitErr.Error())
+	if !strings.Contains(stderr, "left unchecked") ||
+		!strings.Contains(stderr, "flux-system/kyverno-crds") {
+		t.Errorf("warning must name the unchecked Kustomization, got:\n%s", stderr)
 	}
 }
 
@@ -503,15 +499,15 @@ func TestDiffKS_NoGitSourceFetch(t *testing.T) {
 	}
 }
 
-// TestRunValidate_NoGitSourceFetch_Fails: the disabled fetch reaches the gate
-// through report.fetchErrors — validating the surviving subset would report
-// success while the external resources went unchecked, so validate fails
-// even though the user disabled the fetching themselves.
-func TestRunValidate_NoGitSourceFetch_Fails(t *testing.T) {
+// TestRunValidate_NoGitSourceFetch_WarnsAndPasses: with the kill switch on
+// the gate names the unchecked Kustomization in a warning and validates the
+// local tree.
+func TestRunValidate_NoGitSourceFetch_WarnsAndPasses(t *testing.T) {
 	f := newExternalFixture(t)
 
 	var runErr error
-	_ = captureStderr(func() {
+	var stderr string
+	stderr = captureStderr(func() {
 		runErr = runValidate(context.Background(), &ValidateFlags{
 			Path:                  f.clusterDir,
 			disableDefaultSchemas: true,
@@ -520,22 +516,23 @@ func TestRunValidate_NoGitSourceFetch_Fails(t *testing.T) {
 			NoGitSourceFetch:      true,
 		})
 	})
-	exitErr, ok := runErr.(*DiffExitError)
-	if !ok {
-		t.Fatalf("expected *DiffExitError, got %v", runErr)
+	if runErr != nil {
+		t.Fatalf("validate with fetching disabled must pass, got: %v\nstderr:\n%s", runErr, stderr)
 	}
-	if exitErr.ExitCode != ExitCodeError {
-		t.Errorf("exit code = %d, want %d", exitErr.ExitCode, ExitCodeError)
-	}
-	if !strings.Contains(exitErr.Error(), "failed to fetch their external source") ||
-		!strings.Contains(exitErr.Error(), "--no-git-source-fetch") ||
-		!strings.Contains(exitErr.Error(), "flux-system/kyverno-crds") {
-		t.Errorf("error must name the kill switch and the KS, got: %v", exitErr.Error())
+	for _, want := range []string{
+		"left unchecked",
+		"flux-system/kyverno-crds",
+		"--no-git-source-fetch",
+		"All resources valid.",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr must contain %q, got:\n%s", want, stderr)
+		}
 	}
 }
 
 // TestRunValidate_NoGitSourceFetch_DedupsCause: with several Kustomizations
-// pointing at the same external source, the gate error states the shared
+// pointing at the same external source, the gate warning states the shared
 // cause (the kill switch) once and lists the Kustomizations together.
 func TestRunValidate_NoGitSourceFetch_DedupsCause(t *testing.T) {
 	f := newExternalFixture(t)
@@ -552,7 +549,8 @@ spec:
 `)
 
 	var runErr error
-	_ = captureStderr(func() {
+	var stderr string
+	stderr = captureStderr(func() {
 		runErr = runValidate(context.Background(), &ValidateFlags{
 			Path:                  f.clusterDir,
 			disableDefaultSchemas: true,
@@ -561,19 +559,27 @@ spec:
 			NoGitSourceFetch:      true,
 		})
 	})
-	exitErr, ok := runErr.(*DiffExitError)
-	if !ok {
-		t.Fatalf("expected *DiffExitError, got %v", runErr)
+	if runErr != nil {
+		t.Fatalf("validate with fetching disabled must pass, got: %v\nstderr:\n%s", runErr, stderr)
 	}
-	if exitErr.ExitCode != ExitCodeError {
-		t.Errorf("exit code = %d, want %d", exitErr.ExitCode, ExitCodeError)
+	// The per-KS build warnings each repeat the cause; the gate summary line
+	// must not — one statement of the cause, all Kustomizations together.
+	var gateLine string
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.Contains(line, "left unchecked") {
+			gateLine = line
+			break
+		}
 	}
-	if got := strings.Count(exitErr.Error(), "--no-git-source-fetch"); got != 1 {
-		t.Errorf("the shared cause must be stated exactly once, got %d times: %v", got, exitErr.Error())
+	if gateLine == "" {
+		t.Fatalf("gate warning not found in stderr:\n%s", stderr)
+	}
+	if got := strings.Count(gateLine, "--no-git-source-fetch"); got != 1 {
+		t.Errorf("the shared cause must be stated exactly once in the gate warning, got %d times: %s", got, gateLine)
 	}
 	for _, ks := range []string{"flux-system/kyverno-crds", "flux-system/kyverno-crds-2"} {
-		if !strings.Contains(exitErr.Error(), ks) {
-			t.Errorf("error must name %s, got: %v", ks, exitErr.Error())
+		if !strings.Contains(gateLine, ks) {
+			t.Errorf("gate warning must name %s, got: %s", ks, gateLine)
 		}
 	}
 }
@@ -1202,9 +1208,10 @@ spec:
 
 // TestRunValidate_ExternalHTTPSCredsWithheld_Fails pins the H-1 fail-closed
 // behavior: env credentials set but the host outside
-// FLUXVIEW_GIT_CREDENTIAL_HOSTS must never reach the upstream — validate
-// fails with the allowlist remedy in the message.
-func TestRunValidate_ExternalHTTPSCredsWithheld_Fails(t *testing.T) {
+// FLUXVIEW_GIT_CREDENTIAL_HOSTS must never reach the upstream — the fetch
+// fails, validate warns with the allowlist remedy in the message and keeps
+// going, and the password never leaks into stderr.
+func TestRunValidate_ExternalHTTPSCredsWithheld_WarnsRemedy(t *testing.T) {
 	clearGitAuthEnv(t)
 	f := newExternalFixture(t)
 
@@ -1225,7 +1232,8 @@ spec:
 	t.Setenv("FLUXVIEW_GIT_CREDENTIAL_HOSTS", "github.com")
 
 	var runErr error
-	_ = captureStderr(func() {
+	var stderr string
+	stderr = captureStderr(func() {
 		runErr = runValidate(context.Background(), &ValidateFlags{
 			Path:                  f.clusterDir,
 			disableDefaultSchemas: true,
@@ -1233,31 +1241,27 @@ spec:
 			GitSourceCacheTTL:     time.Hour,
 		})
 	})
-	exitErr, ok := runErr.(*DiffExitError)
-	if !ok {
-		t.Fatalf("expected *DiffExitError, got %v", runErr)
-	}
-	if exitErr.ExitCode != ExitCodeError {
-		t.Errorf("exit code = %d, want %d", exitErr.ExitCode, ExitCodeError)
+	if runErr != nil {
+		t.Fatalf("a withheld-credentials fetch must not fail the gate, got: %v\nstderr:\n%s", runErr, stderr)
 	}
 	for _, want := range []string{
-		"failed to fetch their external source",
+		"left unchecked",
 		"private repository or bad credentials",
 		"FLUXVIEW_GIT_CREDENTIAL_HOSTS",
 	} {
-		if !strings.Contains(exitErr.Error(), want) {
-			t.Errorf("error must contain %q, got: %v", want, exitErr.Error())
+		if !strings.Contains(stderr, want) {
+			t.Errorf("warnings must contain %q, got:\n%s", want, stderr)
 		}
 	}
-	if strings.Contains(exitErr.Error(), "s3cret") {
-		t.Errorf("error must not contain the password: %v", exitErr)
+	if strings.Contains(stderr, "s3cret") {
+		t.Errorf("stderr must not contain the password, got:\n%s", stderr)
 	}
 }
 
-// TestRunValidate_ExternalHTTPSNoCreds_Fails pins the 401 case of ТЗ-1:
-// without credentials the private upstream fails validate with exit 2
-// and the distinct bad-credentials message.
-func TestRunValidate_ExternalHTTPSNoCreds_Fails(t *testing.T) {
+// TestRunValidate_ExternalHTTPSNoCreds_WarnsRemedy pins the 401 case of ТЗ-1:
+// without credentials the private upstream is left unchecked with the
+// distinct bad-credentials message in the warning.
+func TestRunValidate_ExternalHTTPSNoCreds_WarnsRemedy(t *testing.T) {
 	clearGitAuthEnv(t)
 	f := newExternalFixture(t)
 
@@ -1275,7 +1279,8 @@ spec:
 `)
 
 	var runErr error
-	_ = captureStderr(func() {
+	var stderr string
+	stderr = captureStderr(func() {
 		runErr = runValidate(context.Background(), &ValidateFlags{
 			Path:                  f.clusterDir,
 			disableDefaultSchemas: true,
@@ -1283,19 +1288,15 @@ spec:
 			GitSourceCacheTTL:     time.Hour,
 		})
 	})
-	exitErr, ok := runErr.(*DiffExitError)
-	if !ok {
-		t.Fatalf("expected *DiffExitError, got %v", runErr)
-	}
-	if exitErr.ExitCode != ExitCodeError {
-		t.Errorf("exit code = %d, want %d", exitErr.ExitCode, ExitCodeError)
+	if runErr != nil {
+		t.Fatalf("a no-credentials fetch must not fail the gate, got: %v\nstderr:\n%s", runErr, stderr)
 	}
 	for _, want := range []string{
-		"failed to fetch their external source",
+		"left unchecked",
 		"private repository or bad credentials",
 	} {
-		if !strings.Contains(exitErr.Error(), want) {
-			t.Errorf("error must contain %q, got: %v", want, exitErr.Error())
+		if !strings.Contains(stderr, want) {
+			t.Errorf("warnings must contain %q, got:\n%s", want, stderr)
 		}
 	}
 }
