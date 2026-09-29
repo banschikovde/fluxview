@@ -1,0 +1,8 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: vmclusters.operator.victoriametrics.com
+  labels:
+    app.kubernetes.io/version: v0.50.1
+spec:
+  group: operator.victoriametrics.com

@@ -1,0 +1,123 @@
+# Example CR version-extraction rules for `fluxview inventory`.
+# Copy what you need into your repository as .fluxview/inventory-rules.yaml
+# (picked up automatically) or pass via --rules.
+#
+# No rules ship inside the binary: every cluster runs a different set of
+# operators, and their fields change over time — the rules are yours to own.
+# Without rules, CRs are hidden; --all-crs lists them with version unknown.
+#
+# This example covers exactly the operators of the reference fleet
+# repository, with version and image fields verified against it. Scrape
+# configs, dashboards and other content CRs are deliberately absent — they
+# are configuration, not software.
+#
+# Fields:
+#   group / kind  identify the CR (apiVersion group and kind)
+#   software      the SOFTWARE column value
+#   operator      the operator managing the CR (informational)
+#   version       tried in order, first non-empty wins:
+#     jsonpath    a jsonpath template (client-go, as kubectl uses): a bare
+#                 field path without braces, or braced expressions with
+#                 literal text between for composite values
+#     regex       optional: pull the version out of the matched string;
+#                 the named group "version" wins, else the whole match
+#   image         optional: main container image for the IMAGES column;
+#                 same field syntax as version, and a field may
+#                 compose the reference from several paths with literal
+#                 text between, e.g. "{.spec.image.repository}:{.spec.image.tag}"
+#                 — the kubectl jsonpath template syntax; a bare path
+#                 without braces is wrapped automatically. Only where the
+#                 CR carries a single main image; the operator's runtime
+#                 choices (sidecars, defaults) are not visible offline.
+
+rules:
+  # VictoriaMetrics operator
+  - group: operator.victoriametrics.com
+    kind: VMCluster
+    software: VictoriaMetrics cluster
+    operator: victoria-metrics-operator
+    version:
+      - jsonpath: .spec.clusterVersion
+      - jsonpath: .spec.vmstorage.image.tag
+
+  - group: operator.victoriametrics.com
+    kind: VMAuth
+    software: VMAuth
+    operator: victoria-metrics-operator
+    version:
+      - jsonpath: .spec.image.tag
+    image:
+      - jsonpath: "{.spec.image.repository}:{.spec.image.tag}"
+
+  - group: operator.victoriametrics.com
+    kind: VMAgent
+    software: VMAgent
+    operator: victoria-metrics-operator
+    version:
+      - jsonpath: .spec.image.tag
+    image:
+      - jsonpath: "{.spec.image.repository}:{.spec.image.tag}"
+
+  - group: operator.victoriametrics.com
+    kind: VMAlert
+    software: VMAlert
+    operator: victoria-metrics-operator
+    version:
+      - jsonpath: .spec.image.tag
+    image:
+      - jsonpath: "{.spec.image.repository}:{.spec.image.tag}"
+
+  - group: operator.victoriametrics.com
+    kind: VMAlertmanager
+    software: Alertmanager
+    operator: victoria-metrics-operator
+    version:
+      - jsonpath: .spec.image.tag
+    image:
+      - jsonpath: "{.spec.image.repository}:{.spec.image.tag}"
+
+  # VictoriaLogs operator
+  - group: operator.victoriametrics.com
+    kind: VLAgent
+    software: VictoriaLogs agent
+    operator: victoria-metrics-operator
+    version:
+      - jsonpath: .spec.image.tag
+    image:
+      - jsonpath: "{.spec.image.repository}:{.spec.image.tag}"
+
+  - group: operator.victoriametrics.com
+    kind: VLSingle
+    software: VictoriaLogs
+    operator: victoria-metrics-operator
+    version:
+      - jsonpath: .spec.image.tag
+    image:
+      - jsonpath: "{.spec.image.repository}:{.spec.image.tag}"
+
+  # Strimzi Kafka operator
+  - group: kafka.strimzi.io
+    kind: Kafka
+    software: Kafka
+    operator: strimzi
+    version:
+      - jsonpath: .spec.kafka.version
+
+  # Banzai Cloud Vault operator
+  - group: vault.banzaicloud.com
+    kind: Vault
+    software: Vault
+    operator: vault-operator
+    version:
+      - jsonpath: .spec.image
+        regex: ':(?P<version>[^@]+)'
+    image:
+      - jsonpath: .spec.image
+
+  # Grafana operator
+  - group: grafana.integreatly.org
+    kind: Grafana
+    software: Grafana
+    operator: grafana-operator
+    version:
+      - jsonpath: .spec.version

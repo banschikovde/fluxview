@@ -155,7 +155,7 @@ func TestE2E_SSHKeyAuthFetch(t *testing.T) {
 	})
 }
 
-// TestE2E_CacheStaysCredentialFree pins the security property of ТЗ-1
+// TestE2E_CacheStaysCredentialFree pins the security property
 // §2.6: nothing secret ever lands in the cache — the clone directory is
 // keyed by the normalized URL only, and the seed names the manifest URL.
 func TestE2E_CacheStaysCredentialFree(t *testing.T) {

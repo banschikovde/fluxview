@@ -51,6 +51,73 @@ spec:
 `)
 }
 
+// TestChartMeta_LocalChart verifies the metadata-only fast path: Chart.yaml
+// name/version/appVersion are read without rendering templates (a chart with
+// no templates at all still resolves).
+func TestChartMeta_LocalChart(t *testing.T) {
+	chartDir := filepath.Join(t.TempDir(), "testchart")
+	write := func(path, content string) {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	write(filepath.Join(chartDir, "Chart.yaml"), `apiVersion: v2
+name: testchart
+version: 1.2.3
+appVersion: 6.0.0
+`)
+	write(filepath.Join(chartDir, "values.yaml"), "")
+
+	inflater, err := NewInflater(WithCacheDir(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+
+	hr := flux.HelmRelease{
+		Metadata: flux.ObjectMeta{Name: "app", Namespace: "test"},
+		Spec: flux.HelmReleaseSpec{
+			Chart: flux.HelmReleaseChart{Spec: flux.HelmReleaseChartSpec{Chart: chartDir}},
+		},
+	}
+
+	meta, err := inflater.ChartMeta(context.Background(), hr, "", "", "")
+	if err != nil {
+		t.Fatalf("ChartMeta: %v", err)
+	}
+	if meta.Name != "testchart" {
+		t.Errorf("Name = %q, want %q", meta.Name, "testchart")
+	}
+	if meta.Version != "1.2.3" {
+		t.Errorf("Version = %q, want %q", meta.Version, "1.2.3")
+	}
+	if meta.AppVersion != "6.0.0" {
+		t.Errorf("AppVersion = %q, want %q", meta.AppVersion, "6.0.0")
+	}
+}
+
+// TestChartMeta_LocalChartMissing verifies the failure path of the fast
+// path: a nonexistent local chart errors instead of returning empty fields.
+func TestChartMeta_LocalChartMissing(t *testing.T) {
+	inflater, err := NewInflater(WithCacheDir(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+
+	hr := flux.HelmRelease{
+		Metadata: flux.ObjectMeta{Name: "app", Namespace: "test"},
+		Spec: flux.HelmReleaseSpec{
+			Chart: flux.HelmReleaseChart{Spec: flux.HelmReleaseChartSpec{Chart: filepath.Join(t.TempDir(), "no-such-chart")}},
+		},
+	}
+
+	if _, err := inflater.ChartMeta(context.Background(), hr, "", "", ""); err == nil {
+		t.Fatalf("ChartMeta on a missing chart must error")
+	}
+}
+
 // TestInflateHelmRelease_CRDSkip verifies that spec.install.crds: Skip excludes
 // the chart's CRDs from the rendered output, while the chart's workload
 // templates are still rendered.

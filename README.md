@@ -20,6 +20,7 @@ docker run --rm -v $(pwd):/repo -w /repo ghcr.io/banschikovde/fluxview:latest \
 - **build** — assemble Kustomization and HelmRelease resources
 - **diff** — per-resource comparison against a git revision
 - **validate** — schema validation via the kubeconform engine: native Kubernetes kinds out of the box, Flux/custom CRD schemas via `--schema-dir`; supports `--strict`, `--skip-kind`, `--output json|junit`
+- **inventory** — a table of all software the GitOps repository deploys (Helm releases, plain-manifest workloads, operator CRs, CRDs) with versions; `table` or GFM `markdown` output, MR-ready change summary via `--branch-orig`
 - Recursive Kustomization discovery following `spec.path` into shared bases (Flux controller behavior)
 - postBuild variable substitution from ConfigMaps and Secrets (Secret values redacted with a placeholder)
 - On-disk caching of Helm charts, remote resources, and kustomize builds — warm runs make no network requests and skip kustomize entirely ([details](docs/caching.md))
@@ -118,24 +119,75 @@ Behavior:
 - Kustomizations whose `sourceRef` names an **external** `GitRepository` (a repository other than the local origin, e.g. a dedicated CRDs upstream like `kyverno/kyverno`) are fetched into the [git source cache](docs/caching.md) and their resources are built, diffed and validated like local ones — including directories of loose YAML files without a `kustomization.yaml`. The path always resolves against the upstream clone (Flux source-first semantics), even when a same-name directory exists locally. A broken manifest in the upstream fails the gate; an external source that cannot be fetched (unreachable upstream or `--no-git-source-fetch`, env `FLUXVIEW_NO_GIT_SOURCE_FETCH` — the kill switch for slow/offline networks) warn-and-skips in build/diff and leaves validate running: the unchecked Kustomizations are named in a warning, the local tree is still validated. **Private upstreams authenticate from the machine environment**, like native git: an SSH key (`FLUXVIEW_GIT_SSH_KEY`, ssh-agent or `~/.ssh/id_*`) with strict known_hosts verification (`--git-source-ssh-known-hosts`, TOFU via `--git-source-ssh-accept-new`), or https basic auth (`FLUXVIEW_GIT_USERNAME`/`FLUXVIEW_GIT_PASSWORD`, `FLUXVIEW_GIT_TOKEN`, `~/.netrc`) — https credentials apply only to hosts listed in `FLUXVIEW_GIT_CREDENTIAL_HOSTS` (fail-closed when unset; a manifest URL is untrusted input) — see the [git source cache](docs/caching.md) section. OCIRepository/Bucket sources stay outside the checkout and keep the missing-path behavior.
 - `--output json` / `--output junit` emit a machine-readable report to stdout for CI.
 
+### inventory — software inventory of the cluster
+
+```bash
+# Everything the repository deploys, with versions
+fluxview inventory --path clusters/prod/flux/
+
+# Only Helm releases / only operator custom resources
+fluxview inventory helm --path clusters/prod/flux/
+fluxview inventory crs --path clusters/prod/flux/
+
+# Filters and Markdown for MRs and wikis
+fluxview inventory --path clusters/prod/flux/ -n monitoring --source helm,cr -o markdown
+
+# Custom extraction rules
+fluxview inventory --path clusters/prod/flux/ --rules ./inventory-rules.yaml
+```
+
+```text
+Helm releases (1)
+NAMESPACE     NAME           SOFTWARE      VERSION  CHART    IMAGES
+cert-manager  cert-manager   cert-manager  v1.16.2  1.16.2  quay.io/jetstack/cert-manager-cainjector:v1.16.2, …
+
+Operator custom resources (1)
+NAMESPACE         NAME       KIND       PARENT  SOFTWARE                 VERSION           IMAGES
+victoria-metrics  vmcluster  VMCluster  -       VictoriaMetrics cluster  v1.146.0-cluster  none
+
+Plain manifests (1)
+NAMESPACE  NAME         SOFTWARE     VERSION  IMAGES
+tools      echo-server  echo-server  0.9.2    ghcr.io/echo/echo-server:0.9.2
+
+3 components (helm: 1, cr: 1, manifest: 1)
+```
+
+Components are collected from the same pipeline as `build ks` / `build hr`, entirely from the local repository. Every run shows an IMAGES column: manifest workloads carry their own images, CR images come from the rules, and HelmRelease templates render to resolve theirs (a warm chart cache keeps it cheap; `none` marks components without a known image):
+
+- **helm** — one row per HelmRelease: chart name, resolved chart version (semver ranges show the selected version), `appVersion`, chart source. Unavailable charts (Bucket source, chartRef) keep the spec version and warn.
+- **manifest** — Deployment/StatefulSet/DaemonSet/CronJob/Job workloads grouped by `app.kubernetes.io/name` → `part-of` → workload name; version from the main container's image tag (sidecars like `istio-proxy` excluded), falling back to `app.kubernetes.io/version`, then the image digest.
+- **cr** — custom resources with user-provided extraction rules (JSONPath + optional regex over the matched value; the first non-empty field wins, none set → the operator default with a warning). No rules ship inside the binary — every cluster runs different operators, so the rules are yours: `.fluxview/inventory-rules.yaml` in the repo root or `--rules <file>`. `docs/inventory-rules-example.yaml` covers the reference fleet's operators with fields verified against it (VictoriaMetrics/VictoriaLogs, Strimzi Kafka, Banzai Vault, Grafana) — copy what you use. `--all-crs` lists rule-less CRs with version `unknown`. CRs rendered by a chart (from the always-on template render) appear as `cr` rows too, with the PARENT column carrying the HelmRelease's namespace/name; the same CR collected from manifests wins.
+- **crd** — CRD groups installed as separately versioned artifacts (renovate-pinned release URLs, upstream git tags) that can drift from the operator. Only groups with a known version show — from the `app.kubernetes.io/version` label or the pinned tag of the external GitRepository shipping them; groups with neither stay invisible. Chart-shipped CRDs are covered by their helm row.
+
+Each section carries its own columns (CHART only in helm, KIND and PARENT in cr); `--no-headers` switches to flat rows with a fixed schema for scripts, and `--split-umbrella` splits an umbrella HelmRelease into one row per application (`parent/app`, version = the application's image tag; the split follows labels, not product boundaries).
+
+`--branch-orig <rev>` adds a CHANGE column (`+` added, `-` removed, `~ old → new` updated, `=` unchanged) — an MR-ready version summary; exit code 1 when anything changed, 2 on any error. Output is byte-for-byte deterministic for equal input. Warnings and one render-progress line go to stderr, so `-o markdown > inventory.md` stays clean.
+
 ## Flags
 
 | Flag | Commands | Description |
 |------|----------|-------------|
-| `-p, --path` | build, diff, validate | Path to cluster directory with Kustomization files |
-| `-n, --namespace` | build, diff, validate | Filter output resources by namespace (default: all) |
-| `--branch-orig` | diff | Branch/revision to compare against (default: auto-detect) |
+| `-p, --path` | build, diff, validate, inventory | Path to cluster directory with Kustomization files |
+| `-n, --namespace` | build, diff, validate, inventory | Filter output resources by namespace (default: all) |
+| `--branch-orig` | diff, inventory | Branch/revision to compare against (default: auto-detect for diff) |
 | `--color` | diff | Color mode: `auto`, `always`, `never` |
 | `--unified` | diff | Context lines (default: 3) |
-| `--skip-crds` | build, diff | Skip CustomResourceDefinition resources |
+| `--skip-crds` | build, diff | Skip CustomResourceDefinition resources in output |
 | `--strip-attrs` | build, diff | Comma-separated keys to strip (e.g. `helm.sh/chart,status`) |
-| `--no-git-source-fetch` | build, diff, validate | Do not clone external GitRepository sources (no network at all): such Kustomizations warn-and-skip everywhere; validate names them in a warning and validates the rest — for slow or offline networks (default: `false`, env: `FLUXVIEW_NO_GIT_SOURCE_FETCH`) |
+| `--no-git-source-fetch` | build, diff, validate, inventory | Do not clone external GitRepository sources (no network at all): such Kustomizations warn-and-skip everywhere; validate names them in a warning and validates the rest — for slow or offline networks (default: `false`, env: `FLUXVIEW_NO_GIT_SOURCE_FETCH`) |
 | `--schema-dir` | validate | Directory with schemas: kubeconform JSON files, CRD YAML manifests and/or a kubernetes-json-schema checkout (default: `/schemas/` or `./schemas/`) |
 | `--kubernetes-version` | validate | Kubernetes version (full `X.Y.Z` like `1.34.0`, or `master`) for the default schema location (default: `1.36.1`) |
 | `--schema-download-timeout` | validate | Per-request timeout for downloading Kubernetes schemas (e.g. `30s`, `1m`; `0` = no limit, Ctrl-C still interrupts; default: `30s`) |
 | `--strict` | validate | Reject duplicated YAML keys; strict default-registry schemas also reject unknown fields |
 | `--skip-kind` | validate | Kinds to skip (repeatable or comma-separated): `Deployment` (any apiVersion) or `apps/v1/Deployment` |
 | `--output` | validate | Output format: `text` (default, stderr), `json` or `junit` (stdout, per-resource statuses + summary) |
+| `-o, --output` | inventory | Output format: `table` (default) or `markdown` (GFM, for MRs/wikis) |
+| `--source` | inventory | Component sources: `helm`, `manifest`, `cr`, `crd`, comma-separated (default: all) |
+| `--sort` | inventory | Sort keys: `name`, `namespace`, `source`, `version` (default: `source,namespace,name`) |
+| `--rules` | inventory | Custom CR version-extraction rules file (default: `.fluxview/inventory-rules.yaml` in the repo root when present) |
+| `--all-crs` | inventory | Also show custom resources without an extraction rule, with version `unknown` |
+| `--split-umbrella` | inventory | Split an umbrella HelmRelease into one row per application (by `app.kubernetes.io/name` in the rendered chart); each row's version is the application's image tag. Note: the split follows labels, not product boundaries — a single product deployed as several deployments (cert-manager's controller/webhook/cainjector, kyverno's controllers) splits too |
+| `--no-headers` | inventory | Flat data rows only (with the SOURCE column), no section titles, headers or summary — for scripts |
 
 Cache flags (`--helm-*`, `--remote-*`, `--kustomize-build-*`, `--git-source-*`, `--schema-*`, `--crd-schema-*`) share one pattern: `--<name>-cache-dir` (`disabled` disables — all of them at once via `FLUXVIEW_CACHE_HOME=disabled`; empty, whitespace-padded and retired `off`/`none` values are rejected at parse time) and `--<name>-cache-ttl` where applicable (`0` always bypasses). On slow networks, `--helm-download-timeout` and `--remote-cache-timeout` (`0` = no limit) let downloads wait as long as the link needs instead of being cut off after `2m`/`30s`, and `--no-git-source-fetch` (env `FLUXVIEW_NO_GIT_SOURCE_FETCH`) skips cloning external GitRepository sources altogether — see [docs/caching.md](docs/caching.md).
 
@@ -144,7 +196,7 @@ Cache flags (`--helm-*`, `--remote-*`, `--kustomize-build-*`, `--git-source-*`, 
 | Code | Meaning |
 |------|---------|
 | 0 | Success / no differences / all resources valid |
-| 1 | Differences found (diff only) |
+| 1 | Differences found (diff); version changes found (inventory with `--branch-orig`) |
 | 2 | Error |
 | 3 | Validation failed (validate only) |
 

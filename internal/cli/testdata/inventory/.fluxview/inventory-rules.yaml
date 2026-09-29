@@ -1,0 +1,15 @@
+rules:
+  - group: operator.victoriametrics.com
+    kind: VMCluster
+    software: VictoriaMetrics cluster
+    operator: victoria-metrics-operator
+    version:
+      - jsonpath: .spec.clusterVersion
+
+  - group: vault.banzaicloud.com
+    kind: Vault
+    software: Vault
+    operator: vault-operator
+    version:
+      - jsonpath: .spec.image
+        regex: ':(?P<version>[^@]+)'

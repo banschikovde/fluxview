@@ -679,6 +679,127 @@ func resolveOCIChartCancelable(ctx context.Context, in *Inflater, chartRef, vers
 	}
 }
 
+// resolvedChart is a located chart: its local path (directory or cached
+// tarball) plus the reference it was resolved from and how.
+type resolvedChart struct {
+	path string
+	ref  string // the chart reference the path was resolved from (errors, OCI clients)
+	oci  bool   // resolved over the OCI registry protocol
+}
+
+// resolveChart locates the chart referenced by a HelmRelease and returns its
+// local path — the shared front half of InflateHelmRelease (which then
+// renders the templates) and ChartMeta (which reads Chart.yaml only).
+//
+// chartName is spec.chart.spec.chart, which for chartRef-based HelmReleases
+// is already the full OCI reference (resolved by the caller); version is the
+// requested version or semver constraint; repoURL the resolved HelmRepository
+// URL ("" for local paths, "oci://…" for OCI repositories).
+//
+// Chart resolution: OCI repos need special handling, see helm/helm#10191 —
+// setting RepoURL for OCI causes index.yaml fetch failure.
+func (in *Inflater) resolveChart(ctx context.Context, chartName, version, repoURL, username, password string) (resolvedChart, error) {
+	switch {
+	case strings.HasPrefix(chartName, "oci://"):
+		// OCIRepository pattern: chartName is the full OCI reference
+		// (URL + optional @digest). Use directly, don't append anything.
+		ref := chartName
+		chartPath, err := resolveOCIChartCancelable(ctx, in, ref, version, username, password)
+		if err != nil {
+			return resolvedChart{}, fmt.Errorf("locating chart %s: %w", ref, err)
+		}
+		return resolvedChart{path: chartPath, ref: ref, oci: true}, nil
+	case strings.HasPrefix(repoURL, "oci://"):
+		// HelmRepository type=oci: append chart name to repo URL.
+		ref := strings.TrimSuffix(repoURL, "/") + "/" + chartName
+		chartPath, err := resolveOCIChartCancelable(ctx, in, ref, version, username, password)
+		if err != nil {
+			return resolvedChart{}, fmt.Errorf("locating chart %s: %w", ref, err)
+		}
+		return resolvedChart{path: chartPath, ref: ref, oci: true}, nil
+	case repoURL == "":
+		// No repository involved: chartName is a local path (GitRepository
+		// source resolved by the caller) that LocateChart loads from disk.
+		cpo := &action.ChartPathOptions{Version: version}
+		chartPath, err := locateChartCancelable(ctx, cpo, chartName, in.settings)
+		if err != nil {
+			return resolvedChart{}, fmt.Errorf("locating chart %s: %w", chartName, err)
+		}
+		return resolvedChart{path: chartPath, ref: chartName}, nil
+	default:
+		// Traditional HTTP HelmRepository: register it in the local helm config
+		// and resolve via <repo>/<chart>. Unlike ChartPathOptions.RepoURL (which
+		// re-downloads index.yaml and the tarball on every run), the repo/chart
+		// lookup reads the cached index, learns the chart digest up front, and
+		// serves an already-downloaded tarball from the content cache.
+		repoName, err := in.registerRepo(repoURL, username, password)
+		if err != nil {
+			return resolvedChart{}, fmt.Errorf("preparing helm repository %s: %w", repoURL, err)
+		}
+		ref := repoName + "/" + chartName
+		cpo := &action.ChartPathOptions{Version: version}
+		// Credentials for the tarball download are passed via ChartPathOptions
+		// (registerRepo keeps them out of the on-disk repositories.yaml).
+		if username != "" && password != "" {
+			cpo.Username = username
+			cpo.Password = password
+		}
+		chartPath, err := in.chartPathCancelable(ctx, cpo, ref, true)
+		if err != nil {
+			// A chart or version missing from the index while index caching is on is
+			// most often staleness (the chart was published after the cached index).
+			// The SDK's "try 'helm repo update'" advice does not apply to fluxview.
+			if (errors.Is(err, repo.ErrNoChartVersion) || errors.Is(err, repo.ErrNoChartName)) && in.indexTTL > 0 {
+				return resolvedChart{}, fmt.Errorf("locating chart %s: %w (cached index may be stale — retry with --helm-index-ttl=0)", ref, err)
+			}
+			return resolvedChart{}, fmt.Errorf("locating chart %s: %w", ref, err)
+		}
+		return resolvedChart{path: chartPath, ref: ref}, nil
+	}
+}
+
+// ChartMeta is the inventory-relevant subset of a chart's Chart.yaml.
+type ChartMeta struct {
+	Name       string
+	Version    string // the resolved (actual) chart version
+	AppVersion string
+}
+
+// ChartMeta resolves the chart referenced by a HelmRelease and returns its
+// Chart.yaml metadata — name, resolved version and appVersion — without
+// rendering templates. The inventory fast path: locating (and caching) the
+// chart tarball is unavoidable, but template rendering is not.
+func (in *Inflater) ChartMeta(ctx context.Context, hr fluxtypes.HelmRelease, repoURL, username, password string) (ChartMeta, error) {
+	resolved, err := in.resolveChart(ctx, hr.Spec.Chart.Spec.Chart, hr.Spec.Chart.Spec.Version, repoURL, username, password)
+	if err != nil {
+		return ChartMeta{}, err
+	}
+	chartObj, err := loader.Load(resolved.path)
+	if err != nil {
+		return ChartMeta{}, fmt.Errorf("loading chart from %s: %w", resolved.path, err)
+	}
+	// The accessor abstracts v2/v3 chart differences and works uniformly for
+	// directory- and archive-loaded charts (same reason as in
+	// InflateHelmRelease). MetadataAsMap keys are the struct field names
+	// ("Version", "AppVersion") — see the accessor's structToMap.
+	chartAcc, err := chart.NewDefaultAccessor(chartObj)
+	if err != nil {
+		return ChartMeta{}, fmt.Errorf("accessing chart %s: %w", resolved.ref, err)
+	}
+	meta := chartAcc.MetadataAsMap()
+	str := func(key string) string {
+		if v, ok := meta[key].(string); ok {
+			return v
+		}
+		return ""
+	}
+	return ChartMeta{
+		Name:       chartAcc.Name(),
+		Version:    str("Version"),
+		AppVersion: str("AppVersion"),
+	}, nil
+}
+
 // InflateHelmRelease inflates a Flux HelmRelease resource using the Helm Go SDK.
 // It locates/downloads the chart from the given repo URL and renders templates
 // equivalent to: helm template <name> <chart> --repo <url> --version <ver> --namespace <ns> --include-crds
@@ -708,95 +829,33 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 	}
 	install.Namespace = namespace
 
-	// Chart resolution: OCI repos need special handling.
-	// See helm/helm#10191: setting RepoURL for OCI causes index.yaml fetch failure.
-	var chartRef string
-	ociResolution := false
-	switch {
-	case strings.HasPrefix(chartName, "oci://"):
-		// OCIRepository pattern: chartName is the full OCI reference
-		// (URL + optional @digest). Use directly, don't append anything.
-		chartRef = chartName
-		install.ChartPathOptions.Version = hr.Spec.Chart.Spec.Version
-		ociResolution = true
-
-		// Registry client is still set on the install action: chart
-		// dependencies pulled during rendering may need it.
-		registryClient, err := in.ociClientFor(username, password, ociPlainHTTP(chartRef))
-		if err != nil {
-			return nil, err
-		}
-		actionConfig.RegistryClient = registryClient
-		install.SetRegistryClient(registryClient)
-	case strings.HasPrefix(repoURL, "oci://"):
-		// HelmRepository type=oci: append chart name to repo URL.
-		chartRef = strings.TrimSuffix(repoURL, "/") + "/" + chartName
-		install.ChartPathOptions.Version = hr.Spec.Chart.Spec.Version
-		ociResolution = true
-
-		registryClient, err := in.ociClientFor(username, password, ociPlainHTTP(chartRef))
-		if err != nil {
-			return nil, err
-		}
-		actionConfig.RegistryClient = registryClient
-		install.SetRegistryClient(registryClient)
-	default:
-		if repoURL == "" {
-			// No repository involved: chartName is a local path (GitRepository
-			// source resolved by the caller) that LocateChart loads from disk.
-			chartRef = chartName
-			install.ChartPathOptions.Version = hr.Spec.Chart.Spec.Version
-			break
-		}
-		// Traditional HTTP HelmRepository: register it in the local helm config
-		// and resolve via <repo>/<chart>. Unlike ChartPathOptions.RepoURL (which
-		// re-downloads index.yaml and the tarball on every run), the repo/chart
-		// lookup reads the cached index, learns the chart digest up front, and
-		// serves an already-downloaded tarball from the content cache.
-		repoName, err := in.registerRepo(repoURL, username, password)
-		if err != nil {
-			return nil, fmt.Errorf("preparing helm repository %s: %w", repoURL, err)
-		}
-		chartRef = repoName + "/" + chartName
-		install.ChartPathOptions.Version = hr.Spec.Chart.Spec.Version
-		// Credentials for the tarball download are passed via ChartPathOptions
-		// (registerRepo keeps them out of the on-disk repositories.yaml).
-		if username != "" && password != "" {
-			install.ChartPathOptions.Username = username
-			install.ChartPathOptions.Password = password
-		}
-	}
-
 	// Locate the chart (downloads from repo if necessary). The Helm SDK's
 	// LocateChart and its downloaders do not accept a context, so a cancelled
 	// context can't truly abort an in-flight download — the cancelable helpers
-	// stop waiting and return ctx.Err(), letting the caller exit while the
-	// download finishes in a goroutine (the process terminates on Ctrl-C, so
-	// the brief lingering download is acceptable for this CLI).
-	var chartPath string
-	var err error
-	if ociResolution {
-		chartPath, err = resolveOCIChartCancelable(ctx, in, chartRef, hr.Spec.Chart.Spec.Version, username, password)
-		if err != nil {
-			return nil, fmt.Errorf("locating chart %s: %w", chartRef, err)
+	// inside resolveChart stop waiting and return ctx.Err(), letting the
+	// caller exit while the download finishes in a goroutine (the process
+	// terminates on Ctrl-C, so the brief lingering download is acceptable).
+	resolved, err := in.resolveChart(ctx, chartName, hr.Spec.Chart.Spec.Version, repoURL, username, password)
+	if err != nil {
+		return nil, err
+	}
+	chartRef := resolved.ref
+
+	// A chart located over OCI may pull dependencies from the registry
+	// during rendering; the install action needs the shared client for that.
+	if resolved.oci {
+		registryClient, cerr := in.ociClientFor(username, password, ociPlainHTTP(chartRef))
+		if cerr != nil {
+			return nil, cerr
 		}
-	} else {
-		chartPath, err = in.chartPathCancelable(ctx, &install.ChartPathOptions, chartRef, repoURL != "")
-		if err != nil {
-			// A chart or version missing from the index while index caching is on is
-			// most often staleness (the chart was published after the cached index).
-			// The SDK's "try 'helm repo update'" advice does not apply to fluxview.
-			if (errors.Is(err, repo.ErrNoChartVersion) || errors.Is(err, repo.ErrNoChartName)) && in.indexTTL > 0 {
-				return nil, fmt.Errorf("locating chart %s: %w (cached index may be stale — retry with --helm-index-ttl=0)", chartRef, err)
-			}
-			return nil, fmt.Errorf("locating chart %s: %w", chartRef, err)
-		}
+		actionConfig.RegistryClient = registryClient
+		install.SetRegistryClient(registryClient)
 	}
 
 	// Load the chart.
-	chartObj, err := loader.Load(chartPath)
+	chartObj, err := loader.Load(resolved.path)
 	if err != nil {
-		return nil, fmt.Errorf("loading chart from %s: %w", chartPath, err)
+		return nil, fmt.Errorf("loading chart from %s: %w", resolved.path, err)
 	}
 
 	// Accessor abstracts v2/v3 chart differences and works uniformly whether the

@@ -1,0 +1,17 @@
+Helm releases (1)
+NAMESPACE  NAME     SOFTWARE  VERSION  CHART  IMAGES
+apps       podinfo  podinfo   6.0.0    6.0.0  none
+
+Operator custom resources (2)
+NAMESPACE         NAME       KIND       PARENT  SOFTWARE                 VERSION           IMAGES
+vault             vault      Vault      -       Vault                    2.1.1             none
+victoria-metrics  vmcluster  VMCluster  -       VictoriaMetrics cluster  v1.146.0-cluster  none
+
+Plain manifests (1)
+NAMESPACE  NAME         SOFTWARE     VERSION  IMAGES
+tools      echo-server  echo-server  0.9.2    ghcr.io/echo/echo-server:0.9.2
+
+CRD groups (1)
+NAME                                  VERSION
+operator.victoriametrics.com (1 CRD)  v0.50.1
+5 components (helm: 1, cr: 2, manifest: 1, crd: 1)

@@ -142,21 +142,31 @@ func applyGitSourceAuthFlags(flags *pflag.FlagSet, knownHosts string, acceptNew 
 	}
 }
 
-// buildHRInflation discovers HelmReleases through the Flux Kustomization pipeline
-// (same discovery logic as runBuildHR), resolves sources, inflates the charts,
-// and returns combined YAML. Returns nil if no Flux Kustomizations or no
-// HelmReleases are found (valid for diff comparison state).
-//
-// namespace filters the HelmRelease list BEFORE inflation — when set, only
-// matching HRs are inflated, avoiding unnecessary chart downloads.
-//
-// strict (diff mode) turns skip-worthy inflation failures into a returned
-// error instead of a warning + skip, so an unbuildable state never produces a
-// misleading partial diff.
-//
-// gitSources enables external GitRepository source fetching for the
-// Kustomization pipeline stage (nil keeps it local-only).
-func buildHRInflation(ctx context.Context, scans *scanCache, clusterPath, repoRoot, name, namespace string, quiet, strict bool, helmCache helmCacheOptions, ksCache kustomizeCacheOptions, gitSources *gitSourceEnv) ([]byte, error) {
+// helmFleet is the discovery stage output shared by build hr / diff (chart
+// inflation) and inventory: the combined Kustomization build output plus
+// everything chart resolution needs, parsed from it and the raw tree. The
+// output also feeds the inventory collectors for manifests, CRs and CRDs.
+type helmFleet struct {
+	output []byte
+	// kustomizations are the Flux Kustomizations the output was built from
+	// (inventory attribution).
+	kustomizations []flux.Kustomization
+	// helmReleases are deduped and dependency-sorted.
+	helmReleases []flux.HelmRelease
+	helmRepos    []flux.HelmRepository
+	ociRepos     []flux.OCIRepository
+	gitRepos     []flux.GitRepository
+	configMaps   []flux.ConfigMap
+	secrets      []flux.Secret
+}
+
+// discoverHelmFleet runs the Kustomization pipeline over clusterPath once:
+// builds all Flux Kustomizations, parses the combined output and resolves
+// the chart sources (build output authoritative, raw-parsed fallback — see
+// mergeSources). Returns a nil fleet when the path holds no Flux
+// Kustomizations — valid for the diff comparison state, an error for
+// commands that require them.
+func discoverHelmFleet(ctx context.Context, scans *scanCache, clusterPath, repoRoot string, quiet bool, ksCache kustomizeCacheOptions, gitSources *gitSourceEnv) (*helmFleet, error) {
 	kustomizations, err := scans.parserFor(clusterPath).ParseKustomizations(ctx)
 	if err != nil {
 		return nil, nil // no Flux KS — valid for diff
@@ -193,6 +203,66 @@ func buildHRInflation(ctx context.Context, scans *scanCache, clusterPath, repoRo
 		}
 	}
 
+	// Sort by dependency order.
+	sorted, sortErr := flux.TopologicalSortHelmReleases(helmReleases)
+	if sortErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v, processing in original order\n", sortErr)
+		sorted = helmReleases
+	}
+
+	// Sources from build output (correct kustomize-transformed namespaces)
+	// have priority over raw-parsed sources. Raw-parsed resources may have
+	// stale literal namespaces from the source file that kustomize would
+	// overwrite during build — including them as-is causes false exact-match
+	// in ResolveValuesFrom when valuesFrom references the pre-transform namespace.
+	rawRepos, rawOCI, rawCMs, rawSecrets := resolveHelmInflationSources(ctx, scans, clusterPath, repoRoot, quiet)
+	rawGit := parseWithRootFallback(scans, clusterPath, repoRoot, "GitRepositories",
+		func(p *flux.Parser) ([]flux.GitRepository, error) { return p.ParseGitRepositories(ctx) },
+		func(format string, args ...any) {
+			if !quiet {
+				fmt.Fprintf(os.Stderr, format, args...)
+			}
+		})
+
+	// Merge: build-output versions are authoritative. Raw-parsed versions
+	// only fill in resources NOT present in build output (by name).
+	return &helmFleet{
+		output:         output,
+		kustomizations: kustomizations,
+		helmReleases:   sorted,
+		helmRepos:      mergeSources(parsed.HelmRepositories, rawRepos, func(r flux.HelmRepository) string { return r.Metadata.Name }),
+		ociRepos:       mergeSources(parsed.OCIRepositories, rawOCI, func(r flux.OCIRepository) string { return r.Metadata.Name }),
+		gitRepos:       mergeSources(parsed.GitRepositories, rawGit, func(r flux.GitRepository) string { return r.Metadata.Name }),
+		configMaps:     mergeSources(parsed.ConfigMaps, rawCMs, func(c flux.ConfigMap) string { return c.Metadata.Name }),
+		secrets:        mergeSources(parsed.Secrets, rawSecrets, func(s flux.Secret) string { return s.Metadata.Name }),
+	}, nil
+}
+
+// buildHRInflation discovers HelmReleases through the Flux Kustomization pipeline
+// (same discovery logic as runBuildHR), resolves sources, inflates the charts,
+// and returns combined YAML. Returns nil if no Flux Kustomizations or no
+// HelmReleases are found (valid for diff comparison state).
+//
+// namespace filters the HelmRelease list BEFORE inflation — when set, only
+// matching HRs are inflated, avoiding unnecessary chart downloads.
+//
+// strict (diff mode) turns skip-worthy inflation failures into a returned
+// error instead of a warning + skip, so an unbuildable state never produces a
+// misleading partial diff.
+//
+// gitSources enables external GitRepository source fetching for the
+// Kustomization pipeline stage (nil keeps it local-only).
+func buildHRInflation(ctx context.Context, scans *scanCache, clusterPath, repoRoot, name, namespace string, quiet, strict bool, helmCache helmCacheOptions, ksCache kustomizeCacheOptions, gitSources *gitSourceEnv) ([]byte, error) {
+	fleet, err := discoverHelmFleet(ctx, scans, clusterPath, repoRoot, quiet, ksCache, gitSources)
+	if err != nil {
+		return nil, err
+	}
+	if fleet == nil {
+		return nil, nil
+	}
+
+	helmReleases := fleet.helmReleases
+
 	// Name filter.
 	if name != "" {
 		helmReleases = filterHelmReleases(helmReleases, name)
@@ -213,31 +283,6 @@ func buildHRInflation(ctx context.Context, scans *scanCache, clusterPath, repoRo
 		return nil, nil
 	}
 
-	// Sort by dependency order.
-	sorted, sortErr := flux.TopologicalSortHelmReleases(helmReleases)
-	if sortErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: %v, processing in original order\n", sortErr)
-		sorted = helmReleases
-	}
-
-	// Sources from build output (correct kustomize-transformed namespaces)
-	// have priority over raw-parsed sources. Raw-parsed resources may have
-	// stale literal namespaces from the source file that kustomize would
-	// overwrite during build — including them as-is causes false exact-match
-	// in ResolveValuesFrom when valuesFrom references the pre-transform namespace.
-	buildRepos := parsed.HelmRepositories
-	buildOCI := parsed.OCIRepositories
-	buildCMs := parsed.ConfigMaps
-	buildSecrets := parsed.Secrets
-	rawRepos, rawOCI, rawCMs, rawSecrets := resolveHelmInflationSources(ctx, scans, clusterPath, repoRoot, quiet)
-
-	// Merge: build-output versions are authoritative. Raw-parsed versions
-	// only fill in resources NOT present in build output (by name).
-	helmRepos := mergeSources(buildRepos, rawRepos, func(r flux.HelmRepository) string { return r.Metadata.Name })
-	ociRepos := mergeSources(buildOCI, rawOCI, func(r flux.OCIRepository) string { return r.Metadata.Name })
-	inflationCMs := mergeSources(buildCMs, rawCMs, func(c flux.ConfigMap) string { return c.Metadata.Name })
-	inflationSecrets := mergeSources(buildSecrets, rawSecrets, func(s flux.Secret) string { return s.Metadata.Name })
-
 	inflater, err := helm.NewInflater(helmCache.inflaterOptions()...)
 	if err != nil {
 		return nil, fmt.Errorf("initializing helm: %w", err)
@@ -246,7 +291,7 @@ func buildHRInflation(ctx context.Context, scans *scanCache, clusterPath, repoRo
 	// directory; drop it. A persisted cache is a no-op close.
 	defer inflater.Close()
 
-	return inflateAllHelmReleases(ctx, inflater, sorted, helmRepos, ociRepos, inflationCMs, inflationSecrets, inflateOptions{
+	return inflateAllHelmReleases(ctx, inflater, helmReleases, fleet.helmRepos, fleet.ociRepos, fleet.configMaps, fleet.secrets, inflateOptions{
 		quiet:    quiet,
 		strict:   strict,
 		repoRoot: repoRoot,

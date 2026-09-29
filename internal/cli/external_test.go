@@ -1191,7 +1191,7 @@ func defaultBranchOf(t *testing.T, dir string) string {
 	return strings.TrimSpace(gitOutput(t, dir, "symbolic-ref", "--short", "HEAD"))
 }
 
-// TestBuildKS_ExternalHTTPSBasicAuth pins the https e2e of ТЗ-1: a
+// TestBuildKS_ExternalHTTPSBasicAuth pins the https e2e: a
 // private upstream behind basic auth builds cleanly once the env pair is
 // set, and the external CRD lands in the output.
 func TestBuildKS_ExternalHTTPSBasicAuth(t *testing.T) {
@@ -1279,7 +1279,7 @@ spec:
 	}
 }
 
-// TestRunValidate_ExternalHTTPSNoCreds_WarnsRemedy pins the 401 case of ТЗ-1:
+// TestRunValidate_ExternalHTTPSNoCreds_WarnsRemedy pins the 401 case:
 // without credentials the private upstream is left unchecked with the
 // distinct bad-credentials message in the warning.
 func TestRunValidate_ExternalHTTPSNoCreds_WarnsRemedy(t *testing.T) {
@@ -1321,7 +1321,7 @@ spec:
 	}
 }
 
-// TestRunValidate_ExternalSSHSource_Passes pins the ssh e2e of ТЗ-1: a
+// TestRunValidate_ExternalSSHSource_Passes pins the ssh e2e: a
 // private upstream over ssh (client key from env, strict known_hosts)
 // validates green — including a floating branch ref, which resolves
 // through the authenticated ls-remote.

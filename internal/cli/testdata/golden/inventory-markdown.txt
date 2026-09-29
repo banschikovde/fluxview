@@ -1,0 +1,24 @@
+## Helm releases (1)
+
+| Namespace | Name | Software | Version | Chart | Images |
+| --- | --- | --- | --- | --- | --- |
+| apps | podinfo | podinfo | 6.0.0 | 6.0.0 | none |
+
+## Operator custom resources (2)
+
+| Namespace | Name | Kind | Parent | Software | Version | Images |
+| --- | --- | --- | --- | --- | --- | --- |
+| vault | vault | Vault | - | Vault | 2.1.1 | none |
+| victoria-metrics | vmcluster | VMCluster | - | VictoriaMetrics cluster | v1.146.0-cluster | none |
+
+## Plain manifests (1)
+
+| Namespace | Name | Software | Version | Images |
+| --- | --- | --- | --- | --- |
+| tools | echo-server | echo-server | 0.9.2 | ghcr.io/echo/echo-server:0.9.2 |
+
+## CRD groups (1)
+
+| Name | Version |
+| --- | --- |
+| operator.victoriametrics.com (1 CRD) | v0.50.1 |

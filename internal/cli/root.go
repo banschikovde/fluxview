@@ -61,7 +61,8 @@ to replicate Flux behavior without connecting to a live cluster.
 Commands:
   build     Build (assemble) Kustomization or HelmRelease resources
   diff      Compare Kustomization or HelmRelease resources against another git revision
-  validate  Validate resources against bundled CRD schemas`,
+  validate  Validate resources against bundled CRD schemas
+  inventory List all software deployed by the GitOps repository`,
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -70,6 +71,7 @@ Commands:
 	rootCmd.AddCommand(newBuildCmd())
 	rootCmd.AddCommand(newDiffCmd())
 	rootCmd.AddCommand(newValidateCmd())
+	rootCmd.AddCommand(newInventoryCmd())
 
 	return rootCmd
 }
