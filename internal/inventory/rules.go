@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
-	"sort"
 	"strings"
 
 	jsonpath "k8s.io/client-go/util/jsonpath"
@@ -153,8 +152,7 @@ func scalarString(r reflect.Value) (string, bool) {
 
 // trimFloat renders a float version without a trailing ".0" (16.0 → "16").
 func trimFloat(f float64) string {
-	s := fmt.Sprintf("%.10g", f)
-	return s
+	return fmt.Sprintf("%.10g", f)
 }
 
 // matchVersion applies a compiled extraction regex to the matched string.
@@ -260,24 +258,6 @@ func (rs *RuleSet) Lookup(group, kind string) (CompiledRule, bool) {
 
 // Len reports the number of rules (diagnostics and tests).
 func (rs *RuleSet) Len() int { return len(rs.rules) }
-
-// OperatorForGroup returns the operator name configured for the given API
-// group ("" when no rule covers the group). When several rules of the group
-// name different operators, the lexicographically first wins — a stable
-// choice for deterministic output.
-func (rs *RuleSet) OperatorForGroup(group string) string {
-	var found []string
-	for _, r := range rs.rules {
-		if r.Group == group && r.Operator != "" {
-			found = append(found, r.Operator)
-		}
-	}
-	if len(found) == 0 {
-		return ""
-	}
-	sort.Strings(found)
-	return found[0]
-}
 
 // ruleFile is the on-disk format of a user rules file.
 type ruleFile struct {

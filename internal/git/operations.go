@@ -7,7 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/go-git/go-git/v5"
@@ -215,7 +215,7 @@ func (g *Operations) OriginURL(ctx context.Context) (string, error) {
 		case 1:
 			chosen = remotes[0]
 		default:
-			sort.Strings(names)
+			slices.Sort(names)
 			return "", fmt.Errorf("no origin remote and %d remotes configured (%s): cannot identify the local repository",
 				len(names), strings.Join(names, ", "))
 		}

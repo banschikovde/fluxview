@@ -2,7 +2,7 @@ package inventory
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -31,6 +31,16 @@ func workloadKindRank(kind string) int {
 // IsWorkload reports whether kind is grouped into manifest components.
 func IsWorkload(kind string) bool {
 	return workloadKindRank(kind) < len(workloadKinds)
+}
+
+// compareWorkloadDocs orders workload documents by kind priority then name —
+// the deterministic order every group projection relies on.
+func compareWorkloadDocs(a, b workloadDoc) int {
+	ri, rj := workloadKindRank(a.kind), workloadKindRank(b.kind)
+	if ri != rj {
+		return ri - rj
+	}
+	return strings.Compare(a.name, b.name)
 }
 
 // workloadDoc is one parsed workload document.
@@ -247,13 +257,7 @@ func CollectManifestComponents(inputs []ManifestInput) []Component {
 		g := groups[key]
 		docs := make([]workloadDoc, len(g.docs))
 		copy(docs, g.docs)
-		sort.SliceStable(docs, func(i, j int) bool {
-			ri, rj := workloadKindRank(docs[i].kind), workloadKindRank(docs[j].kind)
-			if ri != rj {
-				return ri < rj
-			}
-			return docs[i].name < docs[j].name
-		})
+		slices.SortStableFunc(docs, compareWorkloadDocs)
 
 		ns, name := docs[0].namespace, docs[0].componentName()
 		c := Component{
@@ -305,13 +309,7 @@ func WorkloadGroupVersion(raws []map[string]interface{}, componentName string) (
 	if len(docs) == 0 {
 		return "", "", ""
 	}
-	sort.SliceStable(docs, func(i, j int) bool {
-		ri, rj := workloadKindRank(docs[i].kind), workloadKindRank(docs[j].kind)
-		if ri != rj {
-			return ri < rj
-		}
-		return docs[i].name < docs[j].name
-	})
+	slices.SortStableFunc(docs, compareWorkloadDocs)
 	return workloadVersion(docs, componentName)
 }
 
@@ -327,13 +325,7 @@ func WorkloadGroupKind(raws []map[string]interface{}) string {
 	if len(docs) == 0 {
 		return ""
 	}
-	sort.SliceStable(docs, func(i, j int) bool {
-		ri, rj := workloadKindRank(docs[i].kind), workloadKindRank(docs[j].kind)
-		if ri != rj {
-			return ri < rj
-		}
-		return docs[i].name < docs[j].name
-	})
+	slices.SortStableFunc(docs, compareWorkloadDocs)
 	return docs[0].kind
 }
 
@@ -404,7 +396,7 @@ func sortedImages(seen map[string]bool) []string {
 	for img := range seen {
 		images = append(images, img)
 	}
-	sort.Strings(images)
+	slices.Sort(images)
 	if len(images) == 0 {
 		return nil
 	}

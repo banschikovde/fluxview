@@ -8,7 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/cyphar/filepath-securejoin"
@@ -273,11 +273,33 @@ func collectFleetComponents(ctx context.Context, inflater *helm.Inflater, fleet 
 	for _, row := range rows {
 		components = append(components, row.component)
 	}
-	components = append(components, collectCRComponents(fleet, rules, allCRs)...)
-	components = append(components, inventory.CollectManifestComponents(manifestInputs(fleet))...)
-	components = append(components, inventory.CRDComponents(crdRaws(fleet),
+	// One parse pass feeds every fleet-output collector (CRs, manifest
+	// workloads, CRDs) — splitting and YAML-parsing the output separately
+	// in each would triple the parse work (sixfold under --branch-orig).
+	docs := fleetDocs(fleet)
+	components = append(components, collectCRComponents(docs, rules, allCRs)...)
+	components = append(components, inventory.CollectManifestComponents(manifestInputs(fleet, docs))...)
+	components = append(components, inventory.CRDComponents(crdRaws(docs),
 		crdGitSourceVersions(ctx, scans, repoRoot, gitEnv, quiet))...)
 	return rows, components, nil
+}
+
+// fleetDocs parses the fleet build output into raw mappings, one per
+// document. Empty and unparseable documents are skipped.
+func fleetDocs(fleet *helmFleet) []map[string]interface{} {
+	var docs []map[string]interface{}
+	for _, doc := range flux.SplitYAMLText(fleet.output) {
+		trimmed := strings.TrimSpace(doc)
+		if trimmed == "" {
+			continue
+		}
+		var raw map[string]interface{}
+		if err := yaml.Unmarshal([]byte(trimmed), &raw); err != nil || raw == nil {
+			continue
+		}
+		docs = append(docs, raw)
+	}
+	return docs
 }
 
 // collectAtRevision builds the component snapshot at a git revision
@@ -323,19 +345,11 @@ func collectAtRevision(ctx context.Context, inflater *helm.Inflater, gitOps *git
 	return components, failedParents, splitParents, nil
 }
 
-// crdRaws collects CustomResourceDefinition documents from the build
-// output.
-func crdRaws(fleet *helmFleet) []map[string]interface{} {
+// crdRaws collects CustomResourceDefinition documents from the parsed build
+// output (see fleetDocs).
+func crdRaws(docs []map[string]interface{}) []map[string]interface{} {
 	var raws []map[string]interface{}
-	for _, doc := range flux.SplitYAMLText(fleet.output) {
-		trimmed := strings.TrimSpace(doc)
-		if trimmed == "" {
-			continue
-		}
-		var raw map[string]interface{}
-		if err := yaml.Unmarshal([]byte(trimmed), &raw); err != nil || raw == nil {
-			continue
-		}
+	for _, raw := range docs {
 		if kind, _ := raw["kind"].(string); kind == "CustomResourceDefinition" {
 			raws = append(raws, raw)
 		}
@@ -363,7 +377,7 @@ func crdGitSourceVersions(ctx context.Context, scans *scanCache, repoRoot string
 	for k := range index {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 
 	groupVersions := map[string]string{}
 	for _, key := range keys {
@@ -621,10 +635,11 @@ func chartCRs(components []inventory.Component, docs []renderedDoc, row helmRow,
 			continue
 		}
 		seen[key] = true
-		if knownCR[c.Kind+"/"+c.Namespace+"/"+c.Name] {
+		known := c.Kind + "/" + c.Namespace + "/" + c.Name
+		if knownCR[known] {
 			continue
 		}
-		knownCR[c.Kind+"/"+c.Namespace+"/"+c.Name] = true
+		knownCR[known] = true
 		c.Parent = parentKey(row.component.Namespace, row.component.Name)
 		components = append(components, c)
 	}
@@ -712,8 +727,9 @@ func umbrellaChildren(parent inventory.Component, docs []renderedDoc) ([]invento
 
 // manifestInputs prepares workload documents for grouping, with Flux
 // Kustomization attribution: the kustomize.toolkit.fluxcd.io/name label
-// names the KS, whose spec.path becomes the component's path.
-func manifestInputs(fleet *helmFleet) []inventory.ManifestInput {
+// names the KS, whose spec.path becomes the component's path. docs is the
+// parsed build output (see fleetDocs).
+func manifestInputs(fleet *helmFleet, docs []map[string]interface{}) []inventory.ManifestInput {
 	ksPathByName := make(map[string]string, len(fleet.kustomizations))
 	for _, ks := range fleet.kustomizations {
 		if _, seen := ksPathByName[ks.Metadata.Name]; !seen && ks.Spec.Path != "" {
@@ -722,15 +738,7 @@ func manifestInputs(fleet *helmFleet) []inventory.ManifestInput {
 	}
 
 	var inputs []inventory.ManifestInput
-	for _, doc := range flux.SplitYAMLText(fleet.output) {
-		trimmed := strings.TrimSpace(doc)
-		if trimmed == "" {
-			continue
-		}
-		var raw map[string]interface{}
-		if err := yaml.Unmarshal([]byte(trimmed), &raw); err != nil || raw == nil {
-			continue
-		}
+	for _, raw := range docs {
 		if kind, _ := raw["kind"].(string); !inventory.IsWorkload(kind) {
 			continue
 		}
@@ -978,18 +986,10 @@ func loadInventoryRules(repoRoot, rulesFlag string) (*inventory.RuleSet, error) 
 // with version unknown. A matched rule whose version fields all came back
 // empty yields "default" — the operator's built-in default version — with
 // a warning marker.
-func collectCRComponents(fleet *helmFleet, rules *inventory.RuleSet, allCRs bool) []inventory.Component {
+func collectCRComponents(docs []map[string]interface{}, rules *inventory.RuleSet, allCRs bool) []inventory.Component {
 	var components []inventory.Component
 	seen := map[string]bool{}
-	for _, doc := range flux.SplitYAMLText(fleet.output) {
-		trimmed := strings.TrimSpace(doc)
-		if trimmed == "" {
-			continue
-		}
-		var raw map[string]interface{}
-		if err := yaml.Unmarshal([]byte(trimmed), &raw); err != nil || raw == nil {
-			continue
-		}
+	for _, raw := range docs {
 		c, ok, key := crComponentFromRaw(raw, rules, allCRs)
 		if !ok {
 			continue
@@ -1034,7 +1034,9 @@ func crComponentFromRaw(raw map[string]interface{}, rules *inventory.RuleSet, al
 		Namespace: namespace,
 		Name:      name,
 	}
-	rule, matched := rules.Lookup(strings.SplitN(apiVersion, "/", 2)[0], kind)
+	// Cut, not SplitN: Lookup needs the group only, and Cut allocates none.
+	group, _, _ := strings.Cut(apiVersion, "/")
+	rule, matched := rules.Lookup(group, kind)
 	if !matched {
 		if !allowUnknown {
 			return inventory.Component{}, false, ""

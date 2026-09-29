@@ -2,9 +2,10 @@ package cli
 
 import (
 	"bytes"
+	"cmp"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -94,15 +95,12 @@ func processResources(data []byte, opts outputOptions) []resourceEntry {
 		})
 	}
 
-	sort.Slice(entries, func(i, j int) bool {
-		a, b := entries[i].key, entries[j].key
-		if a.Kind != b.Kind {
-			return a.Kind < b.Kind
-		}
-		if a.Namespace != b.Namespace {
-			return a.Namespace < b.Namespace
-		}
-		return a.Name < b.Name
+	slices.SortFunc(entries, func(a, b resourceEntry) int {
+		return cmp.Or(
+			strings.Compare(a.key.Kind, b.key.Kind),
+			strings.Compare(a.key.Namespace, b.key.Namespace),
+			strings.Compare(a.key.Name, b.key.Name),
+		)
 	})
 
 	return entries

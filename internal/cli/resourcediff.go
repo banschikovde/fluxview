@@ -2,9 +2,10 @@ package cli
 
 import (
 	"bytes"
+	"cmp"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -307,15 +308,12 @@ func diffResourceMaps(origMap, modMap map[resourceKey]string, ctxLines int) []re
 	}
 
 	// Sort for stable output: by kind, namespace, name.
-	sort.Slice(results, func(i, j int) bool {
-		a, b := results[i].Key, results[j].Key
-		if a.Kind != b.Kind {
-			return a.Kind < b.Kind
-		}
-		if a.Namespace != b.Namespace {
-			return a.Namespace < b.Namespace
-		}
-		return a.Name < b.Name
+	slices.SortFunc(results, func(a, b resourceDiffResult) int {
+		return cmp.Or(
+			strings.Compare(a.Key.Kind, b.Key.Kind),
+			strings.Compare(a.Key.Namespace, b.Key.Namespace),
+			strings.Compare(a.Key.Name, b.Key.Name),
+		)
 	})
 
 	return results

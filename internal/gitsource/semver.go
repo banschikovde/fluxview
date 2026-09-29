@@ -2,7 +2,7 @@ package gitsource
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/Masterminds/semver/v3"
@@ -44,7 +44,7 @@ func pickSemverTag(refs []*plumbing.Reference, constraint string) (string, error
 		}
 	}
 	if bestVersion == nil {
-		sort.Strings(allTags)
+		slices.Sort(allTags)
 		return "", fmt.Errorf("no tag matches constraint %q (available: %s)",
 			constraint, strings.Join(allTags, ", "))
 	}

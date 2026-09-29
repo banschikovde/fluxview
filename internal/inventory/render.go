@@ -2,7 +2,7 @@ package inventory
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -71,7 +71,7 @@ func Sort(components []Component, keys []string) {
 			effective = append(effective, k)
 		}
 	}
-	less := func(a, b Component) bool {
+	compare := func(a, b Component) int {
 		for _, k := range effective {
 			var av, bv string
 			switch k {
@@ -87,12 +87,12 @@ func Sort(components []Component, keys []string) {
 				av, bv = a.Kind, b.Kind
 			}
 			if av != bv {
-				return av < bv
+				return strings.Compare(av, bv)
 			}
 		}
-		return false
+		return 0
 	}
-	sort.SliceStable(components, func(i, j int) bool { return less(components[i], components[j]) })
+	slices.SortStableFunc(components, compare)
 }
 
 // dash replaces empty values with the table placeholder.

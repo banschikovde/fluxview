@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -348,7 +348,7 @@ func (c buildCache) failedDirs() []string {
 			dirs = append(dirs, dir)
 		}
 	}
-	sort.Strings(dirs)
+	slices.Sort(dirs)
 	return dirs
 }
 

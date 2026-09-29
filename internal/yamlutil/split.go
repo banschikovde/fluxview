@@ -19,7 +19,12 @@ import "strings"
 // Unparseable documents are preserved (conservative behavior) so that
 // downstream functions like RedactSecrets can process all documents.
 func SplitYAMLText(data []byte) []string {
-	normalized := strings.ReplaceAll(string(data), "\r\n", "\n")
+	// Copy only when CRs are actually present — ReplaceAll would duplicate
+	// the whole buffer on every call even for pure-LF input.
+	normalized := string(data)
+	if strings.IndexByte(normalized, '\r') >= 0 {
+		normalized = strings.ReplaceAll(normalized, "\r\n", "\n")
+	}
 	lines := strings.Split(normalized, "\n")
 
 	var docs []string
