@@ -972,16 +972,6 @@ func loadInventoryRules(repoRoot, rulesFlag string) (*inventory.RuleSet, error) 
 	return inventory.NewRuleSet(rules)
 }
 
-// crDoc is the minimal shape of one built document relevant to CR
-// components. Raw keeps the full parsed mapping for JSONPath extraction.
-type crDoc struct {
-	apiVersion string
-	kind       string
-	name       string
-	namespace  string
-	raw        map[string]interface{}
-}
-
 // collectCRComponents walks the Kustomization build output and turns every
 // custom resource matching an extraction rule into a cr component.
 // Rule-less CRs are skipped unless allCRs, in which case they are listed
