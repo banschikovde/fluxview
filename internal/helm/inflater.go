@@ -987,6 +987,10 @@ func FindHelmRepoURL(repos map[string]fluxtypes.HelmRepository, name, namespace 
 //
 // Documents are split by text first (not yaml.Decoder) so that a single
 // malformed document skips gracefully without dropping subsequent documents.
+// A document that needs neither — no flow-style (JSON) collection, no nil
+// map value — keeps its original bytes: the unconditional decode+marshal
+// round-trip it used to pay alphabetized and reformatted every rendered
+// document for nothing.
 func ConvertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
 	if len(bytes.TrimSpace(manifest)) == 0 {
 		return nil, nil
@@ -996,8 +1000,25 @@ func ConvertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
 
 	var docs []string
 	for _, rawDoc := range rawDocs {
+		var node yaml.Node
+		if err := yaml.Unmarshal([]byte(rawDoc), &node); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: skipping unparseable YAML document: %v\n", err)
+			continue
+		}
+		// Parity with the old `doc == nil` skip: a bare null document
+		// carries nothing to keep, and a comment-only document parses to
+		// an empty node tree — the zero Node has no root at all.
+		if root := documentRoot(&node); root == nil || root.Tag == "!!null" {
+			continue
+		}
+
+		if !yamlutil.NodeNeedsConversion(&node) {
+			docs = append(docs, rawDoc)
+			continue
+		}
+
 		var doc interface{}
-		if err := yaml.Unmarshal([]byte(rawDoc), &doc); err != nil {
+		if err := node.Decode(&doc); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: skipping unparseable YAML document: %v\n", err)
 			continue
 		}
@@ -1016,6 +1037,14 @@ func ConvertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
 		return nil, nil
 	}
 	return []byte(strings.Join(docs, "\n---\n")), nil
+}
+
+// documentRoot returns the document's root node, or nil for an empty tree.
+func documentRoot(node *yaml.Node) *yaml.Node {
+	if node == nil || node.Kind != yaml.DocumentNode || len(node.Content) == 0 {
+		return nil
+	}
+	return node.Content[0]
 }
 
 // RemoveNilValues recursively removes map entries with nil values.

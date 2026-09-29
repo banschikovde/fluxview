@@ -842,6 +842,25 @@ func TestConvertJSONInYAMLToYAML_Empty(t *testing.T) {
 	}
 }
 
+// Test: comment-only and bare-null documents are dropped, matching the old
+// `doc == nil` skip (a comment-only document parses to an empty node tree,
+// not a null root).
+func TestConvertJSONInYAMLToYAML_CommentOnlyDropped(t *testing.T) {
+	for name, input := range map[string][]byte{
+		"comment only": []byte("# just a comment\n"),
+		"bare null":    []byte("null\n"),
+		"tilde null":   []byte("~\n"),
+	} {
+		result, err := helm.ConvertJSONInYAMLToYAML(input)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", name, err)
+		}
+		if result != nil {
+			t.Errorf("%s: expected nil output, got %q", name, string(result))
+		}
+	}
+}
+
 // Test: helm.ConvertJSONInYAMLToYAML terminates (doesn't infinite-loop) on
 // malformed YAML input, and preserves subsequent valid documents.
 func TestConvertJSONInYAMLToYAML_MalformedTerminates(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/banschikovde/fluxview/internal/flux"
 	"github.com/banschikovde/fluxview/internal/helm"
+	"github.com/banschikovde/fluxview/internal/yamlutil"
 )
 
 // resourceEntry holds a single YAML document with its resource key for sorting.
@@ -36,6 +37,13 @@ type outputOptions struct {
 // single pass, applying the namespace filter, CRD filter, attribute
 // stripping, field reordering, JSON-in-YAML conversion, and secret redaction
 // per document, then sorts entries by kind/namespace/name.
+//
+// Each document is parsed into a yaml.Node exactly once; every transform
+// (strip, SOPS removal, key reorder) mutates that node, and the
+// JSON-in-YAML conversion decodes straight from it — the former chain
+// re-encoded and re-parsed the text between each stage (4 parses and 3
+// encodes per document). The final bytes still come from the same
+// marshal+redact tail the old chain ended with.
 func processResources(data []byte, opts outputOptions) []resourceEntry {
 	var entries []resourceEntry
 
@@ -67,23 +75,54 @@ func processResources(data []byte, opts outputOptions) []resourceEntry {
 			continue
 		}
 
-		processed := trimmed
-
-		// Strip specified attrs if requested.
-		if len(opts.stripAttrs) > 0 {
-			processed = stripAttrsFromDoc(processed, opts.stripAttrs)
-		}
-
 		if meta.Kind == "" || meta.Metadata.Name == "" {
 			continue
 		}
 
-		normalized := reorderYAMLFields([]byte(processed))
-		converted, err := helm.ConvertJSONInYAMLToYAML(normalized)
-		if err != nil || converted == nil {
+		var node yaml.Node
+		if err := yaml.Unmarshal([]byte(trimmed), &node); err != nil {
+			// Parity with the old chain: a document the generic parser
+			// rejects was dropped by ConvertJSONInYAMLToYAML.
 			continue
 		}
-		redacted := string(flux.RedactSecrets(converted))
+		mapping := mappingNode(&node)
+		if mapping == nil {
+			continue
+		}
+
+		if len(opts.stripAttrs) > 0 {
+			stripAttrsNode(&node, opts.stripAttrs)
+		}
+		removeMapKey(mapping, "sops")
+		reorderMapKeys(mapping, []string{"apiVersion", "kind", "metadata"})
+
+		var content string
+		if !yamlutil.NodeNeedsConversion(&node) {
+			// Clean document — no JSON flow style, no nil values: the
+			// transforms above are all it needed, so encode the node once
+			// and keep its key order. Only Secrets pay the extra redaction
+			// round-trip (same as before).
+			out := encodeNode(&node)
+			if strings.EqualFold(meta.Kind, "secret") {
+				out = flux.RedactSecrets(out)
+			}
+			content = strings.TrimSpace(string(out))
+		} else {
+			// JSON-in-YAML conversion without the text round-trip: decode
+			// the transformed node into a generic value (this is what
+			// helm.ConvertJSONInYAMLToYAML re-parsed from text), drop nils
+			// and marshal — the alphabetical-key marshal IS the conversion
+			// output.
+			var v interface{}
+			if err := node.Decode(&v); err != nil || v == nil {
+				continue
+			}
+			marshaled, err := yaml.Marshal(helm.RemoveNilValues(v))
+			if err != nil {
+				continue
+			}
+			content = strings.TrimSpace(string(flux.RedactSecrets(marshaled)))
+		}
 
 		entries = append(entries, resourceEntry{
 			key: resourceKey{
@@ -91,7 +130,7 @@ func processResources(data []byte, opts outputOptions) []resourceEntry {
 				Namespace: meta.Metadata.Namespace,
 				Name:      meta.Metadata.Name,
 			},
-			content: strings.TrimSpace(redacted),
+			content: content,
 		})
 	}
 
@@ -145,6 +184,10 @@ func reorderYAMLFields(data []byte) []byte {
 // the result. Uses yaml.Node for correct parsing (unlike the previous
 // text-based approach which was fragile with block scalars, comments,
 // and quoting styles).
+//
+// A document that is already canonical — no sops key, apiVersion/kind/
+// metadata leading in order — is returned untouched: re-encoding it would
+// cost a full marshal for zero effect and only risk formatting drift.
 func processYAMLDoc(doc []byte) []byte {
 	var node yaml.Node
 	if err := yaml.Unmarshal(doc, &node); err != nil {
@@ -156,15 +199,47 @@ func processYAMLDoc(doc []byte) []byte {
 		return doc
 	}
 
+	if !hasMapKey(mapping, "sops") && canonicalKeyOrder(mapping) {
+		return doc
+	}
+
 	removeMapKey(mapping, "sops")
 	reorderMapKeys(mapping, []string{"apiVersion", "kind", "metadata"})
 
+	return encodeNode(&node)
+}
+
+// encodeNode encodes a document tree at the pipeline's canonical 2-space
+// indent.
+func encodeNode(node *yaml.Node) []byte {
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
-	_ = enc.Encode(&node)
+	_ = enc.Encode(node)
 	enc.Close()
 	return buf.Bytes()
+}
+
+// hasMapKey reports whether the mapping carries the key.
+func hasMapKey(mapping *yaml.Node, key string) bool {
+	for i := 0; i < len(mapping.Content)-1; i += 2 {
+		if mapping.Content[i].Value == key {
+			return true
+		}
+	}
+	return false
+}
+
+// canonicalKeyOrder reports whether the mapping's leading keys are exactly
+// apiVersion, kind, metadata in that order.
+func canonicalKeyOrder(mapping *yaml.Node) bool {
+	for i, want := range []string{"apiVersion", "kind", "metadata"} {
+		k := 2 * i
+		if k >= len(mapping.Content) || mapping.Content[k].Value != want {
+			return false
+		}
+	}
+	return true
 }
 
 // mappingNode returns the MappingNode inside a DocumentNode, or nil.
