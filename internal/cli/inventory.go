@@ -276,19 +276,21 @@ func collectFleetComponents(ctx context.Context, inflater *helm.Inflater, fleet 
 	// One parse pass feeds every fleet-output collector (CRs, manifest
 	// workloads, CRDs) — splitting and YAML-parsing the output separately
 	// in each would triple the parse work (sixfold under --branch-orig).
-	docs := fleetDocs(fleet)
+	docs := parsedDocs(fleet.output)
 	components = append(components, collectCRComponents(docs, rules, allCRs)...)
-	components = append(components, inventory.CollectManifestComponents(manifestInputs(fleet, docs))...)
+	components = append(components, inventory.CollectManifestComponents(manifestInputs(fleet.kustomizations, docs))...)
 	components = append(components, inventory.CRDComponents(crdRaws(docs),
 		crdGitSourceVersions(ctx, scans, repoRoot, gitEnv, quiet))...)
 	return rows, components, nil
 }
 
-// fleetDocs parses the fleet build output into raw mappings, one per
-// document. Empty and unparseable documents are skipped.
-func fleetDocs(fleet *helmFleet) []map[string]interface{} {
+// parsedDocs parses multi-document YAML into raw mappings, one per
+// document. Empty and unparseable documents are skipped. The single
+// canonical split→trim→unmarshal cycle of the inventory collectors
+// (fleet output) and the rendered-chart readers alike.
+func parsedDocs(data []byte) []map[string]interface{} {
 	var docs []map[string]interface{}
-	for _, doc := range flux.SplitYAMLText(fleet.output) {
+	for _, doc := range flux.SplitYAMLText(data) {
 		trimmed := strings.TrimSpace(doc)
 		if trimmed == "" {
 			continue
@@ -346,7 +348,7 @@ func collectAtRevision(ctx context.Context, inflater *helm.Inflater, gitOps *git
 }
 
 // crdRaws collects CustomResourceDefinition documents from the parsed build
-// output (see fleetDocs).
+// output (see parsedDocs).
 func crdRaws(docs []map[string]interface{}) []map[string]interface{} {
 	var raws []map[string]interface{}
 	for _, raw := range docs {
@@ -594,18 +596,11 @@ type renderedDoc struct {
 	raw        map[string]interface{}
 }
 
-// renderedDocs parses a rendered chart manifest into documents.
+// renderedDocs parses a rendered chart manifest into documents, keeping
+// the apiVersion/kind prefix each consumer works on.
 func renderedDocs(rendered []byte) []renderedDoc {
 	var docs []renderedDoc
-	for _, doc := range flux.SplitYAMLText(rendered) {
-		trimmed := strings.TrimSpace(doc)
-		if trimmed == "" {
-			continue
-		}
-		var raw map[string]interface{}
-		if err := yaml.Unmarshal([]byte(trimmed), &raw); err != nil || raw == nil {
-			continue
-		}
+	for _, raw := range parsedDocs(rendered) {
 		apiVersion, _ := raw["apiVersion"].(string)
 		kind, _ := raw["kind"].(string)
 		docs = append(docs, renderedDoc{apiVersion: apiVersion, kind: kind, raw: raw})
@@ -728,10 +723,10 @@ func umbrellaChildren(parent inventory.Component, docs []renderedDoc) ([]invento
 // manifestInputs prepares workload documents for grouping, with Flux
 // Kustomization attribution: the kustomize.toolkit.fluxcd.io/name label
 // names the KS, whose spec.path becomes the component's path. docs is the
-// parsed build output (see fleetDocs).
-func manifestInputs(fleet *helmFleet, docs []map[string]interface{}) []inventory.ManifestInput {
-	ksPathByName := make(map[string]string, len(fleet.kustomizations))
-	for _, ks := range fleet.kustomizations {
+// parsed build output (see parsedDocs).
+func manifestInputs(kustomizations []flux.Kustomization, docs []map[string]interface{}) []inventory.ManifestInput {
+	ksPathByName := make(map[string]string, len(kustomizations))
+	for _, ks := range kustomizations {
 		if _, seen := ksPathByName[ks.Metadata.Name]; !seen && ks.Spec.Path != "" {
 			ksPathByName[ks.Metadata.Name] = ks.Spec.Path
 		}
