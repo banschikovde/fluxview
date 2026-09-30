@@ -39,7 +39,7 @@ func TestProcessResourcesChainParity(t *testing.T) {
 		if len(docs) == 0 {
 			return nil
 		}
-		return []byte(strings.Join(docs, "\n---\n"))
+		return []byte(strings.Join(docs, sectionSeparator))
 	}
 
 	// The pre-rewrite processResources chain around it. reorderYAMLFields is

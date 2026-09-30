@@ -166,5 +166,5 @@ func buildSubdirectoriesAndLooseFiles(ctx context.Context, scans *scanCache, bui
 	for i, out := range outputs {
 		docs[i] = string(out)
 	}
-	return []byte(strings.Join(docs, "\n---\n")), nil
+	return []byte(strings.Join(docs, sectionSeparator)), nil
 }

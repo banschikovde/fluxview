@@ -804,10 +804,18 @@ func (in *Inflater) ChartMeta(ctx context.Context, hr fluxtypes.HelmRelease, rep
 	}, nil
 }
 
+// ChartCredentials authenticates chart repository access: HTTP basic auth
+// for classic repos, registry login for OCI — resolved from a Secret or the
+// environment by the caller. The zero value means anonymous access.
+type ChartCredentials struct {
+	Username string
+	Password string
+}
+
 // InflateHelmRelease inflates a Flux HelmRelease resource using the Helm Go SDK.
 // It locates/downloads the chart from the given repo URL and renders templates
 // equivalent to: helm template <name> <chart> --repo <url> --version <ver> --namespace <ns> --include-crds
-func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRelease, repoURL string, username, password string, configMaps []fluxtypes.ConfigMap, secrets []fluxtypes.Secret, repoRoot string) ([]byte, error) {
+func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRelease, repoURL string, creds ChartCredentials, configMaps []fluxtypes.ConfigMap, secrets []fluxtypes.Secret, repoRoot string) ([]byte, error) {
 	chartName := hr.Spec.Chart.Spec.Chart
 
 	// Set up the action configuration for template rendering (no k8s cluster needed).
@@ -839,7 +847,7 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 	// inside resolveChart stop waiting and return ctx.Err(), letting the
 	// caller exit while the download finishes in a goroutine (the process
 	// terminates on Ctrl-C, so the brief lingering download is acceptable).
-	resolved, err := in.resolveChart(ctx, chartName, hr.Spec.Chart.Spec.Version, repoURL, username, password)
+	resolved, err := in.resolveChart(ctx, chartName, hr.Spec.Chart.Spec.Version, repoURL, creds.Username, creds.Password)
 	if err != nil {
 		return nil, err
 	}
@@ -848,7 +856,7 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 	// A chart located over OCI may pull dependencies from the registry
 	// during rendering; the install action needs the shared client for that.
 	if resolved.oci {
-		registryClient, cerr := in.ociClientFor(username, password, ociPlainHTTP(chartRef))
+		registryClient, cerr := in.ociClientFor(creds.Username, creds.Password, ociPlainHTTP(chartRef))
 		if cerr != nil {
 			return nil, cerr
 		}

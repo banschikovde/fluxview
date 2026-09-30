@@ -110,7 +110,7 @@ func bindInventoryFlags(cmd *cobra.Command, flags *InventoryFlags) {
 	cmd.Flags().BoolVar(&flags.SplitUmbrella, "split-umbrella", false, "Split an umbrella HelmRelease into one row per application (grouped by app.kubernetes.io/name in the rendered chart); version of each row is the application's image tag")
 	cmd.Flags().StringVar(&flags.BranchOrig, "branch-orig", "", "Compare against this git revision and add a CHANGE column (+ added, - removed, ~ old → new updated, = unchanged); exit code 1 when versions changed")
 	registerHelmCacheFlags(cmd, &flags.HelmCache.dir, &flags.HelmCache.indexTTL, &flags.HelmCache.downloadTimeout)
-	registerKustomizeCacheFlags(cmd, &flags.KsCache.remoteDir, &flags.KsCache.remoteTtl, &flags.KsCache.remoteTimeout, &flags.KsCache.buildCacheDir, &flags.KsCache.buildCacheTTL, &flags.KsCache.gitSourceDir, &flags.KsCache.gitSourceTtl)
+	registerKustomizeCacheFlags(cmd, &flags.KsCache)
 	registerGitSourceAuthFlags(cmd, &flags.SSHHosts, &flags.SSHAcceptNew)
 	registerNoGitSourceFetchFlag(cmd, &flags.NoFetch)
 }
@@ -193,7 +193,16 @@ func runInventory(ctx context.Context, flags *InventoryFlags) error {
 		return NewExitError(fmt.Errorf("no Flux Kustomization resources found in %s", clusterPath), ExitCodeError)
 	}
 
-	rows, components, err := collectFleetComponents(ctx, inflater, fleet, repoRoot, rules, flags.AllCRs, false, scans, gitEnv)
+	inventoryRunEnv := &inventoryEnv{
+		inflater:      inflater,
+		scans:         scans,
+		rules:         rules,
+		gitEnv:        gitEnv,
+		allCRs:        flags.AllCRs,
+		splitUmbrella: flags.SplitUmbrella,
+	}
+
+	rows, components, err := collectFleetComponents(ctx, inventoryRunEnv, fleet, repoRoot, false)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}
@@ -201,7 +210,7 @@ func runInventory(ctx context.Context, flags *InventoryFlags) error {
 	// Enrichment (render-driven: IMAGES, chart-rendered CRs, umbrella
 	// splitting) runs BEFORE filtering and diffing, so that filters and
 	// --branch-orig see the full, symmetric component set.
-	currentFailed, currentSplit, err := enrichHelmRows(ctx, inflater, fleet, repoRoot, rows, &components, rules, flags.SplitUmbrella, false)
+	currentFailed, currentSplit, err := enrichHelmRows(ctx, inventoryRunEnv, fleet, repoRoot, rows, &components, false)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}
@@ -212,7 +221,7 @@ func runInventory(ctx context.Context, flags *InventoryFlags) error {
 		if err != nil {
 			return NewExitError(fmt.Errorf("opening git repo at %s: %w", repoRoot, err), ExitCodeError)
 		}
-		compare, compareFailed, compareSplit, err := collectAtRevision(ctx, inflater, gitOps, scans, absClusterPath, repoRoot, flags, rules, gitEnv)
+		compare, compareFailed, compareSplit, err := collectAtRevision(ctx, inventoryRunEnv, gitOps, absClusterPath, repoRoot, flags)
 		if err != nil {
 			return NewExitError(err, ExitCodeError)
 		}
@@ -263,8 +272,21 @@ func runInventory(ctx context.Context, flags *InventoryFlags) error {
 // with a known version). Returns the helm rows too — enrichment needs
 // their resolved chart context for rendering. quiet suppresses per-component
 // stderr diagnostics (the --branch-orig comparison side).
-func collectFleetComponents(ctx context.Context, inflater *helm.Inflater, fleet *helmFleet, repoRoot string, rules *inventory.RuleSet, allCRs, quiet bool, scans *scanCache, gitEnv *gitSourceEnv) ([]helmRow, []inventory.Component, error) {
-	rows, err := collectHelmComponents(ctx, inflater, fleet, repoRoot, quiet)
+// inventoryEnv is the per-run shared state of inventory collection: the
+// Helm inflater, memoized scans, the extraction rules and the external git
+// source env, plus the flag knobs both collection sides share. The current
+// side runs chatty; the --branch-orig comparison side passes quiet=true.
+type inventoryEnv struct {
+	inflater      *helm.Inflater
+	scans         *scanCache
+	rules         *inventory.RuleSet
+	gitEnv        *gitSourceEnv
+	allCRs        bool
+	splitUmbrella bool
+}
+
+func collectFleetComponents(ctx context.Context, env *inventoryEnv, fleet *helmFleet, repoRoot string, quiet bool) ([]helmRow, []inventory.Component, error) {
+	rows, err := collectHelmComponents(ctx, env.inflater, fleet, repoRoot, quiet)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -277,10 +299,10 @@ func collectFleetComponents(ctx context.Context, inflater *helm.Inflater, fleet 
 	// workloads, CRDs) — splitting and YAML-parsing the output separately
 	// in each would triple the parse work (sixfold under --branch-orig).
 	docs := parsedDocs(fleet.output)
-	components = append(components, collectCRComponents(docs, rules, allCRs)...)
+	components = append(components, collectCRComponents(docs, env.rules, env.allCRs)...)
 	components = append(components, inventory.CollectManifestComponents(manifestInputs(fleet.kustomizations, docs))...)
 	components = append(components, inventory.CRDComponents(crdRaws(docs),
-		crdGitSourceVersions(ctx, scans, repoRoot, gitEnv, quiet))...)
+		crdGitSourceVersions(ctx, env.scans, repoRoot, env.gitEnv, quiet))...)
 	return rows, components, nil
 }
 
@@ -308,7 +330,7 @@ func parsedDocs(data []byte) []map[string]interface{} {
 // (--branch-orig comparison side): checks the revision out into a temp
 // worktree and runs the same collection quietly (the current-state side
 // already reported the shared warnings).
-func collectAtRevision(ctx context.Context, inflater *helm.Inflater, gitOps *git.Operations, scans *scanCache, clusterPath, repoRoot string, flags *InventoryFlags, rules *inventory.RuleSet, gitEnv *gitSourceEnv) (components []inventory.Component, failedParents, splitParents []string, err error) {
+func collectAtRevision(ctx context.Context, env *inventoryEnv, gitOps *git.Operations, clusterPath, repoRoot string, flags *InventoryFlags) (components []inventory.Component, failedParents, splitParents []string, err error) {
 	worktreePath, err := gitOps.CloneToDir(ctx, flags.BranchOrig)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("creating worktree at %s: %w", flags.BranchOrig, err)
@@ -325,7 +347,7 @@ func collectAtRevision(ctx context.Context, inflater *helm.Inflater, gitOps *git
 		return nil, nil, nil, nil
 	}
 
-	fleet, err := discoverHelmFleet(ctx, scans, worktreeClusterPath, worktreePath, true, flags.KsCache, gitEnv)
+	fleet, err := discoverHelmFleet(ctx, env.scans, worktreeClusterPath, worktreePath, true, flags.KsCache, env.gitEnv)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -333,14 +355,14 @@ func collectAtRevision(ctx context.Context, inflater *helm.Inflater, gitOps *git
 		return nil, nil, nil, nil
 	}
 
-	rows, components, err := collectFleetComponents(ctx, inflater, fleet, worktreePath, rules, flags.AllCRs, true, scans, gitEnv)
+	rows, components, err := collectFleetComponents(ctx, env, fleet, worktreePath, true)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	// The comparison side enriches the same way as the current side
 	// (rendered images, chart-rendered CRs, umbrella splitting) so the
 	// diff is symmetric; quiet suppresses the duplicate progress line.
-	failedParents, splitParents, err = enrichHelmRows(ctx, inflater, fleet, worktreePath, rows, &components, rules, flags.SplitUmbrella, true)
+	failedParents, splitParents, err = enrichHelmRows(ctx, env, fleet, worktreePath, rows, &components, true)
 	if err != nil {
 		return nil, failedParents, splitParents, err
 	}
@@ -476,7 +498,8 @@ func crdGroupsIn(dir string) map[string]bool {
 // metadata-based row of an UNSPLIT failed release stays with its warning.
 // A context cancellation aborts with the error. quiet suppresses the
 // progress line (the --branch-orig comparison side).
-func enrichHelmRows(ctx context.Context, inflater *helm.Inflater, fleet *helmFleet, repoRoot string, rows []helmRow, components *[]inventory.Component, rules *inventory.RuleSet, splitUmbrella, quiet bool) (failedParents, splitParents []string, err error) {
+func enrichHelmRows(ctx context.Context, env *inventoryEnv, fleet *helmFleet, repoRoot string, rows []helmRow, components *[]inventory.Component, quiet bool) (failedParents, splitParents []string, err error) {
+	inflater, rules, splitUmbrella := env.inflater, env.rules, env.splitUmbrella
 	renderable := 0
 	for _, row := range rows {
 		if row.renderable {
@@ -506,7 +529,7 @@ func enrichHelmRows(ctx context.Context, inflater *helm.Inflater, fleet *helmFle
 			return failedParents, splitParents, err
 		}
 
-		rendered, err := inflater.InflateHelmRelease(ctx, row.hr, row.repoURL, row.username, row.password, fleet.configMaps, fleet.secrets, repoRoot)
+		rendered, err := inflater.InflateHelmRelease(ctx, row.hr, row.repoURL, helm.ChartCredentials{Username: row.username, Password: row.password}, fleet.configMaps, fleet.secrets, repoRoot)
 		idx := findHelmComponent(*components, row.component.Namespace, row.component.Name)
 		if idx < 0 {
 			continue
@@ -773,10 +796,12 @@ type helmRow struct {
 // with the spec version — they never abort the inventory. A context
 // cancellation aborts the collection and returns the error.
 func collectHelmComponents(ctx context.Context, inflater *helm.Inflater, fleet *helmFleet, repoRoot string, quiet bool) ([]helmRow, error) {
-	ociRepoIndex := indexByNSName(fleet.ociRepos, func(r flux.OCIRepository) flux.ObjectMeta { return r.Metadata })
-	helmRepoIndex := indexByNSName(fleet.helmRepos, func(r flux.HelmRepository) flux.ObjectMeta { return r.Metadata })
-	secretIndex := indexByNSName(fleet.secrets, func(s flux.Secret) flux.ObjectMeta { return s.Metadata })
-	gitRepoIndex := indexByNSName(fleet.gitRepos, func(r flux.GitRepository) flux.ObjectMeta { return r.Metadata })
+	ociRepoIndex := sourceIndexes{
+		oci:    indexByNSName(fleet.ociRepos, func(r flux.OCIRepository) flux.ObjectMeta { return r.Metadata }),
+		helm:   indexByNSName(fleet.helmRepos, func(r flux.HelmRepository) flux.ObjectMeta { return r.Metadata }),
+		secret: indexByNSName(fleet.secrets, func(s flux.Secret) flux.ObjectMeta { return s.Metadata }),
+		git:    indexByNSName(fleet.gitRepos, func(r flux.GitRepository) flux.ObjectMeta { return r.Metadata }),
+	}
 
 	rows := make([]helmRow, 0, len(fleet.helmReleases))
 	for _, hr := range fleet.helmReleases {
@@ -803,7 +828,7 @@ func collectHelmComponents(ctx context.Context, inflater *helm.Inflater, fleet *
 		}
 		c.Chart = chartInfo
 
-		meta, res, metaOK := resolveHRChartMeta(ctx, inflater, hr, repoRoot, chartInfo, ociRepoIndex, helmRepoIndex, secretIndex, gitRepoIndex, c)
+		meta, res, metaOK := resolveHRChartMeta(ctx, inflater, hr, repoRoot, chartInfo, ociRepoIndex, c)
 		row.hr = res.hr
 		row.repoURL = res.repoURL
 		row.username = res.username
@@ -853,7 +878,18 @@ type chartResolution struct {
 //
 // hr is a value copy from the caller's range loop, so the GitRepository-path
 // rewrite below (same as inflateHelmReleasesShared) is local.
-func resolveHRChartMeta(ctx context.Context, inflater *helm.Inflater, hr flux.HelmRelease, repoRoot string, chartInfo *inventory.ChartInfo, ociRepoIndex map[string]flux.OCIRepository, helmRepoIndex map[string]flux.HelmRepository, secretIndex map[string]flux.Secret, gitRepoIndex map[string]flux.GitRepository, c *inventory.Component) (helm.ChartMeta, chartResolution, bool) {
+// sourceIndexes maps namespace/name to the Flux source objects chart
+// resolution looks through: OCIRepositories, HelmRepositories, Secrets and
+// GitRepositories scanned from the fleet. Built once per collection run.
+type sourceIndexes struct {
+	oci    map[string]flux.OCIRepository
+	helm   map[string]flux.HelmRepository
+	secret map[string]flux.Secret
+	git    map[string]flux.GitRepository
+}
+
+func resolveHRChartMeta(ctx context.Context, inflater *helm.Inflater, hr flux.HelmRelease, repoRoot string, chartInfo *inventory.ChartInfo, idx sourceIndexes, c *inventory.Component) (helm.ChartMeta, chartResolution, bool) {
+	ociRepoIndex, helmRepoIndex, secretIndex, gitRepoIndex := idx.oci, idx.helm, idx.secret, idx.git
 	chartSpec := hr.Spec.Chart.Spec
 	chartInfo.Name = chartSpec.Chart
 	chartInfo.SourceKind = chartSpec.SourceRef.Kind

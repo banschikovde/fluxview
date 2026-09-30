@@ -268,7 +268,7 @@ func PrefetchDefaultSchemas(ctx context.Context, kinds []ResourceKind, opts Pref
 			defer wg.Done()
 			for idx := range work {
 				k := fetch[idx]
-				notFound, err := fetchSchema(ctx, client, baseURL, versionDir, k, opts.CacheDir, timeout, retries)
+				notFound, err := fetchSchema(ctx, schemaFetchPolicy{client: client, timeout: timeout, retries: retries}, baseURL, versionDir, k, opts.CacheDir)
 				mu.Lock()
 				if err != nil && firstErr == nil {
 					firstErr = err
@@ -301,15 +301,24 @@ func PrefetchDefaultSchemas(ctx context.Context, kinds []ResourceKind, opts Pref
 	return missing, nil
 }
 
+// schemaFetchPolicy bounds one schema fetch: the shared HTTP client, the
+// per-request timeout (0 = no limit) and how many times a transient
+// failure is retried.
+type schemaFetchPolicy struct {
+	client  *http.Client
+	timeout time.Duration
+	retries int
+}
+
 // fetchSchema downloads one schema with bounded retries. It returns
 // notFound=true for a stable 404 (no retry — the registry has no schema
 // for the kind) and an error for anything still failing after retries.
-func fetchSchema(ctx context.Context, client *http.Client, baseURL, versionDir string, k ResourceKind, cacheDir string, timeout time.Duration, retries int) (notFound bool, err error) {
+func fetchSchema(ctx context.Context, policy schemaFetchPolicy, baseURL, versionDir string, k ResourceKind, cacheDir string) (notFound bool, err error) {
 	name := SchemaFileName(k.Kind, k.APIVersion)
 	url := baseURL + "/" + versionDir + "/" + name
 
 	var lastErr error
-	for attempt := 0; attempt <= retries; attempt++ {
+	for attempt := 0; attempt <= policy.retries; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return false, err
 		}
@@ -325,8 +334,8 @@ func fetchSchema(ctx context.Context, client *http.Client, baseURL, versionDir s
 		// then runs under the caller's context alone.
 		reqCtx := ctx
 		cancel := context.CancelFunc(func() { /* no-op: replaced by WithTimeout below when timeout > 0 */ })
-		if timeout > 0 {
-			reqCtx, cancel = context.WithTimeout(ctx, timeout)
+		if policy.timeout > 0 {
+			reqCtx, cancel = context.WithTimeout(ctx, policy.timeout)
 		}
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 		if err != nil {
@@ -335,7 +344,7 @@ func fetchSchema(ctx context.Context, client *http.Client, baseURL, versionDir s
 		}
 		req.Header.Set("User-Agent", "fluxview")
 
-		resp, err := client.Do(req)
+		resp, err := policy.client.Do(req)
 		if err != nil {
 			cancel()
 			if reqCtx.Err() == nil && ctx.Err() != nil {

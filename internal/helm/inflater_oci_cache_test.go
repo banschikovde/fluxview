@@ -204,7 +204,7 @@ func TestInflateHelmRelease_OCICachedAcrossRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
-	out1, err := in1.InflateHelmRelease(context.Background(), hr, "", "username", "password", nil, nil, "")
+	out1, err := in1.InflateHelmRelease(context.Background(), hr, "", ChartCredentials{Username: "username", Password: "password"}, nil, nil, "")
 	if err != nil {
 		t.Fatalf("cold InflateHelmRelease: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestInflateHelmRelease_OCICachedAcrossRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
-	out2, err := in2.InflateHelmRelease(context.Background(), hr, "", "wrong", "creds", nil, nil, "")
+	out2, err := in2.InflateHelmRelease(context.Background(), hr, "", ChartCredentials{Username: "wrong", Password: "creds"}, nil, nil, "")
 	if err != nil {
 		t.Fatalf("warm InflateHelmRelease must not touch the network: %v", err)
 	}

@@ -206,7 +206,7 @@ func filterCRDDocs(data []byte) []byte {
 			kept = append(kept, doc)
 		}
 	}
-	return []byte(strings.Join(kept, "\n---\n"))
+	return []byte(strings.Join(kept, sectionSeparator))
 }
 
 // filterByNamespace keeps only YAML documents whose metadata.namespace matches
@@ -227,7 +227,7 @@ func filterByNamespace(data []byte, namespace string) []byte {
 			result = append(result, doc)
 		}
 	}
-	return []byte(strings.Join(result, "\n---\n"))
+	return []byte(strings.Join(result, sectionSeparator))
 }
 
 // isClusterScoped returns true for Kubernetes kinds that are not namespaced.

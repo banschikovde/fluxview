@@ -40,13 +40,10 @@ type ValidateFlags struct {
 	// SchemaDownloadTimeout bounds one schema download attempt; 0 means
 	// no per-request limit (the run stays interruptible via Ctrl-C).
 	SchemaDownloadTimeout time.Duration
-	RemoteCacheDir        string
-	RemoteCacheTTL        time.Duration
-	RemoteCacheTimeout    time.Duration
-	BuildCacheDir         string
-	BuildCacheTTL         time.Duration
-	GitSourceCacheDir     string
-	GitSourceCacheTTL     time.Duration
+	// KsCache groups the kustomize cache flags (remote resources, build
+	// outputs, external git source clones) — populated by
+	// registerKustomizeCacheFlags.
+	KsCache kustomizeCacheOptions
 	// SchemaCacheDir and CRDSchemaCacheDir override the validate-side
 	// schema caches (downloaded schemas, converted CRDs); the disable spell
 	// turns each into a per-run temp cache (see runValidate).
@@ -149,7 +146,7 @@ Examples:
 	cmd.Flags().BoolVar(&flags.Strict, "strict", false, "Reject duplicated YAML keys; strict schemas for the default registry also reject unknown fields")
 	cmd.Flags().StringSliceVar(&flags.SkipKinds, "skip-kind", nil, "Kinds to skip (repeatable or comma-separated): Kind (e.g. Deployment, any apiVersion) or apiVersion/Kind (e.g. apps/v1/Deployment)")
 	cmd.Flags().StringVar(&flags.Output, "output", "text", "Output format: text, json or junit (machine formats go to stdout)")
-	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.RemoteCacheTimeout, &flags.BuildCacheDir, &flags.BuildCacheTTL, &flags.GitSourceCacheDir, &flags.GitSourceCacheTTL)
+	registerKustomizeCacheFlags(cmd, &flags.KsCache)
 	registerNoGitSourceFetchFlag(cmd, &flags.NoGitSourceFetch)
 	flags.SchemaCacheDir = validate.DefaultSchemaCacheDir() // pre-seed: pflag.Var does not set defaults
 	cmd.Flags().Var(cachedir.NewFlag(&flags.SchemaCacheDir), "schema-cache-dir",
@@ -247,15 +244,7 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 		return NewExitError(fmt.Errorf("parsing Kustomization resources: %w", err), ExitCodeError)
 	}
 
-	ksCache := kustomizeCacheOptions{
-		remoteDir:     flags.RemoteCacheDir,
-		remoteTtl:     flags.RemoteCacheTTL,
-		remoteTimeout: flags.RemoteCacheTimeout,
-		buildCacheDir: flags.BuildCacheDir,
-		buildCacheTTL: flags.BuildCacheTTL,
-		gitSourceDir:  flags.GitSourceCacheDir,
-		gitSourceTtl:  flags.GitSourceCacheTTL,
-	}
+	ksCache := flags.KsCache
 	builder := kustomize.NewBuilder(repoRoot, ksCache.builderOptions()...)
 	buildCache := make(buildCache)
 	var report buildReport
@@ -264,7 +253,15 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 
 	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache, flags.NoGitSourceFetch)
 	defer gitEnv.Close()
-	output, err := buildKSContent(ctx, scans, builder, kustomizations, repoRoot, absClusterPath, configMaps, secrets, false, buildCache, &report, gitEnv)
+	output, err := buildKSContent(ctx, &ksBuildEnv{
+		scans:       scans,
+		builder:     builder,
+		repoRoot:    repoRoot,
+		clusterPath: absClusterPath,
+		cache:       buildCache,
+		report:      &report,
+		gitSources:  gitEnv,
+	}, kustomizations, substitutionSources{configMaps: configMaps, secrets: secrets})
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}

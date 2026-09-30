@@ -224,7 +224,7 @@ func BenchmarkBuildKSContentTail(b *testing.B) {
 		output := append([]byte(nil), ks...)
 		for _, overlay := range overlays {
 			if len(output) > 0 {
-				output = append(output, []byte("\n---\n")...)
+				output = append(output, []byte(sectionSeparator)...)
 			}
 			output = append(output, reorderYAMLFields(overlay)...)
 		}

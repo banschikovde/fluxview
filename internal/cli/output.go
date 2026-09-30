@@ -176,7 +176,7 @@ func reorderYAMLFields(data []byte) []byte {
 		}
 	}
 
-	return []byte(strings.Join(result, "\n---\n"))
+	return []byte(strings.Join(result, sectionSeparator))
 }
 
 // processYAMLDoc parses a single YAML document, strips SOPS metadata,

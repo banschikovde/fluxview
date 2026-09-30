@@ -43,13 +43,10 @@ type DiffFlags struct {
 	HelmCacheDir        string
 	HelmIndexTTL        time.Duration
 	HelmDownloadTimeout time.Duration
-	RemoteCacheDir      string
-	RemoteCacheTTL      time.Duration
-	RemoteCacheTimeout  time.Duration
-	BuildCacheDir       string
-	BuildCacheTTL       time.Duration
-	GitSourceCacheDir   string
-	GitSourceCacheTTL   time.Duration
+	// KsCache groups the kustomize cache flags (remote resources, build
+	// outputs, external git source clones) — populated by
+	// registerKustomizeCacheFlags.
+	KsCache kustomizeCacheOptions
 	// GitSourceSSHKnownHosts and GitSourceSSHAcceptNew are the external
 	// git source auth policy knobs (credentials stay env-only).
 	GitSourceSSHKnownHosts string
@@ -93,7 +90,7 @@ Examples:
 	cmd.Flags().BoolVar(&flags.SkipCRDs, "skip-crds", false, "Skip CustomResourceDefinition resources in diff")
 	cmd.Flags().StringVar(&flags.StripAttrs, "strip-attrs", "", "Comma-separated keys to strip from diff (e.g. helm.sh/chart,status)")
 	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL, &flags.HelmDownloadTimeout)
-	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.RemoteCacheTimeout, &flags.BuildCacheDir, &flags.BuildCacheTTL, &flags.GitSourceCacheDir, &flags.GitSourceCacheTTL)
+	registerKustomizeCacheFlags(cmd, &flags.KsCache)
 	registerGitSourceAuthFlags(cmd, &flags.GitSourceSSHKnownHosts, &flags.GitSourceSSHAcceptNew)
 	registerNoGitSourceFetchFlag(cmd, &flags.NoGitSourceFetch)
 	return cmd
@@ -167,27 +164,18 @@ func runDiff(ctx context.Context, args []string, flags *DiffFlags) error {
 	}
 }
 func runDiffKS(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, compareCommit string, flags *DiffFlags) error {
-	scans := newScanCache()
-	ksCache := kustomizeCacheOptions{
-		remoteDir:     flags.RemoteCacheDir,
-		remoteTtl:     flags.RemoteCacheTTL,
-		remoteTimeout: flags.RemoteCacheTimeout,
-		buildCacheDir: flags.BuildCacheDir,
-		buildCacheTTL: flags.BuildCacheTTL,
-		gitSourceDir:  flags.GitSourceCacheDir,
-		gitSourceTtl:  flags.GitSourceCacheTTL,
-	}
 	// External source identity comes from the real repository (the git ops
 	// handle), never from the comparison worktree — it has no remotes.
-	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache, flags.NoGitSourceFetch)
+	gitEnv := newGitSourceEnv(ctx, repoRoot, flags.KsCache, flags.NoGitSourceFetch)
 	defer gitEnv.Close()
+	env := &ksPipelineEnv{scans: newScanCache(), ksCache: flags.KsCache, gitSources: gitEnv}
 
-	currentOutput, err := buildKSOutput(ctx, scans, clusterPath, repoRoot, name, ksCache, gitEnv)
+	currentOutput, err := buildKSOutput(ctx, env, clusterPath, repoRoot, name)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building current state: %w", err), ExitCodeError)
 	}
 
-	compareOutput, err := buildKSOutputAtRevision(ctx, scans, gitOps, clusterPath, repoRoot, name, compareCommit, ksCache, gitEnv)
+	compareOutput, err := buildKSOutputAtRevision(ctx, env, revisionRef{ops: gitOps, revision: compareCommit}, clusterPath, repoRoot, name)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building comparison state at %s: %w", compareCommit, err), ExitCodeError)
 	}
@@ -212,27 +200,16 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	// One git source env for both diff sides: the same origin identity, and
 	// the shared clone cache keeps pinned external sources byte-identical
 	// across the comparison (floating refs honor the cache TTL).
-	gitEnv := newGitSourceEnv(ctx, repoRoot, kustomizeCacheOptions{
-		remoteDir:     flags.RemoteCacheDir,
-		remoteTtl:     flags.RemoteCacheTTL,
-		remoteTimeout: flags.RemoteCacheTimeout,
-		buildCacheDir: flags.BuildCacheDir,
-		buildCacheTTL: flags.BuildCacheTTL,
-		gitSourceDir:  flags.GitSourceCacheDir,
-		gitSourceTtl:  flags.GitSourceCacheTTL,
-	}, flags.NoGitSourceFetch)
+	gitEnv := newGitSourceEnv(ctx, repoRoot, flags.KsCache, flags.NoGitSourceFetch)
 	defer gitEnv.Close()
-	currentOutput, err := buildHRInflation(ctx, scans, clusterPath, repoRoot, name, flags.Namespace, false, true,
-		helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout},
-		kustomizeCacheOptions{
-			remoteDir:     flags.RemoteCacheDir,
-			remoteTtl:     flags.RemoteCacheTTL,
-			remoteTimeout: flags.RemoteCacheTimeout,
-			buildCacheDir: flags.BuildCacheDir,
-			buildCacheTTL: flags.BuildCacheTTL,
-			gitSourceDir:  flags.GitSourceCacheDir,
-			gitSourceTtl:  flags.GitSourceCacheTTL,
-		}, gitEnv)
+	env := &hrInflationEnv{
+		scans:      scans,
+		strict:     true, // a side that cannot inflate must fail the diff
+		helmCache:  helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout},
+		ksCache:    flags.KsCache,
+		gitSources: gitEnv,
+	}
+	currentOutput, err := buildHRInflation(ctx, env, clusterPath, repoRoot, name, flags.Namespace, false)
 	if err != nil {
 		return NewExitError(fmt.Errorf("building current state: %w", err), ExitCodeError)
 	}
@@ -253,17 +230,7 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	if _, err := os.Stat(worktreeClusterPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Warning: path %s does not exist at revision %s\n", relPath, compareCommit)
 	} else {
-		compareOutput, err := buildHRInflation(ctx, scans, worktreeClusterPath, worktreePath, name, flags.Namespace, true, true,
-			helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout},
-			kustomizeCacheOptions{
-				remoteDir:     flags.RemoteCacheDir,
-				remoteTtl:     flags.RemoteCacheTTL,
-				remoteTimeout: flags.RemoteCacheTimeout,
-				buildCacheDir: flags.BuildCacheDir,
-				buildCacheTTL: flags.BuildCacheTTL,
-				gitSourceDir:  flags.GitSourceCacheDir,
-				gitSourceTtl:  flags.GitSourceCacheTTL,
-			}, gitEnv)
+		compareOutput, err := buildHRInflation(ctx, env, worktreeClusterPath, worktreePath, name, flags.Namespace, true)
 		if err != nil {
 			// A HelmRelease selected by name may legitimately not exist at the
 			// comparison revision (added in this branch) — that's a valid
@@ -282,8 +249,23 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	return computeAndOutputDiff(ctx, nil, currentOutput, flags)
 }
 
+// ksPipelineEnv is the per-command state of the KS diff pipeline: memoized
+// scans, the kustomize cache settings and the shared external git source env.
+type ksPipelineEnv struct {
+	scans      *scanCache
+	ksCache    kustomizeCacheOptions
+	gitSources *gitSourceEnv
+}
+
+// revisionRef points at the git state a comparison build runs against.
+type revisionRef struct {
+	ops      *git.Operations
+	revision string
+}
+
 // buildKSOutput builds the Kustomization output for the current working tree.
-func buildKSOutput(ctx context.Context, scans *scanCache, clusterPath, repoRoot, name string, ksCache kustomizeCacheOptions, gitSources *gitSourceEnv) ([]byte, error) {
+func buildKSOutput(ctx context.Context, env *ksPipelineEnv, clusterPath, repoRoot, name string) ([]byte, error) {
+	scans, gitSources := env.scans, env.gitSources
 	// Check that the path contains Kustomization files directly (not just in subdirectories)
 	hasDirectKS, err := hasDirectKustomizations(clusterPath)
 	if err != nil {
@@ -306,17 +288,27 @@ func buildKSOutput(ctx context.Context, scans *scanCache, clusterPath, repoRoot,
 		}
 	}
 
-	builder := kustomize.NewBuilder(repoRoot, ksCache.builderOptions()...)
+	builder := kustomize.NewBuilder(repoRoot, env.ksCache.builderOptions()...)
 	buildCache := make(buildCache)
 	// Resolve ConfigMaps and Secrets for postBuild substitution.
 	configMaps := resolveConfigMaps(ctx, scans, clusterPath, builder, buildCache)
 	secrets := resolveSecrets(ctx, scans, clusterPath, builder, buildCache)
 
-	return buildKSContent(ctx, scans, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, false, buildCache, nil, gitSources)
+	return buildKSContent(ctx, &ksBuildEnv{
+		scans:       scans,
+		builder:     builder,
+		repoRoot:    repoRoot,
+		clusterPath: clusterPath,
+		quiet:       false,
+		cache:       buildCache,
+		gitSources:  gitSources,
+	}, kustomizations, substitutionSources{configMaps: configMaps, secrets: secrets})
 }
 
 // buildKSOutputAtRevision builds the Kustomization output at a specific git revision.
-func buildKSOutputAtRevision(ctx context.Context, scans *scanCache, gitOps *git.Operations, clusterPath, repoRoot, name, revision string, ksCache kustomizeCacheOptions, gitSources *gitSourceEnv) ([]byte, error) {
+func buildKSOutputAtRevision(ctx context.Context, env *ksPipelineEnv, rev revisionRef, clusterPath, repoRoot, name string) ([]byte, error) {
+	scans, gitSources := env.scans, env.gitSources
+	gitOps, revision := rev.ops, rev.revision
 	// Create a git worktree at the target revision.
 	worktreePath, err := gitOps.CloneToDir(ctx, revision)
 	if err != nil {
@@ -359,7 +351,7 @@ func buildKSOutputAtRevision(ctx context.Context, scans *scanCache, gitOps *git.
 		}
 	}
 
-	builder := kustomize.NewBuilder(worktreePath, ksCache.builderOptions()...)
+	builder := kustomize.NewBuilder(worktreePath, env.ksCache.builderOptions()...)
 	buildCache := make(buildCache)
 	// Resolve ConfigMaps and Secrets for postBuild substitution from the worktree.
 	configMaps := resolveConfigMaps(ctx, scans, worktreeClusterPath, builder, buildCache)
@@ -369,17 +361,48 @@ func buildKSOutputAtRevision(ctx context.Context, scans *scanCache, gitOps *git.
 	// substitution work identically to the current state. External
 	// GitRepository sources are fetched for both diff sides through the same
 	// git source env (identity from the real repository, shared clone cache).
-	return buildKSContent(ctx, scans, builder, kustomizations, worktreePath, worktreeClusterPath, configMaps, secrets, true, buildCache, nil, gitSources)
+	return buildKSContent(ctx, &ksBuildEnv{
+		scans:       scans,
+		builder:     builder,
+		repoRoot:    worktreePath,
+		clusterPath: worktreeClusterPath,
+		quiet:       true,
+		cache:       buildCache,
+		gitSources:  gitSources,
+	}, kustomizations, substitutionSources{configMaps: configMaps, secrets: secrets})
+}
+
+// ksBuildEnv is the shared context of the Flux Kustomization pipeline:
+// memoized scans, the kustomize builder, the roots the build resolves
+// against, and the per-run knobs — quiet (suppress diagnostics), the build
+// result cache, the anomaly report (nil = don't collect; build and diff
+// stay lenient) and the external git source env (nil = strictly local).
+type ksBuildEnv struct {
+	scans       *scanCache
+	builder     *kustomize.Builder
+	repoRoot    string
+	clusterPath string
+	quiet       bool
+	cache       buildCache
+	report      *buildReport
+	gitSources  *gitSourceEnv
+}
+
+// substitutionSources is the ConfigMap/Secret set Flux postBuild variable
+// substitution resolves ${VAR} references against.
+type substitutionSources struct {
+	configMaps []flux.ConfigMap
+	secrets    []flux.Secret
 }
 
 // buildKSContent is the shared build logic for Flux Kustomization resources,
 // used by both build and diff commands. It runs buildAllKustomizations (which
 // follows Flux controller behavior: recursive discovery, postBuild substitution,
 // external GitRepository source fetching) and then appends native kustomize
-// overlay outputs. gitSources enables building from external GitRepository
+// overlay outputs. env.gitSources enables building from external GitRepository
 // upstreams; nil keeps everything strictly local.
-func buildKSContent(ctx context.Context, scans *scanCache, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot, clusterPath string, configMaps []flux.ConfigMap, secrets []flux.Secret, quiet bool, cache buildCache, report *buildReport, gitSources *gitSourceEnv) ([]byte, error) {
-	output, err := buildAllKustomizations(ctx, scans, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, quiet, cache, report, gitSources)
+func buildKSContent(ctx context.Context, env *ksBuildEnv, kustomizations []flux.Kustomization, subs substitutionSources) ([]byte, error) {
+	output, err := buildAllKustomizations(ctx, env, kustomizations, subs)
 	if err != nil {
 		return nil, err
 	}
@@ -387,8 +410,8 @@ func buildKSContent(ctx context.Context, scans *scanCache, builder *kustomize.Bu
 	// Append native kustomize overlay outputs (vars/ etc.).
 	// Skip overlays when no KS are selected (name filter returned empty).
 	if len(kustomizations) > 0 {
-		ksPaths := collectKustomizationPaths(repoRoot, kustomizations)
-		overlayOutputs := buildKustomizeOverlays(ctx, scans, builder, clusterPath, ksPaths, cache)
+		ksPaths := collectKustomizationPaths(env.repoRoot, kustomizations)
+		overlayOutputs := buildKustomizeOverlays(ctx, env.scans, env.builder, env.clusterPath, ksPaths, env.cache)
 		for _, overlay := range overlayOutputs {
 			if len(output) > 0 {
 				output = append(output, []byte(sectionSeparator)...)
@@ -411,7 +434,12 @@ func buildKSContent(ctx context.Context, scans *scanCache, builder *kustomize.Bu
 // whose path is missing locally but whose sourceRef names an external
 // GitRepository (a repository other than the local origin) is fetched and
 // built from the upstream clone instead — the mini source-controller.
-func buildAllKustomizations(ctx context.Context, scans *scanCache, builder *kustomize.Builder, kustomizations []flux.Kustomization, repoRoot, clusterPath string, configMaps []flux.ConfigMap, secrets []flux.Secret, quiet bool, cache buildCache, report *buildReport, gitSources *gitSourceEnv) ([]byte, error) {
+func buildAllKustomizations(ctx context.Context, env *ksBuildEnv, kustomizations []flux.Kustomization, subs substitutionSources) ([]byte, error) {
+	scans, builder := env.scans, env.builder
+	repoRoot, clusterPath, quiet := env.repoRoot, env.clusterPath, env.quiet
+	cache, report, gitSources := env.cache, env.report, env.gitSources
+	configMaps, secrets := subs.configMaps, subs.secrets
+
 	// Track already-processed KS by "namespace/name" to prevent duplicates.
 	seen := make(map[string]bool)
 	var results []string
@@ -746,8 +774,8 @@ func readYAMLFilesRecursive(ctx context.Context, dir, repoRoot string) ([]byte, 
 }
 
 // inflateAllHelmReleases inflates all HelmRelease resources and returns combined YAML.
-func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository, configMaps []flux.ConfigMap, secrets []flux.Secret, opts inflateOptions) ([]byte, error) {
-	outputs, err := inflateHelmReleasesShared(ctx, inflater, helmReleases, helmRepos, ociRepos, configMaps, secrets, opts)
+func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, input helmInflationInput, opts inflateOptions) ([]byte, error) {
+	outputs, err := inflateHelmReleasesShared(ctx, inflater, input, opts)
 	if err != nil {
 		return nil, err
 	}

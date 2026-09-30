@@ -138,7 +138,7 @@ func TestInflateHelmRelease_CRDSkip(t *testing.T) {
 		},
 	}
 
-	out, err := inflater.InflateHelmRelease(context.Background(), hr, "", "", "", nil, nil, "")
+	out, err := inflater.InflateHelmRelease(context.Background(), hr, "", ChartCredentials{Username: "", Password: ""}, nil, nil, "")
 	if err != nil {
 		t.Fatalf("InflateHelmRelease: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestInflateHelmRelease_CRDDefault(t *testing.T) {
 				},
 			}
 
-			out, err := inflater.InflateHelmRelease(context.Background(), hr, "", "", "", nil, nil, "")
+			out, err := inflater.InflateHelmRelease(context.Background(), hr, "", ChartCredentials{Username: "", Password: ""}, nil, nil, "")
 			if err != nil {
 				t.Fatalf("InflateHelmRelease: %v", err)
 			}
@@ -238,7 +238,7 @@ data:
 				ReleaseName: "custom-release",
 			},
 		}
-		out, err := inflater.InflateHelmRelease(context.Background(), hr, "", "", "", nil, nil, "")
+		out, err := inflater.InflateHelmRelease(context.Background(), hr, "", ChartCredentials{Username: "", Password: ""}, nil, nil, "")
 		if err != nil {
 			t.Fatalf("InflateHelmRelease: %v", err)
 		}
@@ -258,7 +258,7 @@ data:
 				Chart: flux.HelmReleaseChart{Spec: flux.HelmReleaseChartSpec{Chart: chartDir}},
 			},
 		}
-		out, err := inflater.InflateHelmRelease(context.Background(), hr, "", "", "", nil, nil, "")
+		out, err := inflater.InflateHelmRelease(context.Background(), hr, "", ChartCredentials{Username: "", Password: ""}, nil, nil, "")
 		if err != nil {
 			t.Fatalf("InflateHelmRelease: %v", err)
 		}
@@ -315,7 +315,7 @@ data:
 				}},
 			},
 		}
-		out, err := inflater.InflateHelmRelease(context.Background(), hr, "", "", "", nil, nil, "")
+		out, err := inflater.InflateHelmRelease(context.Background(), hr, "", ChartCredentials{Username: "", Password: ""}, nil, nil, "")
 		if err != nil {
 			t.Fatalf("InflateHelmRelease: %v", err)
 		}
@@ -339,7 +339,7 @@ data:
 				Values: map[string]any{"replicas": "7"},
 			},
 		}
-		out, err := inflater.InflateHelmRelease(context.Background(), hr, "", "", "", nil, nil, "")
+		out, err := inflater.InflateHelmRelease(context.Background(), hr, "", ChartCredentials{Username: "", Password: ""}, nil, nil, "")
 		if err != nil {
 			t.Fatalf("InflateHelmRelease: %v", err)
 		}
@@ -359,7 +359,7 @@ data:
 				Chart: flux.HelmReleaseChart{Spec: flux.HelmReleaseChartSpec{Chart: chartDir}},
 			},
 		}
-		out, err := inflater.InflateHelmRelease(context.Background(), hr, "", "", "", nil, nil, "")
+		out, err := inflater.InflateHelmRelease(context.Background(), hr, "", ChartCredentials{Username: "", Password: ""}, nil, nil, "")
 		if err != nil {
 			t.Fatalf("InflateHelmRelease: %v", err)
 		}
@@ -383,7 +383,7 @@ data:
 			},
 		}
 		stderr := captureStderrHelm(func() {
-			out, err := inflater.InflateHelmRelease(context.Background(), hr, "", "", "", nil, nil, "")
+			out, err := inflater.InflateHelmRelease(context.Background(), hr, "", ChartCredentials{Username: "", Password: ""}, nil, nil, "")
 			if err != nil {
 				t.Fatalf("InflateHelmRelease: %v", err)
 			}
@@ -424,7 +424,7 @@ func TestInflateHelmRelease_ValuesFiles_TgzArchive(t *testing.T) {
 			}},
 		},
 	}
-	out, err := inflater.InflateHelmRelease(context.Background(), hr, "", "", "", nil, nil, "")
+	out, err := inflater.InflateHelmRelease(context.Background(), hr, "", ChartCredentials{Username: "", Password: ""}, nil, nil, "")
 	if err != nil {
 		t.Fatalf("InflateHelmRelease: %v", err)
 	}

@@ -93,23 +93,29 @@ func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL, down
 // kustomize.DefaultRemoteCacheDir()/DefaultRemoteCacheTTL()/
 // DefaultRemoteCacheTimeout()/DefaultBuildCacheDir()/DefaultBuildCacheTTL()/
 // gitsource.DefaultCacheDir()/DefaultTTL().
-func registerKustomizeCacheFlags(cmd *cobra.Command, remoteDir *string, remoteTtl, remoteTimeout *time.Duration, buildCacheDir *string, buildCacheTTL *time.Duration, gitSourceDir *string, gitSourceTtl *time.Duration) {
-	*remoteDir = kustomize.DefaultRemoteCacheDir() // pre-seed: pflag.Var does not set defaults
-	cmd.Flags().Var(cachedir.NewFlag(remoteDir), "remote-cache-dir",
+func registerKustomizeCacheFlags(cmd *cobra.Command, opts *kustomizeCacheOptions) {
+	*opts = kustomizeCacheOptions{
+		remoteDir:     kustomize.DefaultRemoteCacheDir(), // pre-seed: pflag.Var does not set defaults
+		remoteTtl:     kustomize.DefaultRemoteCacheTTL(),
+		remoteTimeout: kustomize.DefaultRemoteCacheTimeout(),
+		buildCacheDir: kustomize.DefaultBuildCacheDir(),
+		buildCacheTTL: kustomize.DefaultBuildCacheTTL(),
+		gitSourceDir:  gitsource.DefaultCacheDir(),
+		gitSourceTtl:  gitsource.DefaultTTL(),
+	}
+	cmd.Flags().Var(cachedir.NewFlag(&opts.remoteDir), "remote-cache-dir",
 		"Cache directory for remote resources referenced by kustomizations; \"disabled\" disables (env: FLUXVIEW_REMOTE_CACHE_DIR)")
-	cmd.Flags().DurationVar(remoteTtl, "remote-cache-ttl", kustomize.DefaultRemoteCacheTTL(),
+	cmd.Flags().DurationVar(&opts.remoteTtl, "remote-cache-ttl", kustomize.DefaultRemoteCacheTTL(),
 		"How long cached remote resources with floating refs (branch/HEAD URLs) stay fresh; pinned version URLs never expire; 0 always re-fetches (env: FLUXVIEW_REMOTE_CACHE_TTL)")
-	cmd.Flags().DurationVar(remoteTimeout, "remote-cache-timeout", kustomize.DefaultRemoteCacheTimeout(),
+	cmd.Flags().DurationVar(&opts.remoteTimeout, "remote-cache-timeout", kustomize.DefaultRemoteCacheTimeout(),
 		"Per-request timeout for downloading remote resources referenced by kustomizations; 0 = no limit, for slow networks (env: FLUXVIEW_REMOTE_CACHE_TIMEOUT)")
-	*buildCacheDir = kustomize.DefaultBuildCacheDir() // pre-seed: pflag.Var does not set defaults
-	cmd.Flags().Var(cachedir.NewFlag(buildCacheDir), "kustomize-build-cache-dir",
+	cmd.Flags().Var(cachedir.NewFlag(&opts.buildCacheDir), "kustomize-build-cache-dir",
 		"Cache directory for kustomize build outputs, reused while input files are unchanged; \"disabled\" disables (env: FLUXVIEW_KUSTOMIZE_BUILD_CACHE_DIR)")
-	cmd.Flags().DurationVar(buildCacheTTL, "kustomize-build-cache-ttl", kustomize.DefaultBuildCacheTTL(),
+	cmd.Flags().DurationVar(&opts.buildCacheTTL, "kustomize-build-cache-ttl", kustomize.DefaultBuildCacheTTL(),
 		"How long cached kustomize build outputs stay usable; 0 always rebuilds (entries are still refreshed) (env: FLUXVIEW_KUSTOMIZE_BUILD_CACHE_TTL)")
-	*gitSourceDir = gitsource.DefaultCacheDir() // pre-seed: pflag.Var does not set defaults
-	cmd.Flags().Var(cachedir.NewFlag(gitSourceDir), "git-source-cache-dir",
+	cmd.Flags().Var(cachedir.NewFlag(&opts.gitSourceDir), "git-source-cache-dir",
 		"Cache directory for clones of external GitRepository sources; \"disabled\" disables reuse (env: FLUXVIEW_GIT_SOURCE_CACHE_DIR)")
-	cmd.Flags().DurationVar(gitSourceTtl, "git-source-cache-ttl", gitsource.DefaultTTL(),
+	cmd.Flags().DurationVar(&opts.gitSourceTtl, "git-source-cache-ttl", gitsource.DefaultTTL(),
 		"How long floating external source resolutions (branch/semver/HEAD) stay fresh; pinned commit/tag clones never expire; 0 always re-resolves (env: FLUXVIEW_GIT_SOURCE_CACHE_TTL)")
 }
 
@@ -177,7 +183,15 @@ func discoverHelmFleet(ctx context.Context, scans *scanCache, clusterPath, repoR
 	configMaps := resolveConfigMaps(ctx, scans, clusterPath, builder, buildCache)
 	secrets := resolveSecrets(ctx, scans, clusterPath, builder, buildCache)
 
-	output, err := buildKSContent(ctx, scans, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, true, buildCache, nil, gitSources)
+	output, err := buildKSContent(ctx, &ksBuildEnv{
+		scans:       scans,
+		builder:     builder,
+		repoRoot:    repoRoot,
+		clusterPath: clusterPath,
+		quiet:       true,
+		cache:       buildCache,
+		gitSources:  gitSources,
+	}, kustomizations, substitutionSources{configMaps: configMaps, secrets: secrets})
 	if err != nil {
 		return nil, err
 	}
@@ -238,6 +252,18 @@ func discoverHelmFleet(ctx context.Context, scans *scanCache, clusterPath, repoR
 	}, nil
 }
 
+// hrInflationEnv is the shared state of one command's HelmRelease inflation
+// runs: memoized scans, cache settings and the external git source env. The
+// diff command builds one env and runs both sides (current state + comparison
+// revision) against it — only the paths and the quiet knob differ per side.
+type hrInflationEnv struct {
+	scans      *scanCache
+	strict     bool
+	helmCache  helmCacheOptions
+	ksCache    kustomizeCacheOptions
+	gitSources *gitSourceEnv
+}
+
 // buildHRInflation discovers HelmReleases through the Flux Kustomization pipeline
 // (same discovery logic as runBuildHR), resolves sources, inflates the charts,
 // and returns combined YAML. Returns nil if no Flux Kustomizations or no
@@ -246,14 +272,12 @@ func discoverHelmFleet(ctx context.Context, scans *scanCache, clusterPath, repoR
 // namespace filters the HelmRelease list BEFORE inflation — when set, only
 // matching HRs are inflated, avoiding unnecessary chart downloads.
 //
-// strict (diff mode) turns skip-worthy inflation failures into a returned
+// env.strict (diff mode) turns skip-worthy inflation failures into a returned
 // error instead of a warning + skip, so an unbuildable state never produces a
-// misleading partial diff.
-//
-// gitSources enables external GitRepository source fetching for the
-// Kustomization pipeline stage (nil keeps it local-only).
-func buildHRInflation(ctx context.Context, scans *scanCache, clusterPath, repoRoot, name, namespace string, quiet, strict bool, helmCache helmCacheOptions, ksCache kustomizeCacheOptions, gitSources *gitSourceEnv) ([]byte, error) {
-	fleet, err := discoverHelmFleet(ctx, scans, clusterPath, repoRoot, quiet, ksCache, gitSources)
+// misleading partial diff; quiet suppresses this run's diagnostics.
+func buildHRInflation(ctx context.Context, env *hrInflationEnv, clusterPath, repoRoot, name, namespace string, quiet bool) ([]byte, error) {
+	scans, gitSources := env.scans, env.gitSources
+	fleet, err := discoverHelmFleet(ctx, scans, clusterPath, repoRoot, quiet, env.ksCache, gitSources)
 	if err != nil {
 		return nil, err
 	}
@@ -283,7 +307,7 @@ func buildHRInflation(ctx context.Context, scans *scanCache, clusterPath, repoRo
 		return nil, nil
 	}
 
-	inflater, err := helm.NewInflater(helmCache.inflaterOptions()...)
+	inflater, err := helm.NewInflater(env.helmCache.inflaterOptions()...)
 	if err != nil {
 		return nil, fmt.Errorf("initializing helm: %w", err)
 	}
@@ -291,9 +315,15 @@ func buildHRInflation(ctx context.Context, scans *scanCache, clusterPath, repoRo
 	// directory; drop it. A persisted cache is a no-op close.
 	defer inflater.Close()
 
-	return inflateAllHelmReleases(ctx, inflater, helmReleases, fleet.helmRepos, fleet.ociRepos, fleet.configMaps, fleet.secrets, inflateOptions{
+	return inflateAllHelmReleases(ctx, inflater, helmInflationInput{
+		helmReleases: helmReleases,
+		helmRepos:    fleet.helmRepos,
+		ociRepos:     fleet.ociRepos,
+		configMaps:   fleet.configMaps,
+		secrets:      fleet.secrets,
+	}, inflateOptions{
 		quiet:    quiet,
-		strict:   strict,
+		strict:   env.strict,
 		repoRoot: repoRoot,
 	})
 }
@@ -320,13 +350,24 @@ type inflateOptions struct {
 	repoRoot string
 }
 
+// helmInflationInput is the Flux resource set one Helm inflation run renders:
+// the HelmReleases plus the repositories they resolve charts against and the
+// ConfigMaps/Secrets their values reference.
+type helmInflationInput struct {
+	helmReleases []flux.HelmRelease
+	helmRepos    []flux.HelmRepository
+	ociRepos     []flux.OCIRepository
+	configMaps   []flux.ConfigMap
+	secrets      []flux.Secret
+}
+
 // inflateHelmReleasesShared inflates all non-suspended HelmReleases and returns
 // a slice of YAML outputs. Shared by build and diff commands.
 //
 // In strict mode, skip-worthy failures are collected and returned as an error
 // (partial output is discarded): a diff built over a state that could not be
 // fully rendered would report the missing resources as added/removed.
-func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, helmReleases []flux.HelmRelease, helmRepos []flux.HelmRepository, ociRepos []flux.OCIRepository, configMaps []flux.ConfigMap, secrets []flux.Secret, opts inflateOptions) ([][]byte, error) {
+func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, input helmInflationInput, opts inflateOptions) ([][]byte, error) {
 	// stderr gates all diagnostics (progress + warnings) on !quiet. The diff
 	// command runs inflation twice (current state + comparison revision);
 	// without this gate the comparison side would duplicate every warning
@@ -355,11 +396,11 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 
 	// O(1) source lookups per HelmRelease instead of linear scans over the
 	// repo/secret lists on every iteration. Built once per run.
-	ociRepoIndex := indexByNSName(ociRepos, func(r flux.OCIRepository) flux.ObjectMeta { return r.Metadata })
-	helmRepoIndex := indexByNSName(helmRepos, func(r flux.HelmRepository) flux.ObjectMeta { return r.Metadata })
-	secretIndex := indexByNSName(secrets, func(s flux.Secret) flux.ObjectMeta { return s.Metadata })
+	ociRepoIndex := indexByNSName(input.ociRepos, func(r flux.OCIRepository) flux.ObjectMeta { return r.Metadata })
+	helmRepoIndex := indexByNSName(input.helmRepos, func(r flux.HelmRepository) flux.ObjectMeta { return r.Metadata })
+	secretIndex := indexByNSName(input.secrets, func(s flux.Secret) flux.ObjectMeta { return s.Metadata })
 
-	for _, hr := range helmReleases {
+	for _, hr := range input.helmReleases {
 		if err := CheckInterrupted(ctx); err != nil {
 			return nil, err
 		}
@@ -443,7 +484,7 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, hel
 		stderr("Inflating HelmRelease %s/%s\n",
 			hr.Metadata.Namespace, hr.Metadata.Name)
 
-		output, err := inflater.InflateHelmRelease(ctx, hr, repoURL, username, password, configMaps, secrets, opts.repoRoot)
+		output, err := inflater.InflateHelmRelease(ctx, hr, repoURL, helm.ChartCredentials{Username: username, Password: password}, input.configMaps, input.secrets, opts.repoRoot)
 		if err != nil {
 			fail(hr, fmt.Sprintf("failed to inflate: %v", err))
 			continue
@@ -542,7 +583,7 @@ func applyHelmNamespace(data []byte, namespace string) ([]byte, error) {
 		return data, nil
 	}
 	injected, err := kustomize.ApplyTargetNamespace(
-		[]byte(strings.Join(fill, "\n---\n")),
+		[]byte(strings.Join(fill, sectionSeparator)),
 		namespace,
 	)
 	if err != nil {
@@ -552,7 +593,7 @@ func applyHelmNamespace(data []byte, namespace string) ([]byte, error) {
 	// (buildResourceMap → diffResourceMaps) sorts by kind/namespace/name, so
 	// the order here doesn't affect diff output.
 	result := append(preserve, string(injected))
-	return []byte(strings.Join(result, "\n---\n")), nil
+	return []byte(strings.Join(result, sectionSeparator)), nil
 }
 
 // indexByNSName indexes resources by "namespace/name", keeping the first

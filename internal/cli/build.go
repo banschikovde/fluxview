@@ -28,13 +28,10 @@ type BuildFlags struct {
 	HelmCacheDir        string
 	HelmIndexTTL        time.Duration
 	HelmDownloadTimeout time.Duration
-	RemoteCacheDir      string
-	RemoteCacheTTL      time.Duration
-	RemoteCacheTimeout  time.Duration
-	BuildCacheDir       string
-	BuildCacheTTL       time.Duration
-	GitSourceCacheDir   string
-	GitSourceCacheTTL   time.Duration
+	// KsCache groups the kustomize cache flags (remote resources, build
+	// outputs, external git source clones) — populated by
+	// registerKustomizeCacheFlags.
+	KsCache kustomizeCacheOptions
 	// GitSourceSSHKnownHosts and GitSourceSSHAcceptNew are the external
 	// git source auth policy knobs (credentials stay env-only).
 	GitSourceSSHKnownHosts string
@@ -74,7 +71,7 @@ Examples:
 	cmd.Flags().BoolVar(&flags.SkipCRDs, "skip-crds", false, "Skip CustomResourceDefinition resources in output")
 	cmd.Flags().StringVar(&flags.StripAttrs, "strip-attrs", "", "Comma-separated keys to strip from output (e.g. helm.sh/chart,status)")
 	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL, &flags.HelmDownloadTimeout)
-	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.RemoteCacheTimeout, &flags.BuildCacheDir, &flags.BuildCacheTTL, &flags.GitSourceCacheDir, &flags.GitSourceCacheTTL)
+	registerKustomizeCacheFlags(cmd, &flags.KsCache)
 	registerGitSourceAuthFlags(cmd, &flags.GitSourceSSHKnownHosts, &flags.GitSourceSSHAcceptNew)
 	registerNoGitSourceFetchFlag(cmd, &flags.NoGitSourceFetch)
 
@@ -139,15 +136,7 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return NewExitError(fmt.Errorf("parsing Kustomization resources: %w", err), ExitCodeError)
 	}
 
-	ksCache := kustomizeCacheOptions{
-		remoteDir:     flags.RemoteCacheDir,
-		remoteTtl:     flags.RemoteCacheTTL,
-		remoteTimeout: flags.RemoteCacheTimeout,
-		buildCacheDir: flags.BuildCacheDir,
-		buildCacheTTL: flags.BuildCacheTTL,
-		gitSourceDir:  flags.GitSourceCacheDir,
-		gitSourceTtl:  flags.GitSourceCacheTTL,
-	}
+	ksCache := flags.KsCache
 	builder := kustomize.NewBuilder(repoRoot, ksCache.builderOptions()...)
 	buildCache := make(buildCache)
 	configMaps := resolveConfigMaps(ctx, scans, clusterPath, builder, buildCache)
@@ -169,7 +158,14 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 
 	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache, flags.NoGitSourceFetch)
 	defer gitEnv.Close()
-	output, err := buildKSContent(ctx, scans, builder, kustomizations, repoRoot, clusterPath, configMaps, secrets, false, buildCache, nil, gitEnv)
+	output, err := buildKSContent(ctx, &ksBuildEnv{
+		scans:       scans,
+		builder:     builder,
+		repoRoot:    repoRoot,
+		clusterPath: clusterPath,
+		cache:       buildCache,
+		gitSources:  gitEnv,
+	}, kustomizations, substitutionSources{configMaps: configMaps, secrets: secrets})
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}
@@ -210,20 +206,15 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		return NewExitError(fmt.Errorf("no Kustomization files found in %s", clusterPath), ExitCodeError)
 	}
 
-	ksCache := kustomizeCacheOptions{
-		remoteDir:     flags.RemoteCacheDir,
-		remoteTtl:     flags.RemoteCacheTTL,
-		remoteTimeout: flags.RemoteCacheTimeout,
-		buildCacheDir: flags.BuildCacheDir,
-		buildCacheTTL: flags.BuildCacheTTL,
-		gitSourceDir:  flags.GitSourceCacheDir,
-		gitSourceTtl:  flags.GitSourceCacheTTL,
-	}
+	ksCache := flags.KsCache
 	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache, flags.NoGitSourceFetch)
 	defer gitEnv.Close()
-	output, err := buildHRInflation(ctx, newScanCache(), clusterPath, repoRoot, name, flags.Namespace, false, false,
-		helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout},
-		ksCache, gitEnv)
+	output, err := buildHRInflation(ctx, &hrInflationEnv{
+		scans:      newScanCache(),
+		helmCache:  helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout},
+		ksCache:    ksCache,
+		gitSources: gitEnv,
+	}, clusterPath, repoRoot, name, flags.Namespace, false)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}
@@ -401,7 +392,7 @@ func filterK8sResources(data []byte) []byte {
 	if len(result) == 0 {
 		return nil
 	}
-	return []byte(strings.Join(result, "\n---\n"))
+	return []byte(strings.Join(result, sectionSeparator))
 }
 
 func isExcludedDir(dir string, excludePaths map[string]bool) bool {
@@ -418,15 +409,24 @@ func isExcludedDir(dir string, excludePaths map[string]bool) bool {
 
 // --- ConfigMaps / Secrets ---
 
+// rawResourceSpec adapts resolveSourceResources to one resource kind: how
+// to scan raw manifests from the cluster path, how to extract the kind
+// from kustomize build output, and how to name one resource for merging.
+type rawResourceSpec[T any] struct {
+	parseRaw   func(context.Context) ([]T, error)
+	parseBuilt func([]byte) []T
+	nameOf     func(T) string
+}
+
 // resolveSourceResources merges two substitution-source sets of one resource
 // kind: resources scanned directly (raw) from clusterPath and resources
 // produced by kustomize builds under it (which may apply namespace
 // transformation). Shared by resolveConfigMaps and resolveSecrets. Errors are
 // non-fatal: a failed raw scan falls back to an empty set, and failed builds
 // were already warned once by buildDirCached.
-func resolveSourceResources[T any](ctx context.Context, scans *scanCache, clusterPath string, builder *kustomize.Builder, cache buildCache, parseRaw func(context.Context) ([]T, error), parseBuilt func([]byte) []T, nameOf func(T) string) []T {
+func resolveSourceResources[T any](ctx context.Context, scans *scanCache, clusterPath string, builder *kustomize.Builder, cache buildCache, spec rawResourceSpec[T]) []T {
 	// Raw resources scanned directly from clusterPath.
-	raw, _ := parseRaw(ctx)
+	raw, _ := spec.parseRaw(ctx)
 
 	kustomizeDirs, _, err := scans.kustDirsAndFiles(ctx, clusterPath)
 	if err != nil {
@@ -439,21 +439,21 @@ func resolveSourceResources[T any](ctx context.Context, scans *scanCache, cluste
 		if !ok {
 			continue
 		}
-		built = append(built, parseBuilt(output)...)
+		built = append(built, spec.parseBuilt(output)...)
 	}
 
-	return mergeSources(built, raw, nameOf)
+	return mergeSources(built, raw, spec.nameOf)
 }
 
 // resolveConfigMaps resolves ConfigMaps used for postBuild.substituteFrom /
 // valuesFrom with kind: ConfigMap: raw ConfigMaps scanned directly from
 // clusterPath are merged with ConfigMaps produced by kustomize builds.
 func resolveConfigMaps(ctx context.Context, scans *scanCache, clusterPath string, builder *kustomize.Builder, cache buildCache) []flux.ConfigMap {
-	return resolveSourceResources(ctx, scans, clusterPath, builder, cache,
-		scans.parserFor(clusterPath).ParseConfigMaps,
-		flux.ParseConfigMapsFromBytes,
-		func(c flux.ConfigMap) string { return c.Metadata.Name },
-	)
+	return resolveSourceResources(ctx, scans, clusterPath, builder, cache, rawResourceSpec[flux.ConfigMap]{
+		parseRaw:   scans.parserFor(clusterPath).ParseConfigMaps,
+		parseBuilt: flux.ParseConfigMapsFromBytes,
+		nameOf:     func(c flux.ConfigMap) string { return c.Metadata.Name },
+	})
 }
 
 // resolveSecrets resolves Secrets used for postBuild.substituteFrom with
@@ -462,11 +462,11 @@ func resolveConfigMaps(ctx context.Context, scans *scanCache, clusterPath string
 // apply namespace transformation). Only key names matter for substitution —
 // resolveSecrets never returns real secret values to the substitution path.
 func resolveSecrets(ctx context.Context, scans *scanCache, clusterPath string, builder *kustomize.Builder, cache buildCache) []flux.Secret {
-	return resolveSourceResources(ctx, scans, clusterPath, builder, cache,
-		scans.parserFor(clusterPath).ParseSecrets,
-		flux.ParseSecretsFromBytes,
-		func(s flux.Secret) string { return s.Metadata.Name },
-	)
+	return resolveSourceResources(ctx, scans, clusterPath, builder, cache, rawResourceSpec[flux.Secret]{
+		parseRaw:   scans.parserFor(clusterPath).ParseSecrets,
+		parseBuilt: flux.ParseSecretsFromBytes,
+		nameOf:     func(s flux.Secret) string { return s.Metadata.Name },
+	})
 }
 
 // --- Utilities ---
