@@ -147,7 +147,7 @@ func ensureDir(created map[string]bool, dir string) error {
 // outside the checkout would let a malicious commit read arbitrary files
 // (e.g. /etc/passwd); offenders warn and are skipped.
 func checkoutSymlink(f *object.File, filePath, root string) error {
-	target, err := fileContents(f)
+	target, err := fileContents(f, "symlink")
 	if err != nil {
 		return err
 	}
@@ -172,7 +172,7 @@ func checkoutSymlink(f *object.File, filePath, root string) error {
 // checkoutRegularFile writes one regular file's blob content with its
 // git mode.
 func checkoutRegularFile(f *object.File, filePath string) error {
-	contents, err := fileContents(f)
+	contents, err := fileContents(f, "file")
 	if err != nil {
 		return err
 	}
@@ -182,18 +182,19 @@ func checkoutRegularFile(f *object.File, filePath string) error {
 	return nil
 }
 
-// fileContents reads one tree file's blob; an open failure keeps the
-// "opening" wording, a read failure the "reading" one, matching the
-// pre-refactor per-callsite messages.
-func fileContents(f *object.File) (string, error) {
+// fileContents reads one tree file's blob; what names the entity for the
+// error messages ("symlink"/"file"), keeping the pre-refactor per-call
+// wordings: "opening <what> %s" for an open failure, "reading <what> %s"
+// for a read failure.
+func fileContents(f *object.File, what string) (string, error) {
 	reader, err := f.Reader()
 	if err != nil {
-		return "", fmt.Errorf("opening %s: %w", f.Name, err)
+		return "", fmt.Errorf("opening %s %s: %w", what, f.Name, err)
 	}
 	defer reader.Close()
 	contents, err := io.ReadAll(reader)
 	if err != nil {
-		return "", fmt.Errorf("reading %s: %w", f.Name, err)
+		return "", fmt.Errorf("reading %s %s: %w", what, f.Name, err)
 	}
 	return string(contents), nil
 }
