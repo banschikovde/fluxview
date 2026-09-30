@@ -18,75 +18,93 @@ import (
 // group → tag). Groups with neither are invisible: a CRD is a schema, not
 // software, and rows without a version would be noise. Diverging versions
 // within a group resolve to the highest and add a warning.
+// crdEntry is one CRD document's resolved version and where it came from.
+type crdEntry struct {
+	version string
+	source  string
+}
+
 func CRDComponents(raws []map[string]interface{}, gitRefs map[string]string) []Component {
-	type entry struct {
-		version string
-		source  string
-	}
-	groups := map[string][]entry{}
+	groups := map[string][]crdEntry{}
 	order := []string{}
 
 	for _, raw := range raws {
-		if kind, _ := raw["kind"].(string); kind != "CustomResourceDefinition" {
-			continue
-		}
-		spec, _ := raw["spec"].(map[string]interface{})
-		if spec == nil {
-			continue
-		}
-		group, _ := spec["group"].(string)
-		if group == "" {
+		group, version, source, ok := crdDocIdentity(raw, gitRefs)
+		if !ok {
 			continue
 		}
 		if _, seen := groups[group]; !seen {
 			order = append(order, group)
 		}
-
-		version, source := "", ""
-		if metadata, ok := raw["metadata"].(map[string]interface{}); ok {
-			if labels, ok := metadata["labels"].(map[string]interface{}); ok {
-				if v, ok := labels["app.kubernetes.io/version"].(string); ok && v != "" {
-					version, source = v, VersionLabel
-				}
-			}
-		}
-		if version == "" {
-			if v, ok := gitRefs[group]; ok && v != "" {
-				version, source = v, VersionGitRef
-			}
-		}
-		if version == "" {
-			continue // unknown version — invisible
-		}
-		groups[group] = append(groups[group], entry{version: version, source: source})
+		groups[group] = append(groups[group], crdEntry{version: version, source: source})
 	}
 
 	components := make([]Component, 0, len(groups))
 	for _, group := range order {
-		entries := groups[group]
-		if len(entries) == 0 {
-			continue
+		if entries := groups[group]; len(entries) > 0 {
+			components = append(components, crdGroupComponent(group, entries))
 		}
-		c := Component{
-			Source: SourceCRD,
-			Kind:   "CustomResourceDefinition",
-			Name:   fmt.Sprintf("%s (%d CRD)", group, len(entries)),
-		}
-		versions := map[string]bool{}
-		for _, e := range entries {
-			versions[e.version] = true
-		}
-		if len(versions) == 1 {
-			c.Version = entries[0].version
-			c.VersionSource = entries[0].source
-		} else {
-			c.Version = highestVersion(versions)
-			c.VersionSource = entries[0].source
-			c.Warnings = append(c.Warnings, fmt.Sprintf("CRDs in group %s have different versions, showing the highest", group))
-		}
-		components = append(components, c)
 	}
 	return components
+}
+
+// crdDocIdentity extracts one CRD document's API group and version: the
+// version comes from the app.kubernetes.io/version label or, failing
+// that, from the group's pinned external GitRepository tag. ok=false for
+// non-CRD documents, groupless CRDs and unknown versions (invisible).
+func crdDocIdentity(raw map[string]interface{}, gitRefs map[string]string) (group, version, source string, ok bool) {
+	if kind, _ := raw["kind"].(string); kind != "CustomResourceDefinition" {
+		return "", "", "", false
+	}
+	spec, _ := raw["spec"].(map[string]interface{})
+	if spec == nil {
+		return "", "", "", false
+	}
+	group, _ = spec["group"].(string)
+	if group == "" {
+		return "", "", "", false
+	}
+
+	if metadata, ok := raw["metadata"].(map[string]interface{}); ok {
+		if labels, ok := metadata["labels"].(map[string]interface{}); ok {
+			if v, ok := labels["app.kubernetes.io/version"].(string); ok && v != "" {
+				version, source = v, VersionLabel
+			}
+		}
+	}
+	if version == "" {
+		if v, ok := gitRefs[group]; ok && v != "" {
+			version, source = v, VersionGitRef
+		}
+	}
+	if version == "" {
+		return group, "", "", false // unknown version — invisible
+	}
+	return group, version, source, true
+}
+
+// crdGroupComponent builds one CRD group's component: the group's shared
+// version when all entries agree, or the highest with a warning when they
+// diverge.
+func crdGroupComponent(group string, entries []crdEntry) Component {
+	c := Component{
+		Source: SourceCRD,
+		Kind:   "CustomResourceDefinition",
+		Name:   fmt.Sprintf("%s (%d CRD)", group, len(entries)),
+	}
+	versions := map[string]bool{}
+	for _, e := range entries {
+		versions[e.version] = true
+	}
+	if len(versions) == 1 {
+		c.Version = entries[0].version
+		c.VersionSource = entries[0].source
+		return c
+	}
+	c.Version = highestVersion(versions)
+	c.VersionSource = entries[0].source
+	c.Warnings = append(c.Warnings, fmt.Sprintf("CRDs in group %s have different versions, showing the highest", group))
+	return c
 }
 
 // highestVersion picks the highest version from the set by a total order:

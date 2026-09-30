@@ -271,47 +271,12 @@ func columnWidths(rows [][]string) []int {
 // equal input.
 func Table(components []Component, opts RenderOptions) string {
 	if !opts.Headers {
-		if len(components) == 0 {
-			return ""
-		}
-		// Fixed schema across all rows — scripts parse by position.
-		flat := []column{
-			{"SOURCE", func(c Component) string { return dash(c.Source) }},
-			{"NAMESPACE", func(c Component) string { return dash(c.Namespace) }},
-			{"NAME", func(c Component) string { return dash(c.Name) }},
-			{"PARENT", func(c Component) string { return dash(c.Parent) }},
-			{"SOFTWARE", func(c Component) string { return dash(c.Software) }},
-			{"VERSION", func(c Component) string { return dash(c.Version) }},
-			{"CHART", func(c Component) string {
-				if c.Chart != nil {
-					return dash(c.Chart.Version)
-				}
-				return "-"
-			}},
-			{"IMAGES", noneCell},
-		}
-		lines := make([]string, 0, len(components))
-		for _, c := range components {
-			var cells []string
-			if opts.Changes {
-				cells = append(cells, changeCell(c))
-			}
-			for _, col := range flat {
-				cells = append(cells, col.cell(c))
-			}
-			lines = append(lines, strings.Join(cells, "  "))
-		}
-		return strings.Join(lines, "\n") + "\n"
+		return flatTable(components, opts)
 	}
 
 	var b strings.Builder
 	for _, source := range CanonicalSources {
-		var block []Component
-		for _, c := range components {
-			if c.Source == source {
-				block = append(block, c)
-			}
-		}
+		block := componentsOfSource(components, source)
 		if len(block) == 0 {
 			continue
 		}
@@ -319,22 +284,77 @@ func Table(components []Component, opts RenderOptions) string {
 			b.WriteByte('\n')
 		}
 		b.WriteString(fmt.Sprintf("%s (%d)\n", sectionTitles[source], len(block)))
-
-		rows := [][]string{headersFor(source, opts.Changes)}
-		for _, c := range block {
-			rows = append(rows, cellsFor(source, opts.Changes, c))
-		}
-		widths := columnWidths(rows)
-		for _, row := range rows {
-			b.WriteString(padRow(row, widths))
-			b.WriteByte('\n')
-		}
+		b.WriteString(renderTableBlock(block, source, opts))
 	}
 
 	if len(components) == 0 {
 		b.WriteString("0 components\n")
 	} else {
 		b.WriteString(summaryLine(components))
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// flatTable renders the --no-headers format: fixed schema across all rows
+// (SOURCE column included), no titles or summary — scripts parse by
+// position.
+func flatTable(components []Component, opts RenderOptions) string {
+	if len(components) == 0 {
+		return ""
+	}
+	// Fixed schema across all rows — scripts parse by position.
+	flat := []column{
+		{"SOURCE", func(c Component) string { return dash(c.Source) }},
+		{"NAMESPACE", func(c Component) string { return dash(c.Namespace) }},
+		{"NAME", func(c Component) string { return dash(c.Name) }},
+		{"PARENT", func(c Component) string { return dash(c.Parent) }},
+		{"SOFTWARE", func(c Component) string { return dash(c.Software) }},
+		{"VERSION", func(c Component) string { return dash(c.Version) }},
+		{"CHART", func(c Component) string {
+			if c.Chart != nil {
+				return dash(c.Chart.Version)
+			}
+			return "-"
+		}},
+		{"IMAGES", noneCell},
+	}
+	lines := make([]string, 0, len(components))
+	for _, c := range components {
+		var cells []string
+		if opts.Changes {
+			cells = append(cells, changeCell(c))
+		}
+		for _, col := range flat {
+			cells = append(cells, col.cell(c))
+		}
+		lines = append(lines, strings.Join(cells, "  "))
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// componentsOfSource filters components to one source, preserving order.
+func componentsOfSource(components []Component, source string) []Component {
+	var block []Component
+	for _, c := range components {
+		if c.Source == source {
+			block = append(block, c)
+		}
+	}
+	return block
+}
+
+// renderTableBlock renders one section's header and rows with aligned
+// columns.
+func renderTableBlock(block []Component, source string, opts RenderOptions) string {
+	rows := [][]string{headersFor(source, opts.Changes)}
+	for _, c := range block {
+		rows = append(rows, cellsFor(source, opts.Changes, c))
+	}
+	widths := columnWidths(rows)
+	var b strings.Builder
+	for _, row := range rows {
+		b.WriteString(padRow(row, widths))
 		b.WriteByte('\n')
 	}
 	return b.String()
@@ -355,35 +375,38 @@ func escapeMD(s string) string {
 func Markdown(components []Component, opts RenderOptions) string {
 	var b strings.Builder
 	for _, source := range CanonicalSources {
-		var block []Component
-		for _, c := range components {
-			if c.Source == source {
-				block = append(block, c)
-			}
-		}
+		block := componentsOfSource(components, source)
 		if len(block) == 0 {
 			continue
 		}
 		if b.Len() > 0 {
 			b.WriteByte('\n')
 		}
-		b.WriteString(fmt.Sprintf("## %s (%d)\n\n", sectionTitles[source], len(block)))
+		b.WriteString(markdownSection(block, source, opts))
+	}
+	return b.String()
+}
 
-		headers := headersForMarkdown(headersFor(source, opts.Changes))
-		b.WriteString("| " + strings.Join(headers, " | ") + " |\n")
-		seps := make([]string, len(headers))
-		for i := range seps {
-			seps[i] = "---"
-		}
-		b.WriteString("| " + strings.Join(seps, " | ") + " |\n")
+// markdownSection renders one source's GFM section: a counted title, the
+// header row with separator, and the (escaped) data rows.
+func markdownSection(block []Component, source string, opts RenderOptions) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("## %s (%d)\n\n", sectionTitles[source], len(block)))
 
-		for _, c := range block {
-			cells := cellsFor(source, opts.Changes, c)
-			for i := range cells {
-				cells[i] = escapeMD(cells[i])
-			}
-			b.WriteString("| " + strings.Join(cells, " | ") + " |\n")
+	headers := headersForMarkdown(headersFor(source, opts.Changes))
+	b.WriteString("| " + strings.Join(headers, " | ") + " |\n")
+	seps := make([]string, len(headers))
+	for i := range seps {
+		seps[i] = "---"
+	}
+	b.WriteString("| " + strings.Join(seps, " | ") + " |\n")
+
+	for _, c := range block {
+		cells := cellsFor(source, opts.Changes, c)
+		for i := range cells {
+			cells[i] = escapeMD(cells[i])
 		}
+		b.WriteString("| " + strings.Join(cells, " | ") + " |\n")
 	}
 	return b.String()
 }
