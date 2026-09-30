@@ -41,52 +41,8 @@ func ResolveSubstituteVars(ks Kustomization, configMaps []ConfigMap, secrets []S
 	}
 
 	// Resolve substituteFrom references.
-	entries := parseSubstituteFrom(ks.Spec.PostBuild.SubstituteFrom)
-	for _, entry := range entries {
-		ns := entry.Namespace
-		isExplicitNS := ns != ""
-		if ns == "" {
-			ns = ks.Metadata.Namespace
-		}
-		// Same restricted fallback logic as ResolveValuesFrom:
-		// empty-namespace resources match as fallback only when namespace
-		// was not explicitly set in substituteFrom.
-		allowFallback := !isExplicitNS
-
-		switch strings.ToLower(entry.Kind) {
-		case "configmap":
-			cm, ok := findCandidate(configMaps, entry.Name, ns, allowFallback, func(c ConfigMap) ObjectMeta { return c.Metadata })
-			if !ok {
-				if !entry.Optional {
-					fmt.Fprintf(os.Stderr, "Warning: substituteFrom ConfigMap %s/%s not found (referenced by Kustomization %s/%s)\n",
-						ns, entry.Name, ks.Metadata.Namespace, ks.Metadata.Name)
-				}
-				continue
-			}
-			for k, v := range cm.Data {
-				vars[k] = v
-			}
-		case "secret":
-			// Real secret values aren't available locally, but the key names
-			// are (from the parsed Secret resource). Inject SecretHelmPlaceholder
-			// for each key so unresolved ${VAR} references sourced from this
-			// Secret resolve to a non-empty YAML-safe string instead of being
-			// silently dropped to null.
-			secret, ok := findCandidate(secrets, entry.Name, ns, allowFallback, func(s Secret) ObjectMeta { return s.Metadata })
-			if !ok {
-				if !entry.Optional {
-					fmt.Fprintf(os.Stderr, "Warning: substituteFrom Secret %s/%s not found (referenced by Kustomization %s/%s)\n",
-						ns, entry.Name, ks.Metadata.Namespace, ks.Metadata.Name)
-				}
-				continue
-			}
-			for k := range secret.Data {
-				vars[k] = SecretHelmPlaceholder
-			}
-			for k := range secret.StringData {
-				vars[k] = SecretHelmPlaceholder
-			}
-		}
+	for _, entry := range parseSubstituteFrom(ks.Spec.PostBuild.SubstituteFrom) {
+		resolveSubstituteFromEntry(vars, entry, ks, configMaps, secrets)
 	}
 
 	// Inline substitute values override substituteFrom.
@@ -95,6 +51,58 @@ func ResolveSubstituteVars(ks Kustomization, configMaps []ConfigMap, secrets []S
 	}
 
 	return vars
+}
+
+// resolveSubstituteFromEntry resolves one substituteFrom entry into vars.
+// Namespace fallback follows the same restricted logic as
+// ResolveValuesFrom: empty-namespace resources match as fallback only when
+// the namespace was not explicitly set in substituteFrom. A missing
+// non-optional reference warns; a missing optional one is silent.
+func resolveSubstituteFromEntry(vars map[string]string, entry substituteFromEntry, ks Kustomization, configMaps []ConfigMap, secrets []Secret) {
+	ns := entry.Namespace
+	allowFallback := ns == ""
+	if ns == "" {
+		ns = ks.Metadata.Namespace
+	}
+
+	switch strings.ToLower(entry.Kind) {
+	case "configmap":
+		cm, ok := findCandidate(configMaps, entry.Name, ns, allowFallback, func(c ConfigMap) ObjectMeta { return c.Metadata })
+		if !ok {
+			warnSubstituteFromMissing(entry, "ConfigMap", ns, ks)
+			return
+		}
+		for k, v := range cm.Data {
+			vars[k] = v
+		}
+	case "secret":
+		// Real secret values aren't available locally, but the key names
+		// are (from the parsed Secret resource). Inject SecretHelmPlaceholder
+		// for each key so unresolved ${VAR} references sourced from this
+		// Secret resolve to a non-empty YAML-safe string instead of being
+		// silently dropped to null.
+		secret, ok := findCandidate(secrets, entry.Name, ns, allowFallback, func(s Secret) ObjectMeta { return s.Metadata })
+		if !ok {
+			warnSubstituteFromMissing(entry, "Secret", ns, ks)
+			return
+		}
+		for k := range secret.Data {
+			vars[k] = SecretHelmPlaceholder
+		}
+		for k := range secret.StringData {
+			vars[k] = SecretHelmPlaceholder
+		}
+	}
+}
+
+// warnSubstituteFromMissing warns about one missing substituteFrom
+// reference; optional entries stay silent, matching Flux behavior.
+func warnSubstituteFromMissing(entry substituteFromEntry, kind, ns string, ks Kustomization) {
+	if entry.Optional {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Warning: substituteFrom %s %s/%s not found (referenced by Kustomization %s/%s)\n",
+		kind, ns, entry.Name, ks.Metadata.Namespace, ks.Metadata.Name)
 }
 
 // varPattern matches ${VAR}, ${VAR:=default}, ${VAR:-default}.
@@ -159,29 +167,34 @@ func parseSubstituteFrom(raw any) []substituteFromEntry {
 
 	var entries []substituteFromEntry
 
-	switch v := raw.(type) {
-	case []any:
-		for _, item := range v {
+	if list, ok := raw.([]any); ok {
+		for _, item := range list {
 			if m, ok := item.(map[string]any); ok {
-				entry := substituteFromEntry{}
-				if kind, ok := m["kind"].(string); ok {
-					entry.Kind = kind
-				}
-				if name, ok := m["name"].(string); ok {
-					entry.Name = name
-				}
-				if ns, ok := m["namespace"].(string); ok {
-					entry.Namespace = ns
-				}
-				if optional, ok := m["optional"].(bool); ok {
-					entry.Optional = optional
-				}
-				entries = append(entries, entry)
+				entries = append(entries, substituteFromEntryFromMap(m))
 			}
 		}
 	}
 
 	return entries
+}
+
+// substituteFromEntryFromMap reads one substituteFrom list item from its
+// decoded YAML mapping; absent fields keep their zero values.
+func substituteFromEntryFromMap(m map[string]any) substituteFromEntry {
+	entry := substituteFromEntry{}
+	if kind, ok := m["kind"].(string); ok {
+		entry.Kind = kind
+	}
+	if name, ok := m["name"].(string); ok {
+		entry.Name = name
+	}
+	if ns, ok := m["namespace"].(string); ok {
+		entry.Namespace = ns
+	}
+	if optional, ok := m["optional"].(bool); ok {
+		entry.Optional = optional
+	}
+	return entry
 }
 
 // dependencyNode is the interface for topological sort.
@@ -197,20 +210,7 @@ func topologicalSortGeneric[T dependencyNode](items []T, typeName string) ([]T, 
 		idxMap[item.ident()] = i
 	}
 
-	graph := make(map[int][]int)
-	inDegree := make(map[int]int)
-	for i := range items {
-		inDegree[i] = 0
-	}
-
-	for i, item := range items {
-		for _, depKey := range item.depKeys() {
-			if depIdx, ok := idxMap[depKey]; ok {
-				graph[depIdx] = append(graph[depIdx], i)
-				inDegree[i]++
-			}
-		}
-	}
+	graph, inDegree := dependencyGraph(items, idxMap)
 
 	var queue []int
 	for i := range items {
@@ -240,6 +240,27 @@ func topologicalSortGeneric[T dependencyNode](items []T, typeName string) ([]T, 
 	return sorted, nil
 }
 
+// dependencyGraph builds the Kahn-algorithm adjacency and in-degree maps
+// over items: an edge dep -> item exists for every dependsOn key that
+// resolves to another item; unknown keys are ignored.
+func dependencyGraph[T dependencyNode](items []T, idxMap map[string]int) (graph map[int][]int, inDegree map[int]int) {
+	graph = make(map[int][]int)
+	inDegree = make(map[int]int)
+	for i := range items {
+		inDegree[i] = 0
+	}
+
+	for i, item := range items {
+		for _, depKey := range item.depKeys() {
+			if depIdx, ok := idxMap[depKey]; ok {
+				graph[depIdx] = append(graph[depIdx], i)
+				inDegree[i]++
+			}
+		}
+	}
+	return graph, inDegree
+}
+
 // TopologicalSort sorts Kustomizations by their dependsOn dependencies.
 func TopologicalSort(items []Kustomization) ([]Kustomization, error) {
 	return topologicalSortGeneric(items, "Kustomization")
@@ -258,32 +279,37 @@ func parseValuesFrom(raw any) []ValuesFromEntry {
 
 	var entries []ValuesFromEntry
 
-	switch v := raw.(type) {
-	case []any:
-		for _, item := range v {
+	if list, ok := raw.([]any); ok {
+		for _, item := range list {
 			if m, ok := item.(map[string]any); ok {
-				entry := ValuesFromEntry{}
-				if kind, ok := m["kind"].(string); ok {
-					entry.Kind = kind
-				}
-				if name, ok := m["name"].(string); ok {
-					entry.Name = name
-				}
-				if ns, ok := m["namespace"].(string); ok {
-					entry.Namespace = ns
-				}
-				if vk, ok := m["valuesKey"].(string); ok {
-					entry.ValuesKey = vk
-				}
-				if optional, ok := m["optional"].(bool); ok {
-					entry.Optional = optional
-				}
-				entries = append(entries, entry)
+				entries = append(entries, valuesFromEntryFromMap(m))
 			}
 		}
 	}
 
 	return entries
+}
+
+// valuesFromEntryFromMap reads one valuesFrom list item from its decoded
+// YAML mapping; absent fields keep their zero values.
+func valuesFromEntryFromMap(m map[string]any) ValuesFromEntry {
+	entry := ValuesFromEntry{}
+	if kind, ok := m["kind"].(string); ok {
+		entry.Kind = kind
+	}
+	if name, ok := m["name"].(string); ok {
+		entry.Name = name
+	}
+	if ns, ok := m["namespace"].(string); ok {
+		entry.Namespace = ns
+	}
+	if vk, ok := m["valuesKey"].(string); ok {
+		entry.ValuesKey = vk
+	}
+	if optional, ok := m["optional"].(bool); ok {
+		entry.Optional = optional
+	}
+	return entry
 }
 
 // ResolveValuesFrom resolves values from ConfigMaps and Secrets referenced in valuesFrom.
@@ -308,49 +334,58 @@ func ResolveValuesFrom(hr HelmRelease, configMaps []ConfigMap, secrets []Secret)
 	result := make(map[string]any)
 
 	for _, entry := range entries {
-		entryNS := entry.Namespace
-		isExplicitNS := entryNS != ""
-		if entryNS == "" {
-			entryNS = hr.Metadata.Namespace
-		}
-		vk := entry.ValuesKey
-		if vk == "" {
-			vk = "values.yaml"
-		}
-		// allowFallback: empty-namespace resources can match as fallback ONLY
-		// when entryNS was not explicitly set in valuesFrom (i.e. it defaults
-		// to the HR's namespace). This covers legitimate loose-file resources
-		// without metadata.namespace (read as-is, no kustomize transform),
-		// while preventing stale cross-namespace matches when valuesFrom
-		// explicitly requests a specific namespace.
-		allowFallback := !isExplicitNS
-
-		switch strings.ToLower(entry.Kind) {
-		case "configmap":
-			cm, ok := findCandidate(configMaps, entry.Name, entryNS, allowFallback, func(c ConfigMap) ObjectMeta { return c.Metadata })
-			if !ok {
-				if !entry.Optional {
-					fmt.Fprintf(os.Stderr, "Warning: valuesFrom ConfigMap %s/%s not found (referenced by HelmRelease %s/%s)\n",
-						entryNS, entry.Name, hr.Metadata.Namespace, hr.Metadata.Name)
-				}
-				continue
-			}
-			mergeConfigMapValues(result, cm.Data, vk)
-
-		case "secret":
-			secret, ok := findCandidate(secrets, entry.Name, entryNS, allowFallback, func(s Secret) ObjectMeta { return s.Metadata })
-			if !ok {
-				if !entry.Optional {
-					fmt.Fprintf(os.Stderr, "Warning: valuesFrom Secret %s/%s not found (referenced by HelmRelease %s/%s)\n",
-						entryNS, entry.Name, hr.Metadata.Namespace, hr.Metadata.Name)
-				}
-				continue
-			}
-			mergeSecretPlaceholder(result, secret, vk)
-		}
+		resolveValuesFromEntry(result, entry, hr, configMaps, secrets)
 	}
 
 	return result
+}
+
+// resolveValuesFromEntry resolves one valuesFrom entry into result.
+// Namespace matching is strict (exact match); allowFallback admits
+// empty-namespace resources ONLY when the namespace was not explicitly
+// set in valuesFrom (i.e. it defaults to the HR's namespace) — this
+// covers legitimate loose-file resources without metadata.namespace (read
+// as-is, no kustomize transform), while preventing stale cross-namespace
+// matches when valuesFrom explicitly requests a specific namespace. A
+// missing non-optional reference warns; a missing optional one is silent.
+func resolveValuesFromEntry(result map[string]any, entry ValuesFromEntry, hr HelmRelease, configMaps []ConfigMap, secrets []Secret) {
+	entryNS := entry.Namespace
+	allowFallback := entryNS == ""
+	if entryNS == "" {
+		entryNS = hr.Metadata.Namespace
+	}
+	vk := entry.ValuesKey
+	if vk == "" {
+		vk = "values.yaml"
+	}
+
+	switch strings.ToLower(entry.Kind) {
+	case "configmap":
+		cm, ok := findCandidate(configMaps, entry.Name, entryNS, allowFallback, func(c ConfigMap) ObjectMeta { return c.Metadata })
+		if !ok {
+			warnValuesFromMissing(entry, "ConfigMap", entryNS, hr)
+			return
+		}
+		mergeConfigMapValues(result, cm.Data, vk)
+
+	case "secret":
+		secret, ok := findCandidate(secrets, entry.Name, entryNS, allowFallback, func(s Secret) ObjectMeta { return s.Metadata })
+		if !ok {
+			warnValuesFromMissing(entry, "Secret", entryNS, hr)
+			return
+		}
+		mergeSecretPlaceholder(result, secret, vk)
+	}
+}
+
+// warnValuesFromMissing warns about one missing valuesFrom reference;
+// optional entries stay silent.
+func warnValuesFromMissing(entry ValuesFromEntry, kind, entryNS string, hr HelmRelease) {
+	if entry.Optional {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Warning: valuesFrom %s %s/%s not found (referenced by HelmRelease %s/%s)\n",
+		kind, entryNS, entry.Name, hr.Metadata.Namespace, hr.Metadata.Name)
 }
 
 // findCandidate finds a resource by name with exact namespace match. If

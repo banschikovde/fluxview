@@ -199,6 +199,33 @@ func (s *ResourceSnapshot) dispatch(path string, node *yaml.Node) {
 		return
 	}
 
+	if s.dispatchFluxResource(kind, apiVersion, node) {
+		return
+	}
+
+	switch {
+	case kind == "ConfigMap" && apiVersion == "v1":
+		var cm ConfigMap
+		if err := node.Decode(&cm); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMap document in %s: %v\n", path, err)
+		} else {
+			s.ConfigMaps = append(s.ConfigMaps, cm)
+		}
+	case kind == "Secret" && apiVersion == "v1":
+		var secret Secret
+		if err := node.Decode(&secret); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not parse Secret document in %s: %v\n", path, err)
+		} else {
+			s.Secrets = append(s.Secrets, secret)
+		}
+	}
+}
+
+// dispatchFluxResource decodes one Flux resource document (Kustomization,
+// HelmRepository, OCIRepository, GitRepository) into the matching snapshot
+// field, reusing the already-parsed node. ok=false: the document is not
+// one of these kinds.
+func (s *ResourceSnapshot) dispatchFluxResource(kind, apiVersion string, node *yaml.Node) bool {
 	switch {
 	case kind == KindKustomization && isKustomizeAPI(apiVersion):
 		var ks Kustomization
@@ -220,21 +247,10 @@ func (s *ResourceSnapshot) dispatch(path string, node *yaml.Node) {
 		if err := node.Decode(&repo); err == nil {
 			s.GitRepositories = append(s.GitRepositories, repo)
 		}
-	case kind == "ConfigMap" && apiVersion == "v1":
-		var cm ConfigMap
-		if err := node.Decode(&cm); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not parse ConfigMap document in %s: %v\n", path, err)
-		} else {
-			s.ConfigMaps = append(s.ConfigMaps, cm)
-		}
-	case kind == "Secret" && apiVersion == "v1":
-		var secret Secret
-		if err := node.Decode(&secret); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not parse Secret document in %s: %v\n", path, err)
-		} else {
-			s.Secrets = append(s.Secrets, secret)
-		}
+	default:
+		return false
 	}
+	return true
 }
 
 // ParseKustomizations discovers all Flux Kustomization resources under the root path.
