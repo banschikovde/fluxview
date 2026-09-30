@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -42,4 +44,11 @@ jobs:
           govulncheck ./...
 
       - name: Test
-        run: go test ./...
+        run: go test -coverprofile=coverage.out ./...
+
+      - name: SonarCloud Scan
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: SonarSource/sonarcloud-github-action@v3
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
