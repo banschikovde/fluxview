@@ -241,14 +241,28 @@ func computeEditScript(a, b []string) []editOp {
 		return ops
 	}
 
-	// maxEdits bounds the edit distance search (Myers): n deletions + m insertions.
-	maxEdits := n + m
-	offset := maxEdits
-	v := make([]int, 2*maxEdits+1)
+	trace, dFound, offset := myersForward(a, b)
+	ops := myersBacktrack(a, b, trace, dFound, offset)
 
-	// Store V snapshots for backtracking.
-	var trace [][]int
-	dFound := -1
+	// Reverse.
+	for l, r := 0, len(ops)-1; l < r; l, r = l+1, r-1 {
+		ops[l], ops[r] = ops[r], ops[l]
+	}
+
+	return ops
+}
+
+// myersForward runs the Myers forward pass over a and b: for each edit
+// distance d it advances every diagonal k as far as the equal-line snakes
+// allow, snapshotting the V array per round. Returns the snapshots, the
+// edit distance at which both inputs were fully consumed (bounded by the
+// theoretical maximum n+m), and the diagonal offset used to index V.
+func myersForward(a, b []string) (trace [][]int, dFound, offset int) {
+	n, m := len(a), len(b)
+	maxEdits := n + m
+	offset = maxEdits
+	v := make([]int, 2*maxEdits+1)
+	dFound = -1
 
 	for d := 0; d <= maxEdits && dFound < 0; d++ {
 		snap := make([]int, len(v))
@@ -256,32 +270,45 @@ func computeEditScript(a, b []string) []editOp {
 		trace = append(trace, snap)
 
 		for k := -d; k <= d; k += 2 {
-			var x int
-			if k == -d || (k != d && v[k-1+offset] < v[k+1+offset]) {
-				x = v[k+1+offset] // down (insert)
-			} else {
-				x = v[k-1+offset] + 1 // right (delete)
-			}
-			y := x - k
-
-			for x < n && y < m && a[x] == b[y] {
-				x++
-				y++
-			}
-			v[k+offset] = x
-
-			if x >= n && y >= m {
+			if myersAdvanceDiagonal(a, b, v, k, d, offset) {
 				dFound = d
 				break
 			}
 		}
 	}
-
 	if dFound < 0 {
 		dFound = maxEdits
 	}
+	return trace, dFound, offset
+}
 
-	// Backtrack through trace to build edit script.
+// myersAdvanceDiagonal advances one diagonal k of the Myers round d as far
+// as the equal-line snake allows, recording the reached x in V. It
+// reports whether both inputs were fully consumed on this diagonal.
+func myersAdvanceDiagonal(a, b []string, v []int, k, d, offset int) bool {
+	n, m := len(a), len(b)
+	var x int
+	if k == -d || (k != d && v[k-1+offset] < v[k+1+offset]) {
+		x = v[k+1+offset] // down (insert)
+	} else {
+		x = v[k-1+offset] + 1 // right (delete)
+	}
+	y := x - k
+
+	for x < n && y < m && a[x] == b[y] {
+		x++
+		y++
+	}
+	v[k+offset] = x
+	return x >= n && y >= m
+}
+
+// myersBacktrack walks the V snapshots backwards from the consumed state,
+// emitting the edit script in reverse order (the caller reverses it):
+// per step the snake of equal lines first, then the insert or delete that
+// entered the diagonal, with the final d=0 snake closing.
+func myersBacktrack(a, b []string, trace [][]int, dFound, offset int) []editOp {
+	n, m := len(a), len(b)
 	var ops []editOp
 	x, y := n, m
 
@@ -321,11 +348,6 @@ func computeEditScript(a, b []string) []editOp {
 		ops = append(ops, editOp{op: 'e', line: a[x-1]})
 		x--
 		y--
-	}
-
-	// Reverse.
-	for l, r := 0, len(ops)-1; l < r; l, r = l+1, r-1 {
-		ops[l], ops[r] = ops[r], ops[l]
 	}
 
 	return ops

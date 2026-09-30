@@ -131,36 +131,11 @@ func (fs *rewritingFs) rewriteIfKustomization(path string, data []byte) ([]byte,
 	if err := yaml.Unmarshal(data, &node); err != nil {
 		return data, false // kustomize will surface the parse error identically
 	}
-	root := &node
-	if root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
-		root = root.Content[0]
-	}
-	if root.Kind != yaml.MappingNode {
+	root := mappingRoot(&node)
+	if root == nil {
 		return data, false
 	}
-
-	changed := false
-	for i := 0; i+1 < len(root.Content); i += 2 {
-		key, value := root.Content[i], root.Content[i+1]
-		if key.Kind != yaml.ScalarNode || value.Kind != yaml.SequenceNode {
-			continue
-		}
-		if key.Value != "resources" && key.Value != "components" {
-			continue
-		}
-		for _, item := range value.Content {
-			if item.Kind != yaml.ScalarNode || !isHTTPRef(item.Value) {
-				continue
-			}
-			if cachePath, ok := fs.cache.resolve(item.Value); ok {
-				item.Value = cachePath
-				item.Tag = "!!str"
-				item.Style = 0
-				changed = true
-			}
-		}
-	}
-	if !changed {
+	if !fs.rewriteRemoteRefs(root) {
 		return data, false
 	}
 	out, err := yaml.Marshal(&node)
@@ -168,6 +143,61 @@ func (fs *rewritingFs) rewriteIfKustomization(path string, data []byte) ([]byte,
 		return data, false
 	}
 	return out, true
+}
+
+// mappingRoot returns the document's top-level mapping node, peeling the
+// document wrapper; nil for non-mapping documents.
+func mappingRoot(node *yaml.Node) *yaml.Node {
+	root := node
+	if root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
+		root = root.Content[0]
+	}
+	if root.Kind != yaml.MappingNode {
+		return nil
+	}
+	return root
+}
+
+// rewriteRemoteRefs rewrites the remote URLs under the mapping's
+// resources/components sequences to their cache paths, reporting whether
+// anything changed. Only the substituted scalars change — the node-based
+// round-trip preserves key order, comments and formatting.
+func (fs *rewritingFs) rewriteRemoteRefs(root *yaml.Node) bool {
+	changed := false
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		key, value := root.Content[i], root.Content[i+1]
+		if isRefSequence(key, value) {
+			changed = fs.rewriteRefItems(value) || changed
+		}
+	}
+	return changed
+}
+
+// isRefSequence reports whether one mapping entry is a resources/components
+// key over a sequence — the two shapes whose items may hold remote URLs.
+func isRefSequence(key, value *yaml.Node) bool {
+	if key.Kind != yaml.ScalarNode || value.Kind != yaml.SequenceNode {
+		return false
+	}
+	return key.Value == "resources" || key.Value == "components"
+}
+
+// rewriteRefItems rewrites the sequence's remote scalar URLs to their
+// cache paths, reporting whether anything changed.
+func (fs *rewritingFs) rewriteRefItems(seq *yaml.Node) bool {
+	changed := false
+	for _, item := range seq.Content {
+		if item.Kind != yaml.ScalarNode || !isHTTPRef(item.Value) {
+			continue
+		}
+		if cachePath, ok := fs.cache.resolve(item.Value); ok {
+			item.Value = cachePath
+			item.Tag = "!!str"
+			item.Style = 0
+			changed = true
+		}
+	}
+	return changed
 }
 
 // normalizeFsPath produces a stable memo key: absolute and symlink-resolved,
