@@ -499,211 +499,256 @@ spec:
 `
 
 func TestComposeSchemaLocations(t *testing.T) {
-	testFlags := func() *ValidateFlags {
-		return &ValidateFlags{testCacheBase: t.TempDir()}
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{"no schema dir yields only the prefetched registry copy", composeLocationsNoSchemaDirYieldsOnlyThePrefetchedRegistryCopy},
+		{"schema dir with CRD YAML adds local sources before the registry copy", composeLocationsSchemaDirWithCRDYAMLAddsLocalSourcesBeforeTheRegistryCopy},
+		{"schema dir without CRD YAML adds a single local source", composeLocationsSchemaDirWithoutCRDYAMLAddsASingleLocalSource},
+		{"disabling the registry yields an empty non-nil list", composeLocationsDisablingTheRegistryYieldsAnEmptyNonNilList},
+	} {
+		t.Run(tc.name, tc.run)
 	}
+}
 
-	t.Run("no schema dir yields only the prefetched registry copy", func(t *testing.T) {
-		flags := testFlags()
-		locations, _, err := composeSchemaLocations(flags, "", flags.schemaCacheDir(), flags.crdSchemaCacheDir())
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := filepath.Join(filepath.Join(flags.schemaCacheDir(), "registry"), "{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json")
-		if len(locations) != 1 || locations[0] != want {
-			t.Errorf("locations = %v, want [%s]", locations, want)
-		}
-	})
+// composeTestFlags builds validate flags with isolated per-test caches.
+func composeTestFlags(t *testing.T) *ValidateFlags {
+	return &ValidateFlags{testCacheBase: t.TempDir()}
+}
 
-	t.Run("schema dir with CRD YAML adds local sources before the registry copy", func(t *testing.T) {
-		dir := t.TempDir()
-		writeHelper(t, dir, "widget-test-v1.json", `{"type": "object"}`)
-		writeHelper(t, dir, "crd.yaml", widgetCRDYAML)
+// no schema dir yields only the prefetched registry copy
+func composeLocationsNoSchemaDirYieldsOnlyThePrefetchedRegistryCopy(t *testing.T) {
+	flags := composeTestFlags(t)
+	locations, _, err := composeSchemaLocations(flags, "", flags.schemaCacheDir(), flags.crdSchemaCacheDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(filepath.Join(flags.schemaCacheDir(), "registry"), "{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json")
+	if len(locations) != 1 || locations[0] != want {
+		t.Errorf("locations = %v, want [%s]", locations, want)
+	}
+}
 
-		flags := testFlags()
-		locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(locations) != 3 {
-			t.Fatalf("locations = %v, want 3", locations)
-		}
-		if locations[0] != filepath.Join(dir, "{{ .ResourceKind }}{{ .KindSuffix }}.json") {
-			t.Errorf("first location = %q, want the schema dir template", locations[0])
-		}
-		if !strings.Contains(locations[1], "{{ .ResourceKind }}{{ .KindSuffix }}.json") {
-			t.Errorf("second location = %q, want a converted-CRD template", locations[1])
-		}
-		if want := filepath.Join(filepath.Join(flags.schemaCacheDir(), "registry"), "{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json"); locations[2] != want {
-			t.Errorf("last location = %q, want the prefetched registry copy %q", locations[2], want)
-		}
-	})
+// schema dir with CRD YAML adds local sources before the registry copy
+func composeLocationsSchemaDirWithCRDYAMLAddsLocalSourcesBeforeTheRegistryCopy(t *testing.T) {
+	dir := t.TempDir()
+	writeHelper(t, dir, "widget-test-v1.json", `{"type": "object"}`)
+	writeHelper(t, dir, "crd.yaml", widgetCRDYAML)
 
-	t.Run("schema dir without CRD YAML adds a single local source", func(t *testing.T) {
-		dir := t.TempDir()
-		writeHelper(t, dir, "widget-test-v1.json", `{"type": "object"}`)
+	flags := composeTestFlags(t)
+	locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locations) != 3 {
+		t.Fatalf("locations = %v, want 3", locations)
+	}
+	if locations[0] != filepath.Join(dir, "{{ .ResourceKind }}{{ .KindSuffix }}.json") {
+		t.Errorf("first location = %q, want the schema dir template", locations[0])
+	}
+	if !strings.Contains(locations[1], "{{ .ResourceKind }}{{ .KindSuffix }}.json") {
+		t.Errorf("second location = %q, want a converted-CRD template", locations[1])
+	}
+	if want := filepath.Join(filepath.Join(flags.schemaCacheDir(), "registry"), "{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json"); locations[2] != want {
+		t.Errorf("last location = %q, want the prefetched registry copy %q", locations[2], want)
+	}
+}
 
-		flags := testFlags()
-		locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(locations) != 2 || locations[0] != filepath.Join(dir, "{{ .ResourceKind }}{{ .KindSuffix }}.json") {
-			t.Errorf("locations = %v, want [dir template, registry copy]", locations)
-		}
-	})
+// schema dir without CRD YAML adds a single local source
+func composeLocationsSchemaDirWithoutCRDYAMLAddsASingleLocalSource(t *testing.T) {
+	dir := t.TempDir()
+	writeHelper(t, dir, "widget-test-v1.json", `{"type": "object"}`)
 
-	t.Run("disabling the registry yields an empty non-nil list", func(t *testing.T) {
-		flags := &ValidateFlags{disableDefaultSchemas: true}
-		locations, _, err := composeSchemaLocations(flags, "", flags.schemaCacheDir(), flags.crdSchemaCacheDir())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if locations == nil {
-			t.Fatal("locations = nil, want non-nil: an empty list must not trigger validate.New's default fallback")
-		}
-		if len(locations) != 0 {
-			t.Errorf("locations = %v, want none", locations)
-		}
-	})
+	flags := composeTestFlags(t)
+	locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locations) != 2 || locations[0] != filepath.Join(dir, "{{ .ResourceKind }}{{ .KindSuffix }}.json") {
+		t.Errorf("locations = %v, want [dir template, registry copy]", locations)
+	}
+}
+
+// disabling the registry yields an empty non-nil list
+func composeLocationsDisablingTheRegistryYieldsAnEmptyNonNilList(t *testing.T) {
+	flags := &ValidateFlags{disableDefaultSchemas: true}
+	locations, _, err := composeSchemaLocations(flags, "", flags.schemaCacheDir(), flags.crdSchemaCacheDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if locations == nil {
+		t.Fatal("locations = nil, want non-nil: an empty list must not trigger validate.New's default fallback")
+	}
+	if len(locations) != 0 {
+		t.Errorf("locations = %v, want none", locations)
+	}
 }
 
 func TestComposeSchemaLocations_KubernetesJSONSchemaCheckout(t *testing.T) {
-	t.Run("checkout at the schema dir root", func(t *testing.T) {
-		dir := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(dir, "v1.36.1-standalone"), 0755); err != nil {
-			t.Fatal(err)
-		}
-		writeHelper(t, dir, "v1.36.1-standalone/deployment-apps-v1.json", `{"type": "object"}`)
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{"checkout at the schema dir root", composeCheckoutCheckoutAtTheSchemaDirRoot},
+		{"checkout one level under the schema dir", composeCheckoutCheckoutOneLevelUnderTheSchemaDir},
+		{"deeper nesting and plain files are not detected", composeCheckoutDeeperNestingAndPlainFilesAreNotDetected},
+	} {
+		t.Run(tc.name, tc.run)
+	}
+}
 
-		flags := &ValidateFlags{testCacheBase: t.TempDir()}
-		locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(locations) != 3 {
-			t.Fatalf("locations = %v, want 3", locations)
-		}
-		want := filepath.Join(dir, "{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json")
-		if locations[1] != want {
-			t.Errorf("checkout location = %q,\nwant %q", locations[1], want)
-		}
-		if registry := filepath.Join(filepath.Join(flags.schemaCacheDir(), "registry"), "{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json"); locations[2] != registry {
-			t.Errorf("last location = %q, want the prefetched registry copy", locations[2])
-		}
-	})
+// checkout at the schema dir root
+func composeCheckoutCheckoutAtTheSchemaDirRoot(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "v1.36.1-standalone"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeHelper(t, dir, "v1.36.1-standalone/deployment-apps-v1.json", `{"type": "object"}`)
 
-	t.Run("checkout one level under the schema dir", func(t *testing.T) {
-		dir := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(dir, "k8s-schemas", "v1.36.1-standalone-strict"), 0755); err != nil {
-			t.Fatal(err)
-		}
-		writeHelper(t, dir, "k8s-schemas/v1.36.1-standalone-strict/configmap-v1.json", `{"type": "object"}`)
+	flags := &ValidateFlags{testCacheBase: t.TempDir()}
+	locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locations) != 3 {
+		t.Fatalf("locations = %v, want 3", locations)
+	}
+	want := filepath.Join(dir, "{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json")
+	if locations[1] != want {
+		t.Errorf("checkout location = %q,\nwant %q", locations[1], want)
+	}
+	if locations[2] != filepath.Join(filepath.Join(flags.schemaCacheDir(), "registry"), "{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json") {
+		t.Errorf("last location = %q, want the prefetched registry copy", locations[2])
+	}
+}
 
-		flags := &ValidateFlags{testCacheBase: t.TempDir()}
-		locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := filepath.Join(dir, "k8s-schemas", "{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json")
-		if len(locations) != 3 || locations[1] != want {
-			t.Errorf("locations = %v,\nwant the nested checkout root %q", locations, want)
-		}
-	})
+// checkout one level under the schema dir
+func composeCheckoutCheckoutOneLevelUnderTheSchemaDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "k8s-schemas", "v1.36.1-standalone-strict"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeHelper(t, dir, "k8s-schemas/v1.36.1-standalone-strict/configmap-v1.json", `{"type": "object"}`)
 
-	t.Run("deeper nesting and plain files are not detected", func(t *testing.T) {
-		dir := t.TempDir()
-		// Two levels down: out of scope by design.
-		if err := os.MkdirAll(filepath.Join(dir, "a", "b", "v1.36.1-standalone"), 0755); err != nil {
-			t.Fatal(err)
-		}
-		writeHelper(t, dir, "a/b/v1.36.1-standalone/configmap-v1.json", `{"type": "object"}`)
-		// A file that merely matches the pattern.
-		writeHelper(t, dir, "notes-standalone", "not a directory")
+	flags := &ValidateFlags{testCacheBase: t.TempDir()}
+	locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, "k8s-schemas", "{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json")
+	if len(locations) != 3 || locations[1] != want {
+		t.Errorf("locations = %v,\nwant the nested checkout root %q", locations, want)
+	}
+}
 
-		flags := &ValidateFlags{testCacheBase: t.TempDir()}
-		locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(locations) != 2 {
-			t.Errorf("locations = %v, want 2 (root template + registry copy only)", locations)
-		}
-	})
+// deeper nesting and plain files are not detected
+func composeCheckoutDeeperNestingAndPlainFilesAreNotDetected(t *testing.T) {
+	dir := t.TempDir()
+	// Two levels down: out of scope by design.
+	if err := os.MkdirAll(filepath.Join(dir, "a", "b", "v1.36.1-standalone"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeHelper(t, dir, "a/b/v1.36.1-standalone/configmap-v1.json", `{"type": "object"}`)
+	// A file that merely matches the pattern.
+	writeHelper(t, dir, "notes-standalone", "not a directory")
+
+	flags := &ValidateFlags{testCacheBase: t.TempDir()}
+	locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locations) != 2 {
+		t.Errorf("locations = %v, want 2 (root template + registry copy only)", locations)
+	}
 }
 
 func TestComposeSchemaLocations_CRDCacheAndErrors(t *testing.T) {
-	t.Run("converted CRDs persist in the cache dir", func(t *testing.T) {
-		dir := t.TempDir()
-		writeHelper(t, dir, "crd.yaml", widgetCRDYAML)
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{"converted CRDs persist in the cache dir", composeCRDCacheConvertedCRDsPersistInTheCacheDir},
+		{"nonexistent schema dir yields an error", composeCRDCacheNonexistentSchemaDirYieldsAnError},
+		{"cache-off resolution is CacheDirOrTemp's job, compose takes a concrete dir", composeCRDCacheCacheOffResolutionIsCacheDirOrTempSJobComposeTakesAConcreteDir},
+	} {
+		t.Run(tc.name, tc.run)
+	}
+}
 
-		flags := &ValidateFlags{disableDefaultSchemas: true, testCacheBase: t.TempDir()}
-		locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(locations) != 2 {
-			t.Fatalf("locations = %v, want 2 (schema dir, converted CRDs)", locations)
-		}
+// converted CRDs persist in the cache dir
+func composeCRDCacheConvertedCRDsPersistInTheCacheDir(t *testing.T) {
+	dir := t.TempDir()
+	writeHelper(t, dir, "crd.yaml", widgetCRDYAML)
 
-		crdDir := filepath.Dir(locations[1])
-		if !strings.HasPrefix(crdDir, flags.crdSchemaCacheDir()) {
-			t.Errorf("converted CRDs should live under the cache base, got %s", crdDir)
-		}
-		if _, statErr := os.Stat(filepath.Join(crdDir, "widget-test-v1.json")); statErr != nil {
-			t.Errorf("converted schema should exist in the persistent cache: %v", statErr)
-		}
+	flags := &ValidateFlags{disableDefaultSchemas: true, testCacheBase: t.TempDir()}
+	locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locations) != 2 {
+		t.Fatalf("locations = %v, want 2 (schema dir, converted CRDs)", locations)
+	}
 
-		// A second compose reuses the same cache dir.
-		locations2, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if locations2[1] != locations[1] {
-			t.Errorf("cache dir should be stable across runs: %q vs %q", locations[1], locations2[1])
-		}
-	})
+	crdDir := filepath.Dir(locations[1])
+	if !strings.HasPrefix(crdDir, flags.crdSchemaCacheDir()) {
+		t.Errorf("converted CRDs should live under the cache base, got %s", crdDir)
+	}
+	if _, statErr := os.Stat(filepath.Join(crdDir, "widget-test-v1.json")); statErr != nil {
+		t.Errorf("converted schema should exist in the persistent cache: %v", statErr)
+	}
 
-	t.Run("nonexistent schema dir yields an error", func(t *testing.T) {
-		_, _, err := composeSchemaLocations(&ValidateFlags{testCacheBase: t.TempDir()}, "/nonexistent/crd-dir-$$", "", "")
-		if err == nil {
-			t.Error("expected an error for a nonexistent --schema-dir")
-		}
-	})
+	// A second compose reuses the same cache dir.
+	locations2, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), flags.crdSchemaCacheDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if locations2[1] != locations[1] {
+		t.Errorf("cache dir should be stable across runs: %q vs %q", locations[1], locations2[1])
+	}
+}
 
-	t.Run("cache-off resolution is CacheDirOrTemp's job, compose takes a concrete dir", func(t *testing.T) {
-		// runValidate maps the disable word to a per-run temp dir via
-		// validate.CacheDirOrTemp before calling compose; compose only ever
-		// sees a concrete cacheRoot. Simulate that side here.
-		dir := t.TempDir()
-		writeHelper(t, dir, "crd.yaml", widgetCRDYAML)
+// nonexistent schema dir yields an error
+func composeCRDCacheNonexistentSchemaDirYieldsAnError(t *testing.T) {
+	_, _, err := composeSchemaLocations(&ValidateFlags{testCacheBase: t.TempDir()}, "/nonexistent/crd-dir-$$", "", "")
+	if err == nil {
+		t.Error("expected an error for a nonexistent --schema-dir")
+	}
+}
 
-		crdRoot, cleanup, err := validate.CacheDirOrTemp("disabled", "fluxview-crd-schemas-")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer cleanup()
-		if !strings.HasPrefix(crdRoot, os.TempDir()) {
-			t.Errorf("crdRoot %q not under the temp root", crdRoot)
-		}
+// cache-off resolution is CacheDirOrTemp's job, compose takes a concrete dir
+func composeCRDCacheCacheOffResolutionIsCacheDirOrTempSJobComposeTakesAConcreteDir(t *testing.T) {
+	// runValidate maps the disable word to a per-run temp dir via
+	// validate.CacheDirOrTemp before calling compose; compose only ever
+	// sees a concrete cacheRoot. Simulate that side here.
+	dir := t.TempDir()
+	writeHelper(t, dir, "crd.yaml", widgetCRDYAML)
 
-		flags := &ValidateFlags{disableDefaultSchemas: true, testCacheBase: t.TempDir()}
-		locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), crdRoot)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(locations) != 2 {
-			t.Fatalf("locations = %v, want 2 (schema dir, converted CRDs)", locations)
-		}
-		if !strings.HasPrefix(locations[1], crdRoot) {
-			t.Errorf("converted location %q should sit under the resolved dir %q", locations[1], crdRoot)
-		}
+	crdRoot, cleanup, err := validate.CacheDirOrTemp("disabled", "fluxview-crd-schemas-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if !strings.HasPrefix(crdRoot, os.TempDir()) {
+		t.Errorf("crdRoot %q not under the temp root", crdRoot)
+	}
 
-		// The persistent cache stays untouched: nothing under crd-schemas.
-		if _, err := os.Stat(flags.crdSchemaCacheDir()); !os.IsNotExist(err) {
-			t.Errorf("persistent CRD cache must not be written with the cache off, stat err = %v", err)
-		}
-	})
+	flags := &ValidateFlags{disableDefaultSchemas: true, testCacheBase: t.TempDir()}
+	locations, _, err := composeSchemaLocations(flags, dir, flags.schemaCacheDir(), crdRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locations) != 2 {
+		t.Fatalf("locations = %v, want 2 (schema dir, converted CRDs)", locations)
+	}
+	if !strings.HasPrefix(locations[1], crdRoot) {
+		t.Errorf("converted location %q should sit under the resolved dir %q", locations[1], crdRoot)
+	}
+
+	// The persistent cache stays untouched: nothing under crd-schemas.
+	if _, err := os.Stat(flags.crdSchemaCacheDir()); !os.IsNotExist(err) {
+		t.Errorf("persistent CRD cache must not be written with the cache off, stat err = %v", err)
+	}
 }
 
 // --- Prefetch / version validation (follow-ups) ---

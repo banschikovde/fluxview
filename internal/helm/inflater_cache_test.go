@@ -106,7 +106,7 @@ func inflateHTTP(t *testing.T, cacheDir string, ttl time.Duration, repoURL strin
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
-	out, err := inflater.InflateHelmRelease(context.Background(), httpRepoHR(), repoURL, "", "", nil, nil, "")
+	out, err := inflater.InflateHelmRelease(context.Background(), httpRepoHR(), repoURL, ChartCredentials{Username: "", Password: ""}, nil, nil, "")
 	if err != nil {
 		t.Fatalf("InflateHelmRelease: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestInflateHelmRelease_CacheDirDisabled(t *testing.T) {
 		t.Errorf("cache dir %q is not under the temp root", inflater.cacheDir)
 	}
 
-	if _, err := inflater.InflateHelmRelease(context.Background(), httpRepoHR(), srv.URL, "", "", nil, nil, ""); err != nil {
+	if _, err := inflater.InflateHelmRelease(context.Background(), httpRepoHR(), srv.URL, ChartCredentials{Username: "", Password: ""}, nil, nil, ""); err != nil {
 		t.Fatalf("InflateHelmRelease with cache off: %v", err)
 	}
 
@@ -224,7 +224,7 @@ func TestInflateHelmRelease_CacheDirCaseInsensitive(t *testing.T) {
 		if inflater.cacheDir == spell || inflater.offDir == "" {
 			t.Errorf("spell %q must map to a temp dir (got cacheDir %q)", spell, inflater.cacheDir)
 		}
-		if _, err := inflater.InflateHelmRelease(context.Background(), httpRepoHR(), srv.URL, "", "", nil, nil, ""); err != nil {
+		if _, err := inflater.InflateHelmRelease(context.Background(), httpRepoHR(), srv.URL, ChartCredentials{Username: "", Password: ""}, nil, nil, ""); err != nil {
 			t.Fatalf("InflateHelmRelease(%q): %v", spell, err)
 		}
 		if err := inflater.Close(); err != nil {
@@ -308,7 +308,7 @@ func TestInflateHelmRelease_HTTPRepoDoesNotPersistCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
-	if _, err := inflater.InflateHelmRelease(context.Background(), httpRepoHR(), srv.URL, "user", "sekret-pass", nil, nil, ""); err != nil {
+	if _, err := inflater.InflateHelmRelease(context.Background(), httpRepoHR(), srv.URL, ChartCredentials{Username: "user", Password: "sekret-pass"}, nil, nil, ""); err != nil {
 		t.Fatalf("InflateHelmRelease: %v", err)
 	}
 
@@ -363,7 +363,7 @@ func TestInflateHelmRelease_SameInflaterRegistersRepoOnce(t *testing.T) {
 		t.Fatalf("NewInflater: %v", err)
 	}
 	for range 2 {
-		if _, err := inflater.InflateHelmRelease(context.Background(), httpRepoHR(), srv.URL, "", "", nil, nil, ""); err != nil {
+		if _, err := inflater.InflateHelmRelease(context.Background(), httpRepoHR(), srv.URL, ChartCredentials{Username: "", Password: ""}, nil, nil, ""); err != nil {
 			t.Fatalf("InflateHelmRelease: %v", err)
 		}
 	}
@@ -526,7 +526,7 @@ func TestInflateHelmRelease_DownloadTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
-	if _, err := inflater.InflateHelmRelease(context.Background(), httpRepoHR(), srv.URL, "", "", nil, nil, ""); err == nil {
+	if _, err := inflater.InflateHelmRelease(context.Background(), httpRepoHR(), srv.URL, ChartCredentials{Username: "", Password: ""}, nil, nil, ""); err == nil {
 		t.Fatal("inflation succeeded despite a download timeout shorter than the server delay")
 	}
 
@@ -534,7 +534,7 @@ func TestInflateHelmRelease_DownloadTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
-	if _, err := inflater.InflateHelmRelease(context.Background(), httpRepoHR(), srv.URL, "", "", nil, nil, ""); err != nil {
+	if _, err := inflater.InflateHelmRelease(context.Background(), httpRepoHR(), srv.URL, ChartCredentials{Username: "", Password: ""}, nil, nil, ""); err != nil {
 		t.Fatalf("inflation with no download timeout failed on a slow repo: %v", err)
 	}
 }
@@ -550,7 +550,7 @@ func TestInflateHelmRelease_DownloadTimeoutTarball(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewInflater: %v", err)
 	}
-	_, err = inflater.InflateHelmRelease(context.Background(), httpRepoHR(), srv.URL, "", "", nil, nil, "")
+	_, err = inflater.InflateHelmRelease(context.Background(), httpRepoHR(), srv.URL, ChartCredentials{Username: "", Password: ""}, nil, nil, "")
 	if err == nil {
 		t.Fatal("inflation succeeded despite a tarball download slower than the timeout")
 	}

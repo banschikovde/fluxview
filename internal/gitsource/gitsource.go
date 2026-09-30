@@ -54,6 +54,13 @@ import (
 // clone itself; its presence and integrity mark the directory as complete.
 const seedFileName = ".fluxview-source.json"
 
+// The canonical resolved-ref spellings: a pinned revision is "commit:<sha>",
+// a floating branch tracks the git ref "refs/heads/<branch>".
+const (
+	commitPrefix    = "commit:"
+	refsHeadsPrefix = "refs/heads/"
+)
+
 // DefaultCacheDir returns the git source cache directory: env
 // FLUXVIEW_GIT_SOURCE_CACHE_DIR, else <cachedir.DefaultDir base>/
 // git-sources. The disable word "disabled" disables clone reuse (checked
@@ -257,45 +264,16 @@ func (f *Fetcher) Ensure(ctx context.Context, repo flux.GitRepository) (string, 
 	// form alone would force a full clone (a resolved commit sha from a
 	// branch/HEAD is the branch tip — cloning the tip by name is the same
 	// tree, but shallow).
-	resolved := refSpec
-	cloneRef := ""
-	resolvedFresh := false
-	if !pinned {
-		if f != nil && f.dir != "" {
-			if p, ok := readPointer(f.dir, cacheKey(url, refSpec)); ok && f.fresh(p) {
-				resolved = p.Resolved
-				resolvedFresh = true
-			}
-		}
-		if !resolvedFresh {
-			r, ref, err := resolveFloating(ctx, url, repo.Spec.Ref, auth)
-			if err != nil {
-				return "", explainAuthFailure(res, err)
-			}
-			resolved, cloneRef = r, ref
-		}
+	resolved, cloneRef, resolvedFresh, err := f.resolveRef(ctx, url, repo, refSpec, pinned, auth)
+	if err != nil {
+		return "", explainAuthFailure(res, err)
 	}
 
 	// Clone directory: content-addressed by (url, resolved). Without the
 	// cache every Ensure gets a private temp clone — no reuse at all, all
 	// removed by Close.
 	if f == nil || f.dir == "" {
-		var base string
-		if f != nil {
-			var err error
-			if base, err = f.offTempDir(); err != nil {
-				return "", err
-			}
-		}
-		dst, err := os.MkdirTemp(base, "clone-*")
-		if err != nil {
-			return "", fmt.Errorf("preparing git source clone: %w", err)
-		}
-		dir, err := cloneOnce(ctx, url, resolved, cloneRef, dst, auth)
-		if err != nil {
-			return "", explainAuthFailure(res, err)
-		}
-		return dir, nil
+		return f.ensureUncached(ctx, url, resolved, cloneRef, auth, res)
 	}
 
 	dir := filepath.Join(f.dir, "data", cacheKey(url, resolved))
@@ -308,6 +286,47 @@ func (f *Fetcher) Ensure(ctx context.Context, repo flux.GitRepository) (string, 
 		return "", explainAuthFailure(res, err)
 	}
 	f.rememberPointer(url, refSpec, resolved, resolvedFresh)
+	return dir, nil
+}
+
+// resolveRef resolves the ref to clone: pinned refs are their own resolved
+// form; floating refs resolve through the cached pointer (network only
+// when it is missing or expired), returning the remote ref to clone
+// shallowly alongside (see Ensure).
+func (f *Fetcher) resolveRef(ctx context.Context, url string, repo flux.GitRepository, refSpec string, pinned bool, auth transport.AuthMethod) (resolved, cloneRef string, fresh bool, err error) {
+	if pinned {
+		return refSpec, "", false, nil
+	}
+	if f != nil && f.dir != "" {
+		if p, ok := readPointer(f.dir, cacheKey(url, refSpec)); ok && f.fresh(p) {
+			return p.Resolved, "", true, nil
+		}
+	}
+	r, ref, err := resolveFloating(ctx, url, repo.Spec.Ref, auth)
+	if err != nil {
+		return "", "", false, err
+	}
+	return r, ref, false, nil
+}
+
+// ensureUncached clones url once into a private temp directory — the no-
+// cache path, where every Ensure gets its own clone (removed by Close).
+func (f *Fetcher) ensureUncached(ctx context.Context, url, resolved, cloneRef string, auth transport.AuthMethod, res authOutcome) (string, error) {
+	var base string
+	if f != nil {
+		var err error
+		if base, err = f.offTempDir(); err != nil {
+			return "", err
+		}
+	}
+	dst, err := os.MkdirTemp(base, "clone-*")
+	if err != nil {
+		return "", fmt.Errorf("preparing git source clone: %w", err)
+	}
+	dir, err := cloneOnce(ctx, url, resolved, cloneRef, dst, auth)
+	if err != nil {
+		return "", explainAuthFailure(res, err)
+	}
 	return dir, nil
 }
 
@@ -378,11 +397,11 @@ func (f *Fetcher) fresh(m meta) bool {
 func resolveFloating(ctx context.Context, url string, ref *flux.GitRepositoryRef, auth transport.AuthMethod) (resolved, cloneRef string, err error) {
 	switch {
 	case ref != nil && ref.Branch != "":
-		sha, err := lsRemoteHash(ctx, url, "refs/heads/"+ref.Branch, auth)
+		sha, err := lsRemoteHash(ctx, url, refsHeadsPrefix+ref.Branch, auth)
 		if err != nil {
 			return "", "", fmt.Errorf("resolving branch %q of %s: %w", ref.Branch, url, err)
 		}
-		return "commit:" + sha, "refs/heads/" + ref.Branch, nil
+		return commitPrefix + sha, refsHeadsPrefix + ref.Branch, nil
 	case ref != nil && ref.Semver != "":
 		refs, err := listRefs(ctx, url, auth)
 		if err != nil {
@@ -399,11 +418,11 @@ func resolveFloating(ctx context.Context, url string, ref *flux.GitRepositoryRef
 			return "", "", fmt.Errorf("resolving HEAD of %s: %w", url, err)
 		}
 		if branch == "" {
-			return "commit:" + sha, "", nil
+			return commitPrefix + sha, "", nil
 		}
 		// Zero-hash HEAD worked around via a named branch — clone that
 		// branch shallowly instead of defaulting to a full clone.
-		return "commit:" + sha, "refs/heads/" + branch, nil
+		return commitPrefix + sha, refsHeadsPrefix + branch, nil
 	}
 }
 
@@ -582,8 +601,8 @@ func lsRemoteHead(ctx context.Context, url string, auth transport.AuthMethod) (s
 			if !ref.Hash().IsZero() {
 				return ref.Hash().String(), "", nil
 			}
-		case strings.HasPrefix(name, "refs/heads/"):
-			branches[strings.TrimPrefix(name, "refs/heads/")] = ref.Hash().String()
+		case strings.HasPrefix(name, refsHeadsPrefix):
+			branches[strings.TrimPrefix(name, refsHeadsPrefix)] = ref.Hash().String()
 		}
 	}
 	if len(branches) == 0 {

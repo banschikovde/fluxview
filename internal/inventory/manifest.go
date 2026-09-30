@@ -81,19 +81,39 @@ func parseWorkloadDoc(raw map[string]interface{}) (workloadDoc, bool) {
 		return workloadDoc{}, false
 	}
 	namespace, _ := metadata["namespace"].(string)
-	labels := map[string]string{}
-	if lm, ok := metadata["labels"].(map[string]interface{}); ok {
-		for k, v := range lm {
-			if s, ok := v.(string); ok {
-				labels[k] = s
-			}
-		}
-	}
 
 	spec, _ := raw["spec"].(map[string]interface{})
 	if spec == nil {
 		return workloadDoc{}, false
 	}
+	return workloadDoc{
+		kind:      kind,
+		name:      name,
+		namespace: namespace,
+		labels:    stringLabels(metadata["labels"]),
+		podSpec:   workloadPodSpec(kind, spec),
+	}, true
+}
+
+// stringLabels projects a decoded labels mapping onto its string entries,
+// dropping non-string values.
+func stringLabels(raw any) map[string]string {
+	labels := map[string]string{}
+	lm, ok := raw.(map[string]interface{})
+	if !ok {
+		return labels
+	}
+	for k, v := range lm {
+		if s, ok := v.(string); ok {
+			labels[k] = s
+		}
+	}
+	return labels
+}
+
+// workloadPodSpec descends to the workload's pod spec: spec.template.spec,
+// with CronJob nesting one level deeper (spec.jobTemplate.spec.template.spec).
+func workloadPodSpec(kind string, spec map[string]interface{}) map[string]interface{} {
 	// CronJob nests the pod template one level deeper.
 	if kind == "CronJob" {
 		jobTemplate, _ := spec["jobTemplate"].(map[string]interface{})
@@ -104,19 +124,13 @@ func parseWorkloadDoc(raw map[string]interface{}) (workloadDoc, bool) {
 		}
 	}
 	podSpec, _ := spec["template"].(map[string]interface{})
-	if podSpec != nil {
-		if ps, ok := podSpec["spec"].(map[string]interface{}); ok {
-			podSpec = ps
-		}
+	if podSpec == nil {
+		return nil
 	}
-
-	return workloadDoc{
-		kind:      kind,
-		name:      name,
-		namespace: namespace,
-		labels:    labels,
-		podSpec:   podSpec,
-	}, true
+	if ps, ok := podSpec["spec"].(map[string]interface{}); ok {
+		return ps
+	}
+	return nil
 }
 
 // containers returns the pod spec containers, tolerating a missing pod spec.
@@ -174,29 +188,8 @@ func mainContainer(containers []map[string]interface{}, componentName string) (m
 // label → first 12 digest characters with a warning.
 func workloadVersion(docs []workloadDoc, componentName string) (version, source string, warning string) {
 	for _, w := range docs {
-		containers := w.containers()
-		main, ok := mainContainer(containers, componentName)
-		if !ok {
-			continue
-		}
-		image, _ := main["image"].(string)
-		if image == "" {
-			continue
-		}
-		_, tag, digest := SplitImage(image)
-		if tag != "" && tag != "latest" {
-			return tag, VersionImage, ""
-		}
-		// latest or no tag: fall back to the version label of this workload.
-		if v := w.labels["app.kubernetes.io/version"]; v != "" {
-			return v, VersionLabel, ""
-		}
-		if digest != "" {
-			hex := strings.TrimPrefix(digest, "sha256:")
-			if len(hex) > 12 {
-				hex = hex[:12]
-			}
-			return hex, VersionImage, "no image tag, using image digest"
+		if v, src, warn, ok := workloadImageVersion(w, componentName); ok {
+			return v, src, warn
 		}
 	}
 	// No usable image: try the version label of any workload in the group.
@@ -206,6 +199,37 @@ func workloadVersion(docs []workloadDoc, componentName string) (version, source 
 		}
 	}
 	return "", "", "no version could be determined"
+}
+
+// workloadImageVersion resolves one workload's version from its main
+// container: the image tag (unless latest), the workload's version label
+// when the tag is latest or absent, or the image digest with a warning.
+// ok=false: no main container, no image or nothing usable.
+func workloadImageVersion(w workloadDoc, componentName string) (version, source, warning string, ok bool) {
+	main, found := mainContainer(w.containers(), componentName)
+	if !found {
+		return "", "", "", false
+	}
+	image, _ := main["image"].(string)
+	if image == "" {
+		return "", "", "", false
+	}
+	_, tag, digest := SplitImage(image)
+	if tag != "" && tag != "latest" {
+		return tag, VersionImage, "", true
+	}
+	// latest or no tag: fall back to the version label of this workload.
+	if v := w.labels["app.kubernetes.io/version"]; v != "" {
+		return v, VersionLabel, "", true
+	}
+	if digest != "" {
+		hex := strings.TrimPrefix(digest, "sha256:")
+		if len(hex) > 12 {
+			hex = hex[:12]
+		}
+		return hex, VersionImage, "no image tag, using image digest", true
+	}
+	return "", "", "", false
 }
 
 // groupKey identifies one manifest component.
@@ -224,13 +248,16 @@ type ManifestInput struct {
 // component; the version comes from the highest-priority workload kind
 // (Deployment > StatefulSet > DaemonSet > CronJob > Job). Workloads in one
 // group reporting different versions yield the first and a warning.
+// manifestGroup is one component's workload documents plus the Flux
+// Kustomization attribution shared by the group.
+type manifestGroup struct {
+	docs   []workloadDoc
+	fluxKs string
+	path   string
+}
+
 func CollectManifestComponents(inputs []ManifestInput) []Component {
-	type group struct {
-		docs   []workloadDoc
-		fluxKs string
-		path   string
-	}
-	groups := map[string]*group{}
+	groups := map[string]*manifestGroup{}
 	order := []string{}
 
 	for _, in := range inputs {
@@ -241,7 +268,7 @@ func CollectManifestComponents(inputs []ManifestInput) []Component {
 		key := groupKey(w.namespace, w.componentName())
 		g, exists := groups[key]
 		if !exists {
-			g = &group{fluxKs: in.FluxKs, path: in.Path}
+			g = &manifestGroup{fluxKs: in.FluxKs, path: in.Path}
 			groups[key] = g
 			order = append(order, key)
 		}
@@ -254,43 +281,53 @@ func CollectManifestComponents(inputs []ManifestInput) []Component {
 
 	components := make([]Component, 0, len(groups))
 	for _, key := range order {
-		g := groups[key]
-		docs := make([]workloadDoc, len(g.docs))
-		copy(docs, g.docs)
-		slices.SortStableFunc(docs, compareWorkloadDocs)
-
-		ns, name := docs[0].namespace, docs[0].componentName()
-		c := Component{
-			Source:    SourceManifest,
-			Kind:      docs[0].kind,
-			Namespace: ns,
-			Name:      name,
-			Software:  name,
-			FluxKs:    g.fluxKs,
-			Path:      g.path,
-		}
-		version, versionSource, warning := workloadVersion(docs, name)
-		c.Version = version
-		c.VersionSource = versionSource
-		if warning != "" {
-			c.Warnings = append(c.Warnings, warning)
-		}
-		c.Images = imagesOfDocs(docs)
-
-		// Diverging versions across the group's workloads are worth a
-		// warning even when a version was found.
-		if c.Version != "" {
-			for _, w := range docs[1:] {
-				if v, _, _ := workloadVersion([]workloadDoc{w}, name); v != "" && v != c.Version {
-					c.Warnings = append(c.Warnings, fmt.Sprintf("workloads in component report different versions (%s vs %s)", c.Version, v))
-					break
-				}
-			}
-		}
-
-		components = append(components, c)
+		components = append(components, manifestGroupComponent(groups[key]))
 	}
 	return components
+}
+
+// manifestGroupComponent builds one workload group's component from its
+// documents: identity and kind from the highest-priority workload, the
+// group's shared version (diverging versions across the group's workloads
+// add a warning even when one was found) and the group's images.
+func manifestGroupComponent(g *manifestGroup) Component {
+	docs := make([]workloadDoc, len(g.docs))
+	copy(docs, g.docs)
+	slices.SortStableFunc(docs, compareWorkloadDocs)
+
+	name := docs[0].componentName()
+	c := Component{
+		Source:    SourceManifest,
+		Kind:      docs[0].kind,
+		Namespace: docs[0].namespace,
+		Name:      name,
+		Software:  name,
+		FluxKs:    g.fluxKs,
+		Path:      g.path,
+	}
+	version, versionSource, warning := workloadVersion(docs, name)
+	c.Version = version
+	c.VersionSource = versionSource
+	if warning != "" {
+		c.Warnings = append(c.Warnings, warning)
+	}
+	c.Images = imagesOfDocs(docs)
+	warnDivergingVersions(&c, docs, name)
+	return c
+}
+
+// warnDivergingVersions adds a warning when the group's other workloads
+// report a different non-empty version than the component's resolved one.
+func warnDivergingVersions(c *Component, docs []workloadDoc, name string) {
+	if c.Version == "" {
+		return
+	}
+	for _, w := range docs[1:] {
+		if v, _, _ := workloadVersion([]workloadDoc{w}, name); v != "" && v != c.Version {
+			c.Warnings = append(c.Warnings, fmt.Sprintf("workloads in component report different versions (%s vs %s)", c.Version, v))
+			return
+		}
+	}
 }
 
 // WorkloadGroupVersion determines a workload group's version from raw
@@ -364,31 +401,37 @@ func imagesOfDocs(docs []workloadDoc) []string {
 
 func collectImages(docs []workloadDoc, seen map[string]bool) {
 	for _, w := range docs {
-		lists := [][]map[string]interface{}{w.containers()}
-		if w.podSpec != nil {
-			if inits, ok := w.podSpec["initContainers"].([]interface{}); ok {
-				out := make([]map[string]interface{}, 0, len(inits))
-				for _, c := range inits {
-					if cm, ok := c.(map[string]interface{}); ok {
-						out = append(out, cm)
-					}
-				}
-				lists = append(lists, out)
+		for _, c := range w.imageContainers() {
+			if name, _ := c["name"].(string); knownSidecars[name] {
+				continue
 			}
-		}
-		for _, containers := range lists {
-			for _, c := range containers {
-				name, _ := c["name"].(string)
-				if knownSidecars[name] {
-					continue
-				}
-				image, _ := c["image"].(string)
-				if image != "" {
-					seen[image] = true
-				}
+			if image, _ := c["image"].(string); image != "" {
+				seen[image] = true
 			}
 		}
 	}
+}
+
+// imageContainers returns the workload's regular and init containers —
+// the sets whose images the IMAGES column reports.
+func (w workloadDoc) imageContainers() []map[string]interface{} {
+	lists := [][]map[string]interface{}{w.containers()}
+	if w.podSpec != nil {
+		if inits, ok := w.podSpec["initContainers"].([]interface{}); ok {
+			out := make([]map[string]interface{}, 0, len(inits))
+			for _, c := range inits {
+				if cm, ok := c.(map[string]interface{}); ok {
+					out = append(out, cm)
+				}
+			}
+			lists = append(lists, out)
+		}
+	}
+	var all []map[string]interface{}
+	for _, containers := range lists {
+		all = append(all, containers...)
+	}
+	return all
 }
 
 func sortedImages(seen map[string]bool) []string {

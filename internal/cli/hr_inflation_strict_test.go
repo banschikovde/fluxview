@@ -44,7 +44,7 @@ func TestInflateHelmReleasesShared_StrictFailsOnUnresolvedSource(t *testing.T) {
 		t.Fatalf("NewInflater: %v", err)
 	}
 
-	outputs, err := inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{strict: true})
+	outputs, err := inflateHelmReleasesShared(context.Background(), inflater, helmInflationInput{helmReleases: hr}, inflateOptions{strict: true})
 	if err == nil {
 		t.Fatal("expected error in strict mode when source is unresolved")
 	}
@@ -72,7 +72,7 @@ func TestInflateHelmReleasesShared_StrictQuietStillFails(t *testing.T) {
 
 	var inflateErr error
 	stderr := captureStderr(func() {
-		_, inflateErr = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{strict: true, quiet: true})
+		_, inflateErr = inflateHelmReleasesShared(context.Background(), inflater, helmInflationInput{helmReleases: hr}, inflateOptions{strict: true, quiet: true})
 	})
 	if inflateErr == nil {
 		t.Fatal("expected error even in quiet mode (diff comparison side)")
@@ -99,7 +99,7 @@ func TestInflateHelmReleasesShared_StrictFailsOnChartDownloadError(t *testing.T)
 		t.Fatalf("NewInflater: %v", err)
 	}
 
-	_, err = inflateHelmReleasesShared(context.Background(), inflater, hr, repos, nil, nil, nil, inflateOptions{strict: true, quiet: true})
+	_, err = inflateHelmReleasesShared(context.Background(), inflater, helmInflationInput{helmReleases: hr, helmRepos: repos}, inflateOptions{strict: true, quiet: true})
 	if err == nil {
 		t.Fatal("expected error in strict mode when chart cannot be downloaded")
 	}
@@ -120,7 +120,7 @@ func TestInflateHelmReleasesShared_StrictAggregatesFailures(t *testing.T) {
 		t.Fatalf("NewInflater: %v", err)
 	}
 
-	_, err = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{strict: true})
+	_, err = inflateHelmReleasesShared(context.Background(), inflater, helmInflationInput{helmReleases: hr}, inflateOptions{strict: true})
 	if err == nil {
 		t.Fatal("expected aggregated error for two unresolved HelmReleases")
 	}
@@ -146,7 +146,7 @@ func TestInflateHelmReleasesShared_StrictToleratesSuspended(t *testing.T) {
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs, err = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{strict: true})
+		outputs, err = inflateHelmReleasesShared(context.Background(), inflater, helmInflationInput{helmReleases: hr}, inflateOptions{strict: true})
 	})
 	if err != nil {
 		t.Fatalf("suspended HelmRelease must not fail strict mode: %v", err)
@@ -174,7 +174,7 @@ func TestInflateHelmReleasesShared_StrictToleratesBucket(t *testing.T) {
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs, err = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{strict: true, repoRoot: t.TempDir()})
+		outputs, err = inflateHelmReleasesShared(context.Background(), inflater, helmInflationInput{helmReleases: hr}, inflateOptions{strict: true, repoRoot: t.TempDir()})
 	})
 	if err != nil {
 		t.Fatalf("Bucket-sourced HelmRelease must not fail strict mode: %v", err)
@@ -201,7 +201,7 @@ func TestInflateHelmReleasesShared_StrictFailsOnMissingLocalChart(t *testing.T) 
 		t.Fatalf("NewInflater: %v", err)
 	}
 
-	_, err = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{strict: true, repoRoot: t.TempDir()})
+	_, err = inflateHelmReleasesShared(context.Background(), inflater, helmInflationInput{helmReleases: hr}, inflateOptions{strict: true, repoRoot: t.TempDir()})
 	if err == nil {
 		t.Fatal("expected error in strict mode for missing local chart path")
 	}

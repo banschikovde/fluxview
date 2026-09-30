@@ -315,7 +315,7 @@ func TestBuildCache_KeyTracksKustomizationContent(t *testing.T) {
 	}
 	p1 := cache.entryPath(root, appDir, kust, hash1)
 	// Same content → deterministic path, regardless of mtime.
-	if p2 := cache.entryPath(root, appDir, kust, hash1); p1 != p2 {
+	if p1 != cache.entryPath(root, appDir, kust, hash1) {
 		t.Fatal("entry path must be deterministic")
 	}
 	// Changed kustomization content → different entry file.

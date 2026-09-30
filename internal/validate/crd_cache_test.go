@@ -142,7 +142,7 @@ func TestCRDYAMLToSchemaDir_BrokenYAMLNotCached(t *testing.T) {
 	crdPath := filepath.Join(dir, "crd.yaml")
 	writeFile(t, dir, "crd.yaml", testCRDYAML)
 
-	if out := convertWithCache(t, dir, cache); out == "" {
+	if convertWithCache(t, dir, cache) == "" {
 		t.Fatal("expected the good CRD to convert")
 	}
 

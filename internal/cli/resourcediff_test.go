@@ -97,7 +97,28 @@ func containsStr(s, substr string) bool {
 // namespace filtering (inlined here since metadata is already parsed), CRD
 // skipping, attribute stripping, and secret redaction.
 func TestBuildResourceMap(t *testing.T) {
-	data := []byte(`apiVersion: v1
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{"no filters keeps all and redacts secrets", resourceMapNoFiltersKeepsAllAndRedactsSecrets},
+		{"namespace filter", resourceMapNamespaceFilter},
+		{"skip CRDs", resourceMapSkipCRDs},
+		{"strip attrs", resourceMapStripAttrs},
+		{"duplicate key overwrites", resourceMapDuplicateKeyOverwrites},
+	} {
+		t.Run(tc.name, tc.run)
+	}
+}
+
+// resourceMapKey is the resource identity helper the fixture assertions use.
+func resourceMapKey(kind, ns, name string) resourceKey {
+	return resourceKey{Kind: kind, Namespace: ns, Name: name}
+}
+
+// resourceMapFixture is the shared four-document diff state: two
+// namespaces of ConfigMaps, a CRD and a Secret (redaction target).
+var resourceMapFixture = []byte(`apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cm-a
@@ -126,53 +147,55 @@ type: Opaque
 data:
   password: c2VjcmV0
 `)
-	key := func(kind, ns, name string) resourceKey {
-		return resourceKey{Kind: kind, Namespace: ns, Name: name}
+
+// no filters keeps all and redacts secrets
+func resourceMapNoFiltersKeepsAllAndRedactsSecrets(t *testing.T) {
+	m := buildResourceMap(resourceMapFixture, &DiffFlags{})
+	if len(m) != 4 {
+		t.Fatalf("expected 4 resources, got %d: %v", len(m), m)
 	}
+	if got := m[resourceMapKey("Secret", "team-a", "sec")]; !contains(got, flux.SecretRedactedValue) {
+		t.Errorf("expected secret data redacted, got:\n%s", got)
+	}
+}
 
-	t.Run("no filters keeps all and redacts secrets", func(t *testing.T) {
-		m := buildResourceMap(data, &DiffFlags{})
-		if len(m) != 4 {
-			t.Fatalf("expected 4 resources, got %d: %v", len(m), m)
-		}
-		if got := m[key("Secret", "team-a", "sec")]; !contains(got, flux.SecretRedactedValue) {
-			t.Errorf("expected secret data redacted, got:\n%s", got)
-		}
-	})
+// namespace filter
+func resourceMapNamespaceFilter(t *testing.T) {
+	m := buildResourceMap(resourceMapFixture, &DiffFlags{Namespace: "team-a"})
+	if len(m) != 2 {
+		t.Fatalf("expected 2 team-a resources, got %d: %v", len(m), m)
+	}
+	if _, ok := m[resourceMapKey("ConfigMap", "team-b", "cm-b")]; ok {
+		t.Error("team-b ConfigMap should be filtered out")
+	}
+}
 
-	t.Run("namespace filter", func(t *testing.T) {
-		m := buildResourceMap(data, &DiffFlags{Namespace: "team-a"})
-		if len(m) != 2 {
-			t.Fatalf("expected 2 team-a resources, got %d: %v", len(m), m)
-		}
-		if _, ok := m[key("ConfigMap", "team-b", "cm-b")]; ok {
-			t.Error("team-b ConfigMap should be filtered out")
-		}
-	})
+// skip CRDs
+func resourceMapSkipCRDs(t *testing.T) {
+	m := buildResourceMap(resourceMapFixture, &DiffFlags{SkipCRDs: true})
+	if _, ok := m[resourceMapKey("CustomResourceDefinition", "", "crds.example.com")]; ok {
+		t.Error("CRD should be skipped with SkipCRDs")
+	}
+	if len(m) != 3 {
+		t.Errorf("expected 3 resources after CRD skip, got %d", len(m))
+	}
+}
 
-	t.Run("skip CRDs", func(t *testing.T) {
-		m := buildResourceMap(data, &DiffFlags{SkipCRDs: true})
-		if _, ok := m[key("CustomResourceDefinition", "", "crds.example.com")]; ok {
-			t.Error("CRD should be skipped with SkipCRDs")
-		}
-		if len(m) != 3 {
-			t.Errorf("expected 3 resources after CRD skip, got %d", len(m))
-		}
-	})
+// strip attrs
+func resourceMapStripAttrs(t *testing.T) {
+	m := buildResourceMap(resourceMapFixture, &DiffFlags{StripAttrs: "creationTimestamp"})
+	got, ok := m[resourceMapKey("ConfigMap", "team-a", "cm-a")]
+	if !ok {
+		t.Fatal("expected cm-a to be present")
+	}
+	if contains(got, "creationTimestamp") {
+		t.Errorf("expected creationTimestamp stripped, got:\n%s", got)
+	}
+}
 
-	t.Run("strip attrs", func(t *testing.T) {
-		m := buildResourceMap(data, &DiffFlags{StripAttrs: "creationTimestamp"})
-		got, ok := m[key("ConfigMap", "team-a", "cm-a")]
-		if !ok {
-			t.Fatal("expected cm-a to be present")
-		}
-		if contains(got, "creationTimestamp") {
-			t.Errorf("expected creationTimestamp stripped, got:\n%s", got)
-		}
-	})
-
-	t.Run("duplicate key overwrites", func(t *testing.T) {
-		dup := []byte(`apiVersion: v1
+// duplicate key overwrites
+func resourceMapDuplicateKeyOverwrites(t *testing.T) {
+	dup := []byte(`apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cm-dup
@@ -186,16 +209,15 @@ metadata:
 data:
   key: second
 `)
-		stderr := captureStderr(func() {
-			m := buildResourceMap(dup, &DiffFlags{})
-			if got := m[key("ConfigMap", "", "cm-dup")]; !contains(got, "second") {
-				t.Errorf("expected last duplicate to win, got:\n%s", got)
-			}
-		})
-		if !contains(stderr, "duplicate resource") {
-			t.Errorf("expected a duplicate-resource warning, got:\n%s", stderr)
+	stderr := captureStderr(func() {
+		m := buildResourceMap(dup, &DiffFlags{})
+		if got := m[resourceMapKey("ConfigMap", "", "cm-dup")]; !contains(got, "second") {
+			t.Errorf("expected last duplicate to win, got:\n%s", got)
 		}
 	})
+	if !contains(stderr, "duplicate resource") {
+		t.Errorf("expected a duplicate-resource warning, got:\n%s", stderr)
+	}
 }
 
 func TestFilterCRDDocs(t *testing.T) {

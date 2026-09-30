@@ -19,6 +19,10 @@ import (
 	"github.com/banschikovde/fluxview/internal/git"
 )
 
+// metaJSONName is the CRD conversion cache manifest: one JSON file per
+// cache directory recording the inputs the schemas were built from.
+const metaJSONName = "meta.json"
+
 // CRDYAMLToSchemaDir reads CRD definition files (.yaml/.yml, any depth) from
 // dir and writes one kubeconform-named JSON Schema per CRD version into a
 // schema directory, returning its path — or "" when no CRD documents were
@@ -35,62 +39,12 @@ import (
 // returned instead — the caller removes it after validation finished
 // (kubeconform reads schemas lazily).
 func CRDYAMLToSchemaDir(dir, cacheRoot string) (string, error) {
-	var out string
-	persistent := cacheRoot != ""
-	if persistent {
-		hash := sha256.Sum256([]byte(mustAbs(dir)))
-		out = filepath.Join(cacheRoot, hex.EncodeToString(hash[:8]))
-		if err := os.MkdirAll(out, 0755); err != nil {
-			return "", fmt.Errorf("creating CRD schema cache dir: %w", err)
-		}
-	} else {
-		temp, err := os.MkdirTemp("", "fluxview-crd-schemas-")
-		if err != nil {
-			return "", fmt.Errorf("creating temp schema dir: %w", err)
-		}
-		out = temp
+	out, persistent, err := crdCacheDir(cacheRoot, dir)
+	if err != nil {
+		return "", err
 	}
 
-	meta := loadCRDCacheMeta(out)
-	seen := make(map[string]struct{})
-
-	walkRoot := filepath.Clean(dir)
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			// Never cross a repository boundary: the .git directory itself
-			// and nested git repository roots (external source clones cached
-			// inside the working tree) hold no CRD sources, and their
-			// template YAML would fail conversion below.
-			if info.Name() == ".git" || (filepath.Clean(path) != walkRoot && git.IsRepoRoot(path)) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		name := info.Name()
-		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
-			return nil
-		}
-
-		key := mustAbs(path)
-		seen[key] = struct{}{}
-		if entry, fresh := meta.Files[key]; fresh && entry.ModTime == info.ModTime().UnixNano() && entry.Size == info.Size() && outputsExist(out, entry.Outputs) {
-			return nil
-		}
-
-		outputs, cerr := crdFileToSchemas(path, out)
-		if cerr != nil {
-			return cerr
-		}
-		// Physical removal of stale files is left to the sweep below: two
-		// source files may claim the same schema name (same kind defined
-		// twice), and only the full claim set knows which files are truly
-		// orphaned.
-		meta.Files[key] = crdCacheEntry{ModTime: info.ModTime().UnixNano(), Size: info.Size(), Outputs: outputs}
-		return nil
-	})
+	meta, seen, err := convertCRDFiles(dir, out)
 	if err != nil {
 		if !persistent {
 			_ = os.RemoveAll(out) // don't leave a temp dir behind on failure
@@ -98,17 +52,107 @@ func CRDYAMLToSchemaDir(dir, cacheRoot string) (string, error) {
 		return "", fmt.Errorf("converting CRDs from %s: %w", dir, err)
 	}
 
-	// Forget CRD files that disappeared since the last run.
-	for key := range meta.Files {
-		if _, stillThere := seen[key]; !stillThere {
-			delete(meta.Files, key)
+	// Forget CRD files that disappeared since the last run and sweep the
+	// directory to the claimed set (see sweepCRDCache).
+	meta.forgetUnseen(seen)
+	sweepCRDCache(out, meta)
+
+	if persistent {
+		if err := saveCRDCacheMeta(out, meta); err != nil {
+			return "", err
 		}
 	}
 
-	// Sweep the directory to the claimed set: removes schemas of removed
-	// or changed sources, and orphans left by an interrupted run (outputs
-	// written but meta.json not yet saved, temp files).
-	live := map[string]struct{}{"meta.json": {}}
+	return dropEmptyDir(out, persistent), nil
+}
+
+// crdCacheDir prepares the conversion output directory: a persistent,
+// source-dir-addressed subdirectory of cacheRoot, or a fresh temp
+// directory when the cache is disabled (the caller removes it).
+func crdCacheDir(cacheRoot, dir string) (out string, persistent bool, err error) {
+	if cacheRoot == "" {
+		temp, err := os.MkdirTemp("", "fluxview-crd-schemas-")
+		if err != nil {
+			return "", false, fmt.Errorf("creating temp schema dir: %w", err)
+		}
+		return temp, false, nil
+	}
+	hash := sha256.Sum256([]byte(mustAbs(dir)))
+	out = filepath.Join(cacheRoot, hex.EncodeToString(hash[:8]))
+	if err := os.MkdirAll(out, 0755); err != nil {
+		return "", true, fmt.Errorf("creating CRD schema cache dir: %w", err)
+	}
+	return out, true, nil
+}
+
+// convertCRDFiles walks dir for CRD YAML files and converts each into the
+// cache, honoring the per-file size+mtime cache entries: unchanged files
+// are skipped, changed files reconverted into the same output dir.
+func convertCRDFiles(dir, out string) (crdCacheMeta, map[string]struct{}, error) {
+	meta := loadCRDCacheMeta(out)
+	seen := make(map[string]struct{})
+
+	walkRoot := filepath.Clean(dir)
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		return convertCRDWalkEntry(path, info, err, walkRoot, out, meta, seen)
+	})
+	return meta, seen, err
+}
+
+// convertCRDWalkEntry is one Walk callback: repository boundaries prune,
+// YAML files convert unless their cached conversion is fresh (same size
+// and mtime, outputs present). Physical removal of stale files is left to
+// the sweep: two source files may claim the same schema name (same kind
+// defined twice), and only the full claim set knows which files are truly
+// orphaned.
+func convertCRDWalkEntry(path string, info os.FileInfo, err error, walkRoot, out string, meta crdCacheMeta, seen map[string]struct{}) error {
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		// Never cross a repository boundary: the .git directory itself
+		// and nested git repository roots (external source clones cached
+		// inside the working tree) hold no CRD sources, and their
+		// template YAML would fail conversion below.
+		if info.Name() == ".git" || (filepath.Clean(path) != walkRoot && git.IsRepoRoot(path)) {
+			return filepath.SkipDir
+		}
+		return nil
+	}
+	name := info.Name()
+	if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+		return nil
+	}
+
+	key := mustAbs(path)
+	seen[key] = struct{}{}
+	if entry, fresh := meta.Files[key]; fresh && entry.ModTime == info.ModTime().UnixNano() && entry.Size == info.Size() && outputsExist(out, entry.Outputs) {
+		return nil
+	}
+
+	outputs, cerr := crdFileToSchemas(path, out)
+	if cerr != nil {
+		return cerr
+	}
+	meta.Files[key] = crdCacheEntry{ModTime: info.ModTime().UnixNano(), Size: info.Size(), Outputs: outputs}
+	return nil
+}
+
+// forgetUnseen drops the cache entries of CRD files that disappeared
+// since the last run (files this walk did not visit).
+func (m *crdCacheMeta) forgetUnseen(seen map[string]struct{}) {
+	for key := range m.Files {
+		if _, stillThere := seen[key]; !stillThere {
+			delete(m.Files, key)
+		}
+	}
+}
+
+// sweepCRDCache deletes the schema files no live claim covers: schemas of
+// removed or changed sources, and orphans left by an interrupted run
+// (outputs written but meta.json not yet saved, temp files).
+func sweepCRDCache(out string, meta crdCacheMeta) {
+	live := map[string]struct{}{metaJSONName: {}}
 	for _, entry := range meta.Files {
 		for _, name := range entry.Outputs {
 			live[name] = struct{}{}
@@ -121,14 +165,6 @@ func CRDYAMLToSchemaDir(dir, cacheRoot string) (string, error) {
 			}
 		}
 	}
-
-	if persistent {
-		if err := saveCRDCacheMeta(out, meta); err != nil {
-			return "", err
-		}
-	}
-
-	return dropEmptyDir(out, persistent), nil
 }
 
 // crdCacheMeta is the on-disk state of the CRD conversion cache: which
@@ -146,7 +182,7 @@ type crdCacheEntry struct {
 
 func loadCRDCacheMeta(dir string) crdCacheMeta {
 	meta := crdCacheMeta{Files: map[string]crdCacheEntry{}}
-	data, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	data, err := os.ReadFile(filepath.Join(dir, metaJSONName))
 	if err != nil {
 		return meta // missing or unreadable: convert everything fresh
 	}
@@ -162,7 +198,7 @@ func saveCRDCacheMeta(dir string, meta crdCacheMeta) error {
 	if err != nil {
 		return fmt.Errorf("encoding CRD cache meta: %w", err)
 	}
-	if err := writeFileAtomic(filepath.Join(dir, "meta.json"), data); err != nil {
+	if err := writeFileAtomic(filepath.Join(dir, metaJSONName), data); err != nil {
 		return fmt.Errorf("writing CRD cache meta: %w", err)
 	}
 	return nil
@@ -194,7 +230,7 @@ func dropEmptyDir(dir string, persistent bool) string {
 		return dir
 	}
 	for _, e := range entries {
-		if persistent && e.Name() == "meta.json" {
+		if persistent && e.Name() == metaJSONName {
 			continue
 		}
 		return dir // a real schema file
@@ -234,36 +270,61 @@ func crdFileToSchemas(path, outDir string) ([]string, error) {
 			continue
 		}
 
-		for _, ver := range crd.Spec.Versions {
-			if ver.Schema == nil || ver.Schema.OpenAPIV3Schema == nil {
-				continue
-			}
-			// The conversion calls below are effectively infallible on a
-			// decodable document (field mapping with no failure sources),
-			// so these errors are defense-in-depth: if a future k8s.io
-			// upgrade ever makes one real, the gate fails closed instead
-			// of silently losing the kind. Escape hatch: drop the CRD file
-			// from --schema-dir.
-			internal := &apiextensions.JSONSchemaProps{}
-			if err := apiextv1.Convert_v1_JSONSchemaProps_To_apiextensions_JSONSchemaProps(ver.Schema.OpenAPIV3Schema, internal, nil); err != nil {
-				return nil, fmt.Errorf("could not convert CRD schema for %s/%s %s: %w", crd.Spec.Group, ver.Name, crd.Spec.Names.Kind, err)
-			}
-			schema := &spec.Schema{}
-			if err := validation.ConvertJSONSchemaProps(internal, schema); err != nil {
-				return nil, fmt.Errorf("could not convert CRD schema for %s/%s %s: %w", crd.Spec.Group, ver.Name, crd.Spec.Names.Kind, err)
-			}
-			data, err := json.Marshal(schema)
-			if err != nil {
-				return nil, fmt.Errorf("could not marshal CRD schema for %s/%s %s: %w", crd.Spec.Group, ver.Name, crd.Spec.Names.Kind, err)
-			}
+		names, err := crdSchemaOutputs(crd, outDir)
+		if err != nil {
+			return outputs, err
+		}
+		outputs = append(outputs, names...)
+	}
+}
 
-			name := kubeconformSchemaName(crd.Spec.Names.Kind, crd.Spec.Group, ver.Name)
-			if err := os.WriteFile(filepath.Join(outDir, name), data, 0644); err != nil {
-				return outputs, fmt.Errorf("writing schema %s: %w", name, err)
-			}
-			outputs = append(outputs, name)
+// crdSchemaOutputs converts every version of one CRD document into
+// kubeconform-named schema files under outDir, returning the file names
+// written.
+func crdSchemaOutputs(crd apiextv1.CustomResourceDefinition, outDir string) ([]string, error) {
+	var names []string
+	for _, ver := range crd.Spec.Versions {
+		name, err := crdVersionSchemaFile(crd, ver, outDir)
+		if err != nil {
+			return nil, err
+		}
+		if name != "" {
+			names = append(names, name)
 		}
 	}
+	return names, nil
+}
+
+// crdVersionSchemaFile converts one CRD version's OpenAPI schema into a
+// kubeconform-named JSON file under outDir, returning the file name (""
+// when the version carries no schema). The conversion calls are
+// effectively infallible on a decodable document (field mapping with no
+// failure sources), so these errors are defense-in-depth: if a future
+// k8s.io upgrade ever makes one real, the gate fails closed instead of
+// silently losing the kind. Escape hatch: drop the CRD file from
+// --schema-dir.
+func crdVersionSchemaFile(crd apiextv1.CustomResourceDefinition, ver apiextv1.CustomResourceDefinitionVersion, outDir string) (string, error) {
+	if ver.Schema == nil || ver.Schema.OpenAPIV3Schema == nil {
+		return "", nil
+	}
+	internal := &apiextensions.JSONSchemaProps{}
+	if err := apiextv1.Convert_v1_JSONSchemaProps_To_apiextensions_JSONSchemaProps(ver.Schema.OpenAPIV3Schema, internal, nil); err != nil {
+		return "", fmt.Errorf("could not convert CRD schema for %s/%s %s: %w", crd.Spec.Group, ver.Name, crd.Spec.Names.Kind, err)
+	}
+	schema := &spec.Schema{}
+	if err := validation.ConvertJSONSchemaProps(internal, schema); err != nil {
+		return "", fmt.Errorf("could not convert CRD schema for %s/%s %s: %w", crd.Spec.Group, ver.Name, crd.Spec.Names.Kind, err)
+	}
+	data, err := json.Marshal(schema)
+	if err != nil {
+		return "", fmt.Errorf("could not marshal CRD schema for %s/%s %s: %w", crd.Spec.Group, ver.Name, crd.Spec.Names.Kind, err)
+	}
+
+	name := kubeconformSchemaName(crd.Spec.Names.Kind, crd.Spec.Group, ver.Name)
+	if err := os.WriteFile(filepath.Join(outDir, name), data, 0644); err != nil {
+		return "", fmt.Errorf("writing schema %s: %w", name, err)
+	}
+	return name, nil
 }
 
 // kubeconformSchemaName builds the filename kubeconform's local registry

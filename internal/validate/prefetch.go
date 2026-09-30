@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -203,32 +204,7 @@ type PrefetchOptions struct {
 // as missing. Any other failure — after retries — is returned as an error
 // so callers can fail closed.
 func PrefetchDefaultSchemas(ctx context.Context, kinds []ResourceKind, opts PrefetchOptions) ([]ResourceKind, error) {
-	baseURL := opts.BaseURL
-	if baseURL == "" {
-		baseURL = DefaultSchemaRegistryURL
-	}
-	client := opts.Client
-	if client == nil {
-		client = &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}
-	}
-	concurrency := opts.Concurrency
-	if concurrency <= 0 {
-		concurrency = prefetchConcurrency
-	}
-	timeout := opts.RequestTimeout
-	if timeout == 0 {
-		timeout = DefaultSchemaDownloadTimeout
-	} // negative: no per-request timeout, the context alone bounds requests
-	retries := opts.Retries
-	if retries <= 0 {
-		retries = prefetchRetries
-	}
-
-	version := NormalizeKubernetesVersion(opts.KubernetesVersion)
-	if version == "" {
-		version = DefaultKubernetesVersion
-	}
-	versionDir := RegistryVersionDir(version, opts.Strict)
+	policy, baseURL, versionDir := prefetchPlan(opts)
 
 	var fetch []ResourceKind
 	for _, k := range kinds {
@@ -244,13 +220,55 @@ func PrefetchDefaultSchemas(ctx context.Context, kinds []ResourceKind, opts Pref
 		return nil, fmt.Errorf("creating schema cache dir: %w", err)
 	}
 
-	missingByIndex := make([]bool, len(fetch))
-	var mu sync.Mutex
-	var firstErr error
+	job := schemaFetchJob{policy: policy, baseURL: baseURL, versionDir: versionDir, cacheDir: opts.CacheDir}
+	missingByIndex, err := fetchSchemasConcurrently(ctx, fetch, job, opts.Concurrency)
+	if err != nil {
+		return nil, err
+	}
 
-	// Prefill a buffered queue: workers pull indexes off it, and a worker
-	// that hit a hard error simply stops — the queue is drained or
-	// abandoned, never deadlocked.
+	var missing []ResourceKind
+	for i, notFound := range missingByIndex {
+		if notFound {
+			missing = append(missing, fetch[i])
+		}
+	}
+	return missing, nil
+}
+
+// prefetchPlan normalizes the prefetch options into the fetch policy and
+// the URL pieces: registry base URL, version directory, client, timeout
+// (negative: no per-request limit, the context alone bounds requests) and
+// retry count, each falling back to its default when unset.
+func prefetchPlan(opts PrefetchOptions) (policy schemaFetchPolicy, baseURL, versionDir string) {
+	baseURL = opts.BaseURL
+	if baseURL == "" {
+		baseURL = DefaultSchemaRegistryURL
+	}
+	policy.client = opts.Client
+	if policy.client == nil {
+		policy.client = &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}
+	}
+	policy.timeout = opts.RequestTimeout
+	if policy.timeout == 0 {
+		policy.timeout = DefaultSchemaDownloadTimeout
+	}
+	policy.retries = opts.Retries
+	if policy.retries <= 0 {
+		policy.retries = prefetchRetries
+	}
+	return policy, baseURL, RegistryVersionDir(opts.KubernetesVersion, opts.Strict)
+}
+
+// fetchSchemasConcurrently downloads the kinds' schemas with a bounded
+// worker pool over a prefilled queue — a worker that hit a hard error
+// simply stops; the queue is drained or abandoned, never deadlocked.
+// It returns the per-kind 404 marks and the first hard error, if any.
+func fetchSchemasConcurrently(ctx context.Context, fetch []ResourceKind, job schemaFetchJob, concurrency int) ([]bool, error) {
+	if concurrency <= 0 {
+		concurrency = prefetchConcurrency
+	}
+	res := &fetchResults{missingByIndex: make([]bool, len(fetch))}
+
 	work := make(chan int, len(fetch))
 	for i := range fetch {
 		work <- i
@@ -266,50 +284,74 @@ func PrefetchDefaultSchemas(ctx context.Context, kinds []ResourceKind, opts Pref
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for idx := range work {
-				k := fetch[idx]
-				notFound, err := fetchSchema(ctx, client, baseURL, versionDir, k, opts.CacheDir, timeout, retries)
-				mu.Lock()
-				if err != nil && firstErr == nil {
-					firstErr = err
-				}
-				if notFound {
-					missingByIndex[idx] = true
-				}
-				mu.Unlock()
-				if err != nil {
-					return
-				}
-			}
+			fetchSchemaWorker(ctx, work, fetch, job, res)
 		}()
 	}
 	wg.Wait()
+	return res.missingByIndex, res.firstErr
+}
 
-	mu.Lock()
-	err := firstErr
-	mu.Unlock()
-	if err != nil {
-		return nil, err
+// schemaFetchJob bundles one prefetch run's immutable fetch context: the
+// policy, the registry URL pieces and the cache directory.
+type schemaFetchJob struct {
+	policy     schemaFetchPolicy
+	baseURL    string
+	versionDir string
+	cacheDir   string
+}
+
+// fetchResults accumulates the pool's outcome under one mutex: per-kind
+// 404 marks and the first hard error.
+type fetchResults struct {
+	mu             sync.Mutex
+	missingByIndex []bool
+	firstErr       error
+}
+
+// record folds one fetch outcome into the pool results.
+func (r *fetchResults) record(idx int, notFound bool, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err != nil && r.firstErr == nil {
+		r.firstErr = err
 	}
+	if notFound {
+		r.missingByIndex[idx] = true
+	}
+}
 
-	var missing []ResourceKind
-	for i, notFound := range missingByIndex {
-		if notFound {
-			missing = append(missing, fetch[i])
+// fetchSchemaWorker drains the work queue, fetching each kind's schema;
+// after a hard error it stops (the queue is drained by siblings or
+// abandoned, never deadlocked).
+func fetchSchemaWorker(ctx context.Context, work <-chan int, fetch []ResourceKind, job schemaFetchJob, res *fetchResults) {
+	for idx := range work {
+		notFound, err := fetchSchema(ctx, job.policy, job.baseURL, job.versionDir, fetch[idx], job.cacheDir)
+		res.record(idx, notFound, err)
+		if err != nil {
+			return
 		}
 	}
-	return missing, nil
+}
+
+// schemaFetchPolicy bounds one schema fetch: the shared HTTP client, the
+// per-request timeout (0 = no limit) and how many times a transient
+// failure is retried.
+type schemaFetchPolicy struct {
+	client  *http.Client
+	timeout time.Duration
+	retries int
 }
 
 // fetchSchema downloads one schema with bounded retries. It returns
 // notFound=true for a stable 404 (no retry — the registry has no schema
 // for the kind) and an error for anything still failing after retries.
-func fetchSchema(ctx context.Context, client *http.Client, baseURL, versionDir string, k ResourceKind, cacheDir string, timeout time.Duration, retries int) (notFound bool, err error) {
+func fetchSchema(ctx context.Context, policy schemaFetchPolicy, baseURL, versionDir string, k ResourceKind, cacheDir string) (notFound bool, err error) {
 	name := SchemaFileName(k.Kind, k.APIVersion)
 	url := baseURL + "/" + versionDir + "/" + name
+	dest := filepath.Join(cacheDir, versionDir, name)
 
 	var lastErr error
-	for attempt := 0; attempt <= retries; attempt++ {
+	for attempt := 0; attempt <= policy.retries; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return false, err
 		}
@@ -321,57 +363,71 @@ func fetchSchema(ctx context.Context, client *http.Client, baseURL, versionDir s
 			}
 		}
 
-		// A negative timeout disables the per-request limit: the request
-		// then runs under the caller's context alone.
-		reqCtx := ctx
-		cancel := context.CancelFunc(func() {})
-		if timeout > 0 {
-			reqCtx, cancel = context.WithTimeout(ctx, timeout)
+		notFound, done, err := fetchSchemaOnce(ctx, policy, url, dest)
+		if done {
+			return notFound, err
 		}
-		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
-		if err != nil {
-			cancel()
-			return false, err
-		}
-		req.Header.Set("User-Agent", "fluxview")
-
-		resp, err := client.Do(req)
-		if err != nil {
-			cancel()
-			if reqCtx.Err() == nil && ctx.Err() != nil {
-				return false, ctx.Err() // interrupted, not retryable
-			}
-			lastErr = fmt.Errorf("requesting %s: %w", url, err)
-			continue
-		}
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, prefetchMaxSchemaSize))
-		closeErr := resp.Body.Close()
-		cancel()
-
-		switch {
-		case resp.StatusCode == http.StatusNotFound:
-			return true, nil
-		case resp.StatusCode == http.StatusOK && readErr == nil && closeErr == nil:
-			// Cache only verified content: a truncated or non-JSON body
-			// (CDN error page) would otherwise be pinned in the cache
-			// forever and fail every later run.
-			if len(body) >= prefetchMaxSchemaSize {
-				return false, fmt.Errorf("schema %s exceeds the %d-byte limit", name, prefetchMaxSchemaSize)
-			}
-			if !json.Valid(body) {
-				return false, fmt.Errorf("registry returned invalid JSON for %s", url)
-			}
-			if err := writeFileAtomic(filepath.Join(cacheDir, versionDir, name), body); err != nil {
-				return false, fmt.Errorf("caching schema %s: %w", name, err)
-			}
-			return false, nil
-		case resp.StatusCode == http.StatusOK:
-			lastErr = fmt.Errorf("reading %s: %v / %v", url, readErr, closeErr)
-		default:
-			lastErr = fmt.Errorf("downloading %s: HTTP %d", url, resp.StatusCode)
-		}
+		lastErr = err
 	}
 	return false, lastErr
+}
+
+// fetchSchemaOnce performs one download attempt. done=true means the
+// outcome is final — a stable 404 (notFound), a cached schema, or a hard
+// failure; done=false carries the retryable error in err.
+func fetchSchemaOnce(ctx context.Context, policy schemaFetchPolicy, url, dest string) (notFound, done bool, err error) {
+	// A negative timeout disables the per-request limit: the request
+	// then runs under the caller's context alone.
+	reqCtx := ctx
+	cancel := context.CancelFunc(func() { /* no-op: replaced by WithTimeout below when timeout > 0 */ })
+	if policy.timeout > 0 {
+		reqCtx, cancel = context.WithTimeout(ctx, policy.timeout)
+	}
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	if err != nil {
+		cancel()
+		return false, true, err
+	}
+	req.Header.Set("User-Agent", "fluxview")
+
+	resp, err := policy.client.Do(req)
+	if err != nil {
+		cancel()
+		if reqCtx.Err() == nil && ctx.Err() != nil {
+			return false, true, ctx.Err() // interrupted, not retryable
+		}
+		return false, false, fmt.Errorf("requesting %s: %w", url, err)
+	}
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, prefetchMaxSchemaSize))
+	closeErr := resp.Body.Close()
+	cancel()
+
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		return true, true, nil
+	case resp.StatusCode == http.StatusOK && readErr == nil && closeErr == nil:
+		return false, true, verifyAndCacheSchema(body, url, dest)
+	case resp.StatusCode == http.StatusOK:
+		return false, false, fmt.Errorf("reading %s: %v / %v", url, readErr, closeErr)
+	default:
+		return false, false, fmt.Errorf("downloading %s: HTTP %d", url, resp.StatusCode)
+	}
+}
+
+// verifyAndCacheSchema caches one downloaded schema body. Cache only
+// verified content: a truncated or non-JSON body (CDN error page) would
+// otherwise be pinned in the cache forever and fail every later run.
+func verifyAndCacheSchema(body []byte, url, dest string) error {
+	if len(body) >= prefetchMaxSchemaSize {
+		return fmt.Errorf("schema %s exceeds the %d-byte limit", path.Base(dest), prefetchMaxSchemaSize)
+	}
+	if !json.Valid(body) {
+		return fmt.Errorf("registry returned invalid JSON for %s", url)
+	}
+	if err := writeFileAtomic(dest, body); err != nil {
+		return fmt.Errorf("caching schema %s: %w", path.Base(dest), err)
+	}
+	return nil
 }
 
 // RegistryVersionDir is the registry directory for a version: master uses

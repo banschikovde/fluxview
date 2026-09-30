@@ -103,7 +103,7 @@ apiVersion: v1
 	}
 
 	// Must have exactly 2 documents (1 real separator).
-	sepCount := strings.Count(resultStr, "\n---\n")
+	sepCount := strings.Count(resultStr, sectionSeparator)
 	if sepCount != 1 {
 		t.Errorf("expected 1 document separator in output, got %d", sepCount)
 	}
@@ -452,7 +452,7 @@ spec:
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	output, err := buildKSContent(ctx, newScanCache(), builder, kustomizations, repoRoot, clusterPath, nil, nil, true, buildCache, nil, nil)
+	output, err := buildKSContent(ctx, &ksBuildEnv{scans: newScanCache(), builder: builder, repoRoot: repoRoot, clusterPath: clusterPath, quiet: true, cache: buildCache}, kustomizations, substitutionSources{})
 	if err != nil {
 		t.Fatalf("buildKSContent: %v", err)
 	}
@@ -524,7 +524,7 @@ spec:
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	output, err := buildAllKustomizations(ctx, newScanCache(), builder, kustomizations, repoRoot, repoRoot, nil, nil, true, buildCache, nil, nil)
+	output, err := buildAllKustomizations(ctx, &ksBuildEnv{scans: newScanCache(), builder: builder, repoRoot: repoRoot, clusterPath: repoRoot, quiet: true, cache: buildCache}, kustomizations, substitutionSources{})
 	if err != nil {
 		t.Fatalf("buildAllKustomizations: %v", err)
 	}
@@ -610,7 +610,7 @@ spec:
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	output, err := buildAllKustomizations(ctx, newScanCache(), builder, kustomizations, repoRoot, repoRoot, nil, nil, true, buildCache, nil, nil)
+	output, err := buildAllKustomizations(ctx, &ksBuildEnv{scans: newScanCache(), builder: builder, repoRoot: repoRoot, clusterPath: repoRoot, quiet: true, cache: buildCache}, kustomizations, substitutionSources{})
 	if err != nil {
 		t.Fatalf("buildAllKustomizations: %v", err)
 	}
@@ -678,7 +678,7 @@ spec:
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	output, err := buildAllKustomizations(ctx, newScanCache(), builder, kustomizations, repoRoot, repoRoot, nil, nil, true, buildCache, nil, nil)
+	output, err := buildAllKustomizations(ctx, &ksBuildEnv{scans: newScanCache(), builder: builder, repoRoot: repoRoot, clusterPath: repoRoot, quiet: true, cache: buildCache}, kustomizations, substitutionSources{})
 	if err != nil {
 		t.Fatalf("buildAllKustomizations: %v", err)
 	}
@@ -770,7 +770,7 @@ spec:
 
 	builder := kustomize.NewBuilder(repoRoot)
 	buildCache := make(buildCache)
-	output, err := buildKSContent(ctx, newScanCache(), builder, kustomizations, repoRoot, clusterPath, nil, nil, true, buildCache, nil, nil)
+	output, err := buildKSContent(ctx, &ksBuildEnv{scans: newScanCache(), builder: builder, repoRoot: repoRoot, clusterPath: clusterPath, quiet: true, cache: buildCache}, kustomizations, substitutionSources{})
 	if err != nil {
 		t.Fatalf("buildKSContent: %v", err)
 	}
@@ -826,8 +826,8 @@ metadata:
 	}
 
 	// Must have document separators.
-	if strings.Count(resultStr, "\n---\n") < 2 {
-		t.Errorf("expected at least 2 document separators, got %d in:\n%s", strings.Count(resultStr, "\n---\n"), resultStr)
+	if strings.Count(resultStr, sectionSeparator) < 2 {
+		t.Errorf("expected at least 2 document separators, got %d in:\n%s", strings.Count(resultStr, sectionSeparator), resultStr)
 	}
 }
 
@@ -1203,7 +1203,7 @@ func TestInflateHelmReleasesShared_WarnOnMissingSource(t *testing.T) {
 	}
 
 	stderr := captureStderr(func() {
-		outputs, _ := inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{})
+		outputs, _ := inflateHelmReleasesShared(context.Background(), inflater, helmInflationInput{helmReleases: hr}, inflateOptions{})
 		if len(outputs) != 0 {
 			t.Errorf("expected 0 outputs (source unresolved), got %d", len(outputs))
 		}
@@ -1249,7 +1249,7 @@ func TestInflateHelmReleasesShared_QuietSuppressesWarnings(t *testing.T) {
 	}
 
 	stderr := captureStderr(func() {
-		outputs, _ := inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{quiet: true})
+		outputs, _ := inflateHelmReleasesShared(context.Background(), inflater, helmInflationInput{helmReleases: hr}, inflateOptions{quiet: true})
 		if len(outputs) != 0 {
 			t.Errorf("expected 0 outputs (source unresolved), got %d", len(outputs))
 		}
@@ -1307,7 +1307,7 @@ spec:
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{quiet: true, repoRoot: repoRoot})
+		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, helmInflationInput{helmReleases: hr}, inflateOptions{quiet: true, repoRoot: repoRoot})
 	})
 
 	if len(outputs) != 1 {
@@ -1391,7 +1391,7 @@ data:
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, configMaps, nil, inflateOptions{quiet: true, repoRoot: repoRoot})
+		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, helmInflationInput{helmReleases: hr, configMaps: configMaps}, inflateOptions{quiet: true, repoRoot: repoRoot})
 	})
 	if len(outputs) != 1 {
 		t.Fatalf("expected 1 rendered output, got %d (stderr:\n%s)", len(outputs), stderr)
@@ -1468,7 +1468,7 @@ spec:
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{quiet: true, repoRoot: repoRoot})
+		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, helmInflationInput{helmReleases: hr}, inflateOptions{quiet: true, repoRoot: repoRoot})
 	})
 	if len(outputs) != 1 {
 		t.Fatalf("expected 1 rendered output, got %d (stderr:\n%s)", len(outputs), stderr)
@@ -1581,7 +1581,7 @@ spec:
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{quiet: true, repoRoot: repoRoot})
+		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, helmInflationInput{helmReleases: hr}, inflateOptions{quiet: true, repoRoot: repoRoot})
 	})
 	if len(outputs) != 1 {
 		t.Fatalf("expected 1 rendered output, got %d (stderr:\n%s)", len(outputs), stderr)
@@ -1650,7 +1650,7 @@ func TestInflateHelmReleasesShared_BucketUnsupported(t *testing.T) {
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{repoRoot: repoRoot})
+		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, helmInflationInput{helmReleases: hr}, inflateOptions{repoRoot: repoRoot})
 	})
 
 	if len(outputs) != 0 {
@@ -1695,7 +1695,7 @@ func TestInflateHelmReleasesShared_LocalSourceChartNotADirectory(t *testing.T) {
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{repoRoot: repoRoot})
+		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, helmInflationInput{helmReleases: hr}, inflateOptions{repoRoot: repoRoot})
 	})
 
 	if len(outputs) != 0 {
@@ -1738,7 +1738,7 @@ func TestInflateHelmReleasesShared_LocalSourceChartMissing(t *testing.T) {
 
 	var outputs [][]byte
 	stderr := captureStderr(func() {
-		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, hr, nil, nil, nil, nil, inflateOptions{repoRoot: repoRoot})
+		outputs, _ = inflateHelmReleasesShared(context.Background(), inflater, helmInflationInput{helmReleases: hr}, inflateOptions{repoRoot: repoRoot})
 	})
 
 	if len(outputs) != 0 {
@@ -2311,7 +2311,7 @@ spec:
 	cache := make(buildCache)
 
 	stderr := captureStderr(func() {
-		_, _ = buildAllKustomizations(ctx, newScanCache(), builder, kustomizations, repoRoot, repoRoot, nil, nil, true, cache, nil, nil)
+		_, _ = buildAllKustomizations(ctx, &ksBuildEnv{scans: newScanCache(), builder: builder, repoRoot: repoRoot, clusterPath: repoRoot, quiet: true, cache: cache}, kustomizations, substitutionSources{})
 	})
 
 	// Count "Warning:" lines — should be exactly 1.

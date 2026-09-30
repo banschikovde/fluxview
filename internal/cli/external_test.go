@@ -157,9 +157,9 @@ func upstreamCommit(t *testing.T, dir, path, content string) {
 
 func buildFlagsFor(f *externalFixture) *BuildFlags {
 	return &BuildFlags{
-		Path:              f.clusterDir,
-		GitSourceCacheDir: filepath.Join(f.t.TempDir(), "git-sources"),
-		GitSourceCacheTTL: time.Hour,
+		Path: f.clusterDir,
+		KsCache: kustomizeCacheOptions{gitSourceDir: filepath.Join(f.t.TempDir(), "git-sources"),
+			gitSourceTtl: time.Hour},
 	}
 }
 
@@ -349,8 +349,8 @@ func TestRunValidate_ExternalSource_Passes(t *testing.T) {
 		runErr = runValidate(context.Background(), &ValidateFlags{
 			Path:                  f.clusterDir,
 			disableDefaultSchemas: true,
-			GitSourceCacheDir:     filepath.Join(t.TempDir(), "git-sources"),
-			GitSourceCacheTTL:     time.Hour,
+			KsCache: kustomizeCacheOptions{gitSourceDir: filepath.Join(t.TempDir(), "git-sources"),
+				gitSourceTtl: time.Hour},
 		})
 	})
 	if runErr != nil {
@@ -378,8 +378,8 @@ resources:
 		runErr = runValidate(context.Background(), &ValidateFlags{
 			Path:                  f.clusterDir,
 			disableDefaultSchemas: true,
-			GitSourceCacheDir:     filepath.Join(t.TempDir(), "git-sources"),
-			GitSourceCacheTTL:     time.Hour,
+			KsCache: kustomizeCacheOptions{gitSourceDir: filepath.Join(t.TempDir(), "git-sources"),
+				gitSourceTtl: time.Hour},
 		})
 	})
 	exitErr, ok := runErr.(*DiffExitError)
@@ -415,8 +415,8 @@ spec:
 		runErr = runValidate(context.Background(), &ValidateFlags{
 			Path:                  f.clusterDir,
 			disableDefaultSchemas: true,
-			GitSourceCacheDir:     filepath.Join(t.TempDir(), "git-sources"),
-			GitSourceCacheTTL:     time.Hour,
+			KsCache: kustomizeCacheOptions{gitSourceDir: filepath.Join(t.TempDir(), "git-sources"),
+				gitSourceTtl: time.Hour},
 		})
 	})
 	if runErr != nil {
@@ -479,12 +479,12 @@ func TestDiffKS_NoGitSourceFetch(t *testing.T) {
 	stdout := captureStdout(func() {
 		stderr = captureStderr(func() {
 			runErr = runDiff(context.Background(), []string{"ks"}, &DiffFlags{
-				Path:              f.clusterDir,
-				BranchOrig:        firstCommit,
-				Color:             "never",
-				GitSourceCacheDir: filepath.Join(t.TempDir(), "git-sources"),
-				GitSourceCacheTTL: time.Hour,
-				NoGitSourceFetch:  true,
+				Path:       f.clusterDir,
+				BranchOrig: firstCommit,
+				Color:      "never",
+				KsCache: kustomizeCacheOptions{gitSourceDir: filepath.Join(t.TempDir(), "git-sources"),
+					gitSourceTtl: time.Hour},
+				NoGitSourceFetch: true,
 			})
 		})
 	})
@@ -534,9 +534,9 @@ func TestRunValidate_NoGitSourceFetch_WarnsAndPasses(t *testing.T) {
 		runErr = runValidate(context.Background(), &ValidateFlags{
 			Path:                  f.clusterDir,
 			disableDefaultSchemas: true,
-			GitSourceCacheDir:     filepath.Join(t.TempDir(), "git-sources"),
-			GitSourceCacheTTL:     time.Hour,
-			NoGitSourceFetch:      true,
+			KsCache: kustomizeCacheOptions{gitSourceDir: filepath.Join(t.TempDir(), "git-sources"),
+				gitSourceTtl: time.Hour},
+			NoGitSourceFetch: true,
 		})
 	})
 	if runErr != nil {
@@ -576,9 +576,9 @@ spec:
 		runErr = runValidate(context.Background(), &ValidateFlags{
 			Path:                  f.clusterDir,
 			disableDefaultSchemas: true,
-			GitSourceCacheDir:     filepath.Join(t.TempDir(), "git-sources"),
-			GitSourceCacheTTL:     time.Hour,
-			NoGitSourceFetch:      true,
+			KsCache: kustomizeCacheOptions{gitSourceDir: filepath.Join(t.TempDir(), "git-sources"),
+				gitSourceTtl: time.Hour},
+			NoGitSourceFetch: true,
 		})
 	})
 	if runErr != nil {
@@ -618,8 +618,8 @@ func TestRunValidate_ExternalPathMissingInClone_Fails(t *testing.T) {
 		runErr = runValidate(context.Background(), &ValidateFlags{
 			Path:                  f.clusterDir,
 			disableDefaultSchemas: true,
-			GitSourceCacheDir:     filepath.Join(t.TempDir(), "git-sources"),
-			GitSourceCacheTTL:     time.Hour,
+			KsCache: kustomizeCacheOptions{gitSourceDir: filepath.Join(t.TempDir(), "git-sources"),
+				gitSourceTtl: time.Hour},
 		})
 	})
 	exitErr, ok := runErr.(*DiffExitError)
@@ -664,11 +664,11 @@ metadata:
 	stdout := captureStdout(func() {
 		_ = captureStderr(func() {
 			runErr = runDiff(context.Background(), []string{"ks"}, &DiffFlags{
-				Path:              f.clusterDir,
-				BranchOrig:        firstCommit,
-				Color:             "never",
-				GitSourceCacheDir: filepath.Join(t.TempDir(), "git-sources"),
-				GitSourceCacheTTL: time.Hour,
+				Path:       f.clusterDir,
+				BranchOrig: firstCommit,
+				Color:      "never",
+				KsCache: kustomizeCacheOptions{gitSourceDir: filepath.Join(t.TempDir(), "git-sources"),
+					gitSourceTtl: time.Hour},
 			})
 		})
 	})
@@ -736,9 +736,9 @@ spec:
 `)
 
 	flags := &BuildFlags{
-		Path:              clusterDir,
-		GitSourceCacheDir: filepath.Join(t.TempDir(), "git-sources"),
-		GitSourceCacheTTL: time.Hour,
+		Path: clusterDir,
+		KsCache: kustomizeCacheOptions{gitSourceDir: filepath.Join(t.TempDir(), "git-sources"),
+			gitSourceTtl: time.Hour},
 	}
 
 	var runErr error
@@ -860,8 +860,8 @@ spec:
 			Path:                  clusterDir,
 			SchemaDir:             schemaDir,
 			disableDefaultSchemas: true,
-			GitSourceCacheDir:     filepath.Join(t.TempDir(), "git-sources"),
-			GitSourceCacheTTL:     time.Hour,
+			KsCache: kustomizeCacheOptions{gitSourceDir: filepath.Join(t.TempDir(), "git-sources"),
+				gitSourceTtl: time.Hour},
 		})
 	})
 	exitErr, ok := runErr.(*DiffExitError)
@@ -938,9 +938,9 @@ spec:
 	stdout := captureStdout(func() {
 		_ = captureStderr(func() {
 			runErr = runBuild(context.Background(), []string{"ks"}, &BuildFlags{
-				Path:              clusterDir,
-				GitSourceCacheDir: filepath.Join(t.TempDir(), "git-sources"),
-				GitSourceCacheTTL: time.Hour,
+				Path: clusterDir,
+				KsCache: kustomizeCacheOptions{gitSourceDir: filepath.Join(t.TempDir(), "git-sources"),
+					gitSourceTtl: time.Hour},
 			})
 		})
 	})
@@ -1050,9 +1050,9 @@ spec:
 	stdout := captureStdout(func() {
 		stderr = captureStderr(func() {
 			runErr = runBuild(context.Background(), []string{"ks"}, &BuildFlags{
-				Path:              clusterDir,
-				GitSourceCacheDir: filepath.Join(t.TempDir(), "git-sources"),
-				GitSourceCacheTTL: time.Hour,
+				Path: clusterDir,
+				KsCache: kustomizeCacheOptions{gitSourceDir: filepath.Join(t.TempDir(), "git-sources"),
+					gitSourceTtl: time.Hour},
 			})
 		})
 	})
@@ -1140,7 +1140,7 @@ spec:
 	}
 
 	flags := buildFlagsFor(f)
-	flags.GitSourceCacheDir = filepath.Join(f.fleetDir, ".cache-fluxview", "git-sources")
+	flags.KsCache.gitSourceDir = filepath.Join(f.fleetDir, ".cache-fluxview", "git-sources")
 
 	var runErr error
 	var stderr string
@@ -1258,8 +1258,8 @@ spec:
 		runErr = runValidate(context.Background(), &ValidateFlags{
 			Path:                  f.clusterDir,
 			disableDefaultSchemas: true,
-			GitSourceCacheDir:     filepath.Join(t.TempDir(), "git-sources"),
-			GitSourceCacheTTL:     time.Hour,
+			KsCache: kustomizeCacheOptions{gitSourceDir: filepath.Join(t.TempDir(), "git-sources"),
+				gitSourceTtl: time.Hour},
 		})
 	})
 	if runErr != nil {
@@ -1304,8 +1304,8 @@ spec:
 		runErr = runValidate(context.Background(), &ValidateFlags{
 			Path:                  f.clusterDir,
 			disableDefaultSchemas: true,
-			GitSourceCacheDir:     filepath.Join(t.TempDir(), "git-sources"),
-			GitSourceCacheTTL:     time.Hour,
+			KsCache: kustomizeCacheOptions{gitSourceDir: filepath.Join(t.TempDir(), "git-sources"),
+				gitSourceTtl: time.Hour},
 		})
 	})
 	if runErr != nil {
@@ -1363,8 +1363,8 @@ spec:
 		runErr = runValidate(context.Background(), &ValidateFlags{
 			Path:                  f.clusterDir,
 			disableDefaultSchemas: true,
-			GitSourceCacheDir:     filepath.Join(t.TempDir(), "git-sources"),
-			GitSourceCacheTTL:     time.Hour,
+			KsCache: kustomizeCacheOptions{gitSourceDir: filepath.Join(t.TempDir(), "git-sources"),
+				gitSourceTtl: time.Hour},
 		})
 	})
 	if runErr != nil {
@@ -1459,59 +1459,77 @@ func TestGitSourceAuthFlags_Wiring(t *testing.T) {
 // three commands, defaults to fetching enabled, picks up
 // FLUXVIEW_NO_GIT_SOURCE_FETCH, and an explicit flag beats the env.
 func TestNoGitSourceFetchFlag_Wiring(t *testing.T) {
-	newCmd := func(t *testing.T) (*cobra.Command, *bool) {
-		t.Helper()
-		var noFetch bool
-		cmd := &cobra.Command{
-			RunE: func(cmd *cobra.Command, args []string) error { return nil },
-		}
-		registerNoGitSourceFetchFlag(cmd, &noFetch)
-		return cmd, &noFetch
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{"registered on build, diff and validate", noFetchWiringRegisteredOnBuildDiffAndValidate},
+		{"default keeps fetching on", noFetchWiringDefaultKeepsFetchingOn},
+		{"flag default comes from the env", noFetchWiringFlagDefaultComesFromTheEnv},
+		{"explicit flag overrides the env", noFetchWiringExplicitFlagOverridesTheEnv},
+	} {
+		t.Run(tc.name, tc.run)
 	}
+}
 
-	t.Run("registered on build, diff and validate", func(t *testing.T) {
-		for name, cmd := range map[string]*cobra.Command{
-			"build": newBuildCmd(), "diff": newDiffCmd(), "validate": newValidateCmd(),
-		} {
-			if cmd.Flags().Lookup("no-git-source-fetch") == nil {
-				t.Errorf("%s must register --no-git-source-fetch", name)
-			}
+// registered on build, diff and validate
+func noFetchWiringRegisteredOnBuildDiffAndValidate(t *testing.T) {
+	for name, cmd := range map[string]*cobra.Command{
+		"build": newBuildCmd(), "diff": newDiffCmd(), "validate": newValidateCmd(),
+	} {
+		if cmd.Flags().Lookup("no-git-source-fetch") == nil {
+			t.Errorf("%s must register --no-git-source-fetch", name)
 		}
-	})
+	}
+}
 
-	t.Run("default keeps fetching on", func(t *testing.T) {
-		t.Setenv(gitsource.EnvNoFetch, "")
-		cmd, noFetch := newCmd(t)
-		if err := cmd.Execute(); err != nil {
-			t.Fatalf("execute: %v", err)
-		}
-		if *noFetch {
-			t.Error("fetching must be on by default")
-		}
-	})
+// noFetchWiringCmd is a throwaway command with only the
+// --no-git-source-fetch flag wired, for the wiring tests.
+func noFetchWiringCmd(t *testing.T) (*cobra.Command, *bool) {
+	t.Helper()
+	var noFetch bool
+	cmd := &cobra.Command{
+		RunE: func(cmd *cobra.Command, args []string) error { return nil },
+	}
+	registerNoGitSourceFetchFlag(cmd, &noFetch)
+	return cmd, &noFetch
+}
 
-	t.Run("flag default comes from the env", func(t *testing.T) {
-		t.Setenv(gitsource.EnvNoFetch, "1")
-		cmd, noFetch := newCmd(t)
-		if err := cmd.Execute(); err != nil {
-			t.Fatalf("execute: %v", err)
-		}
-		if !*noFetch {
-			t.Error("env must disable fetching by default")
-		}
-	})
+// default keeps fetching on
+func noFetchWiringDefaultKeepsFetchingOn(t *testing.T) {
+	t.Setenv(gitsource.EnvNoFetch, "")
+	cmd, noFetch := noFetchWiringCmd(t)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if *noFetch {
+		t.Error("fetching must be on by default")
+	}
+}
 
-	t.Run("explicit flag overrides the env", func(t *testing.T) {
-		t.Setenv(gitsource.EnvNoFetch, "1")
-		cmd, noFetch := newCmd(t)
-		cmd.SetArgs([]string{"--no-git-source-fetch=false"})
-		if err := cmd.Execute(); err != nil {
-			t.Fatalf("execute: %v", err)
-		}
-		if *noFetch {
-			t.Error("explicit --no-git-source-fetch=false must beat the env")
-		}
-	})
+// flag default comes from the env
+func noFetchWiringFlagDefaultComesFromTheEnv(t *testing.T) {
+	t.Setenv(gitsource.EnvNoFetch, "1")
+	cmd, noFetch := noFetchWiringCmd(t)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !*noFetch {
+		t.Error("env must disable fetching by default")
+	}
+}
+
+// explicit flag overrides the env
+func noFetchWiringExplicitFlagOverridesTheEnv(t *testing.T) {
+	t.Setenv(gitsource.EnvNoFetch, "1")
+	cmd, noFetch := noFetchWiringCmd(t)
+	cmd.SetArgs([]string{"--no-git-source-fetch=false"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if *noFetch {
+		t.Error("explicit --no-git-source-fetch=false must beat the env")
+	}
 }
 
 // TestRunValidate_ExternalSSHAcceptNewFlag chains the whole policy path:
@@ -1559,8 +1577,8 @@ spec:
 		runErr = runValidate(context.Background(), &ValidateFlags{
 			Path:                  f.clusterDir,
 			disableDefaultSchemas: true,
-			GitSourceCacheDir:     filepath.Join(t.TempDir(), "git-sources"),
-			GitSourceCacheTTL:     time.Hour,
+			KsCache: kustomizeCacheOptions{gitSourceDir: filepath.Join(t.TempDir(), "git-sources"),
+				gitSourceTtl: time.Hour},
 		})
 	})
 	if runErr != nil {

@@ -98,82 +98,105 @@ func (g *Operations) CloneToDir(ctx context.Context, revision string) (string, e
 		return "", fmt.Errorf("creating temp dir: %w", err)
 	}
 
-	// Write all files from the tree into the temp directory. Directory
-	// creation is memoized per directory; a first file in a directory pays
-	// one MkdirAll (idempotent for already-created parents), siblings hit
-	// the map — previously every file paid the syscall.
-	createdDirs := make(map[string]bool)
-	err = tree.Files().ForEach(func(f *object.File) error {
-		// Honor context cancellation mid-checkout (large repos can write many
-		// thousands of files).
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		filePath := filepath.Join(tmpDir, f.Name)
-		dir := filepath.Dir(filePath)
-		if !createdDirs[dir] {
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				return fmt.Errorf("creating directory %s: %w", dir, err)
-			}
-			createdDirs[dir] = true
-		}
-
-		// Handle symlinks: git stores the target path as file content.
-		if f.Mode == filemode.Symlink {
-			reader, err := f.Reader()
-			if err != nil {
-				return fmt.Errorf("opening symlink %s: %w", f.Name, err)
-			}
-			target, err := io.ReadAll(reader)
-			reader.Close()
-			if err != nil {
-				return fmt.Errorf("reading symlink %s: %w", f.Name, err)
-			}
-			linkTarget := strings.TrimSpace(string(target))
-
-			// Validate that the symlink stays within tmpDir to prevent
-			// reading arbitrary files (e.g. /etc/passwd) via malicious commits.
-			var resolved string
-			if filepath.IsAbs(linkTarget) {
-				resolved = linkTarget
-			} else {
-				resolved = filepath.Join(filepath.Dir(filePath), linkTarget)
-			}
-			absResolved, err := filepath.Abs(resolved)
-			if err != nil {
-				return fmt.Errorf("resolving symlink %s: %w", f.Name, err)
-			}
-			if !isWithinDir(absResolved, tmpDir) {
-				fmt.Fprintf(os.Stderr, "Warning: skipping symlink %s -> %s (target outside checkout)\n", f.Name, linkTarget)
-				return nil
-			}
-
-			return os.Symlink(linkTarget, filePath)
-		}
-
-		reader, err := f.Reader()
-		if err != nil {
-			return fmt.Errorf("opening file %s: %w", f.Name, err)
-		}
-
-		contents, err := io.ReadAll(reader)
-		reader.Close()
-		if err != nil {
-			return fmt.Errorf("reading file %s: %w", f.Name, err)
-		}
-
-		if err := os.WriteFile(filePath, contents, os.FileMode(f.Mode)); err != nil {
-			return fmt.Errorf("writing file %s: %w", f.Name, err)
-		}
-		return nil
-	})
-
-	if err != nil {
+	if err := checkoutTree(ctx, tree, tmpDir); err != nil {
 		os.RemoveAll(tmpDir)
 		return "", fmt.Errorf("checking out files at %s: %w", revision, err)
 	}
 
 	return tmpDir, nil
+}
+
+// checkoutTree writes all files from the tree into dir. Directory
+// creation is memoized per directory; a first file in a directory pays
+// one MkdirAll (idempotent for already-created parents), siblings hit
+// the map — previously every file paid the syscall. Context cancellation
+// is honored mid-checkout (large repos can write many thousands of
+// files).
+func checkoutTree(ctx context.Context, tree *object.Tree, dir string) error {
+	createdDirs := make(map[string]bool)
+	return tree.Files().ForEach(func(f *object.File) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		filePath := filepath.Join(dir, f.Name)
+		if err := ensureDir(createdDirs, filepath.Dir(filePath)); err != nil {
+			return err
+		}
+		if f.Mode == filemode.Symlink {
+			return checkoutSymlink(f, filePath, dir)
+		}
+		return checkoutRegularFile(f, filePath)
+	})
+}
+
+// ensureDir creates dir unless an earlier file already did (memoized per
+// checkout; MkdirAll is idempotent for already-created parents).
+func ensureDir(created map[string]bool, dir string) error {
+	if created[dir] {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("creating directory %s: %w", dir, err)
+	}
+	created[dir] = true
+	return nil
+}
+
+// checkoutSymlink materializes one symlink: git stores the target path as
+// file content. The target must stay within root — a symlink resolving
+// outside the checkout would let a malicious commit read arbitrary files
+// (e.g. /etc/passwd); offenders warn and are skipped.
+func checkoutSymlink(f *object.File, filePath, root string) error {
+	target, err := fileContents(f, "symlink")
+	if err != nil {
+		return err
+	}
+	linkTarget := strings.TrimSpace(target)
+
+	resolved := linkTarget
+	if !filepath.IsAbs(linkTarget) {
+		resolved = filepath.Join(filepath.Dir(filePath), linkTarget)
+	}
+	absResolved, err := filepath.Abs(resolved)
+	if err != nil {
+		return fmt.Errorf("resolving symlink %s: %w", f.Name, err)
+	}
+	if !isWithinDir(absResolved, root) {
+		fmt.Fprintf(os.Stderr, "Warning: skipping symlink %s -> %s (target outside checkout)\n", f.Name, linkTarget)
+		return nil
+	}
+
+	return os.Symlink(linkTarget, filePath)
+}
+
+// checkoutRegularFile writes one regular file's blob content with its
+// git mode.
+func checkoutRegularFile(f *object.File, filePath string) error {
+	contents, err := fileContents(f, "file")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filePath, []byte(contents), os.FileMode(f.Mode)); err != nil {
+		return fmt.Errorf("writing file %s: %w", f.Name, err)
+	}
+	return nil
+}
+
+// fileContents reads one tree file's blob; what names the entity for the
+// error messages ("symlink"/"file"), keeping the pre-refactor per-call
+// wordings: "opening <what> %s" for an open failure, "reading <what> %s"
+// for a read failure.
+func fileContents(f *object.File, what string) (string, error) {
+	reader, err := f.Reader()
+	if err != nil {
+		return "", fmt.Errorf("opening %s %s: %w", what, f.Name, err)
+	}
+	defer reader.Close()
+	contents, err := io.ReadAll(reader)
+	if err != nil {
+		return "", fmt.Errorf("reading %s %s: %w", what, f.Name, err)
+	}
+	return string(contents), nil
 }
 
 // RemoveWorktree removes a previously created worktree/checkout directory.

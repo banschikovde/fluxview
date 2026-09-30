@@ -413,44 +413,67 @@ func (c *remoteCache) warnf(key, format string, args ...any) {
 func scanRemoteRefs(rootDir string) (fileRefs, dirRefs map[string]bool) {
 	fileRefs = make(map[string]bool)
 	dirRefs = make(map[string]bool)
-	walkRoot := filepath.Clean(rootDir)
-	_ = filepath.WalkDir(rootDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil // unreadable entry: skip, keep walking
-		}
-		if d.IsDir() {
-			if d.Name() == ".git" || (filepath.Clean(path) != walkRoot && git.IsRepoRoot(path)) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !isKustomizationFileName(d.Name()) {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		var kust struct {
-			Resources  []string `yaml:"resources"`
-			Components []string `yaml:"components"`
-		}
-		if err := yaml.Unmarshal(data, &kust); err != nil {
-			return nil // kustomize will report the parse error itself
-		}
-		for _, r := range kust.Resources {
-			if isHTTPRef(r) {
-				fileRefs[r] = true
-			}
-		}
-		for _, comp := range kust.Components {
-			if isHTTPRef(comp) {
-				dirRefs[comp] = true
-			}
+	w := &remoteRefWalker{fileRefs: fileRefs, dirRefs: dirRefs, walkRoot: filepath.Clean(rootDir)}
+	_ = filepath.WalkDir(rootDir, w.visit)
+	return fileRefs, dirRefs
+}
+
+// remoteRefWalker accumulates remote references from every kustomization
+// file one walk finds: http(s) entries in resources are file-fetchable,
+// entries in components are directory bases only kustomize itself (via
+// git) can resolve.
+type remoteRefWalker struct {
+	walkRoot string
+	fileRefs map[string]bool
+	dirRefs  map[string]bool
+}
+
+// visit is the WalkDir callback: unreadable entries skip, .git and nested
+// repository roots prune (external source clones cached inside the
+// working tree are foreign content — their remote refs are not ours to
+// prefetch), kustomization files contribute their remote references.
+func (w *remoteRefWalker) visit(path string, d os.DirEntry, err error) error {
+	if err != nil {
+		return nil // unreadable entry: skip, keep walking
+	}
+	if d.IsDir() {
+		if d.Name() == ".git" || (filepath.Clean(path) != w.walkRoot && git.IsRepoRoot(path)) {
+			return filepath.SkipDir
 		}
 		return nil
-	})
-	return fileRefs, dirRefs
+	}
+	if !isKustomizationFileName(d.Name()) {
+		return nil
+	}
+	w.collect(path)
+	return nil
+}
+
+// collect reads one kustomization file and files its remote resources and
+// components into the walker's sets. Parse errors skip: kustomize will
+// report them itself.
+func (w *remoteRefWalker) collect(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var kust struct {
+		Resources  []string `yaml:"resources"`
+		Components []string `yaml:"components"`
+	}
+	if err := yaml.Unmarshal(data, &kust); err != nil {
+		return // kustomize will report the parse error itself
+	}
+	for _, r := range kust.Resources {
+		if isHTTPRef(r) {
+			w.fileRefs[r] = true
+		}
+	}
+	for _, comp := range kust.Components {
+		if isHTTPRef(comp) {
+			w.dirRefs[comp] = true
+		}
+	}
 }
 
 // isHTTPRef reports whether a kustomization reference is a remote http(s) URL.
@@ -503,24 +526,26 @@ func isPinnedURL(rawURL string) bool {
 // chars containing at least one a-f letter — an all-digit string is never
 // treated as a SHA for the same reason.
 func isImmutableRef(ref string) bool {
-	if ref == "" {
+	return isCommitSHA(ref) || isVersionTag(ref)
+}
+
+// isCommitSHA matches a git commit SHA: 7–40 hex chars containing at
+// least one a-f letter — an all-digit string is never treated as a SHA
+// (just as likely a branch or date name).
+func isCommitSHA(ref string) bool {
+	letters := strings.ContainsFunc(ref, func(r rune) bool { return r >= 'a' && r <= 'f' })
+	if !letters || len(ref) < 7 || len(ref) > 40 {
 		return false
 	}
-	// Commit SHA (7–40 hex chars with at least one letter).
-	letters := strings.ContainsFunc(ref, func(r rune) bool { return r >= 'a' && r <= 'f' })
-	if letters && len(ref) >= 7 && len(ref) <= 40 {
-		allHex := true
-		for _, r := range ref {
-			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
-				allHex = false
-				break
-			}
-		}
-		if allHex {
-			return true
-		}
-	}
-	// Version tag with optional leading v: at least x.y.
+	return strings.IndexFunc(ref, func(r rune) bool {
+		return !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f'))
+	}) < 0
+}
+
+// isVersionTag matches a version tag with optional leading v and -rc/+build
+// suffix: at least two dotted numeric segments (x.y, x.y.z). Single numbers
+// ("20250101", "v2") stay floating for the same reason as above.
+func isVersionTag(ref string) bool {
 	s := strings.TrimPrefix(ref, "v")
 	digitsDots := s
 	if i := strings.IndexAny(s, "-+"); i >= 0 {
@@ -531,16 +556,19 @@ func isImmutableRef(ref string) bool {
 		return false
 	}
 	for _, seg := range segments {
-		if seg == "" {
+		if !isDigits(seg) {
 			return false
-		}
-		for _, r := range seg {
-			if r < '0' || r > '9' {
-				return false
-			}
 		}
 	}
 	return true
+}
+
+// isDigits reports whether s is a non-empty run of ASCII digits.
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	return strings.IndexFunc(s, func(r rune) bool { return r < '0' || r > '9' }) < 0
 }
 
 // sortedKeys returns map keys in stable order for deterministic warnings and

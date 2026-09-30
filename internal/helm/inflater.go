@@ -117,6 +117,10 @@ func WithDownloadTimeout(d time.Duration) InflaterOption {
 	return func(in *Inflater) { in.downloadTimeout = d }
 }
 
+// ociPrefix marks an OCI chart reference; OCI differs from the classic
+// repo/index flow enough that every resolver entry point branches on it.
+const ociPrefix = "oci://"
+
 // DefaultCacheDir returns the Helm cache directory: $FLUXVIEW_HELM_CACHE_DIR,
 // else <cachedir.DefaultDir base>/helm. The disable word "disabled" turns the
 // cache off (checked in NewInflater).
@@ -307,47 +311,73 @@ func (in *Inflater) registerRepo(repoURL, username, password string) (string, er
 	// parseable — LocateChart would parse it right after anyway, so validating
 	// here costs nothing extra and turns corruption into a re-download instead
 	// of a cryptic SDK error.
-	fresh := false
-	if info, statErr := os.Stat(indexPath); statErr == nil && in.indexTTL > 0 && time.Since(info.ModTime()) < in.indexTTL {
-		if _, lErr := repo.LoadIndexFile(indexPath); lErr == nil {
-			fresh = true
-		}
-	}
-
-	if !fresh {
-		// Credentials are passed to the index download via the in-memory
-		// entry only; repositories.yaml persists the URL without them.
-		dlEntry := &repo.Entry{Name: name, URL: repoURL, Username: username, Password: password}
-		chartRepo, cErr := repo.NewChartRepository(dlEntry, in.getters)
-		if cErr != nil {
-			return "", fmt.Errorf("creating chart repository for %s: %w", repoURL, cErr)
-		}
-		chartRepo.CachePath = in.settings.RepositoryCache
-		if _, dErr := chartRepo.DownloadIndexFile(); dErr != nil {
-			if _, staleErr := os.Stat(indexPath); staleErr == nil {
-				fmt.Fprintf(os.Stderr, "Warning: could not refresh index for %s (%v), using cached copy\n", repoURL, dErr)
-			} else {
-				return "", fmt.Errorf("downloading index for %s: %w", repoURL, dErr)
-			}
+	if !in.cachedIndexFresh(indexPath) {
+		if err := in.refreshRepoIndex(repoURL, name, username, password, indexPath); err != nil {
+			return "", err
 		}
 	}
 
 	// Persist the entry (URL only) on the success path only, so a failed
 	// registration leaves no trace in the cache.
-	entry := &repo.Entry{Name: name, URL: repoURL}
-	if existing := repoFile.Get(name); existing == nil || existing.URL != entry.URL {
-		repoFile.Update(entry)
-		data, mErr := k8syaml.Marshal(repoFile)
-		if mErr != nil {
-			return "", fmt.Errorf("marshaling repositories.yaml: %w", mErr)
-		}
-		if wErr := atomicWriteFile(in.settings.RepositoryConfig, data, 0644); wErr != nil {
-			return "", fmt.Errorf("writing repositories.yaml: %w", wErr)
-		}
+	if err := persistRepoEntry(repoFile, in.settings.RepositoryConfig, name, repoURL); err != nil {
+		return "", err
 	}
 
 	in.registered[repoURL] = name
 	return name, nil
+}
+
+// cachedIndexFresh reports whether the cached repo index counts as fresh:
+// present, within the TTL and still parseable — LocateChart would parse it
+// right after anyway, so validating here costs nothing extra and turns
+// corruption into a re-download instead of a cryptic SDK error.
+func (in *Inflater) cachedIndexFresh(indexPath string) bool {
+	info, statErr := os.Stat(indexPath)
+	if statErr != nil || in.indexTTL <= 0 || time.Since(info.ModTime()) >= in.indexTTL {
+		return false
+	}
+	_, lErr := repo.LoadIndexFile(indexPath)
+	return lErr == nil
+}
+
+// refreshRepoIndex downloads the repository index. A failed refresh with a
+// stale cached copy degrades to that copy with a warning — a local diff
+// tool should keep working offline rather than fail on a cache it can fill
+// from disk. Credentials travel via the in-memory entry only;
+// repositories.yaml persists the URL without them.
+func (in *Inflater) refreshRepoIndex(repoURL, name, username, password, indexPath string) error {
+	dlEntry := &repo.Entry{Name: name, URL: repoURL, Username: username, Password: password}
+	chartRepo, cErr := repo.NewChartRepository(dlEntry, in.getters)
+	if cErr != nil {
+		return fmt.Errorf("creating chart repository for %s: %w", repoURL, cErr)
+	}
+	chartRepo.CachePath = in.settings.RepositoryCache
+	if _, dErr := chartRepo.DownloadIndexFile(); dErr != nil {
+		if _, staleErr := os.Stat(indexPath); staleErr == nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not refresh index for %s (%v), using cached copy\n", repoURL, dErr)
+			return nil
+		}
+		return fmt.Errorf("downloading index for %s: %w", repoURL, dErr)
+	}
+	return nil
+}
+
+// persistRepoEntry records the repo (URL only) in repositories.yaml when
+// it is not already there.
+func persistRepoEntry(repoFile *repo.File, configPath, name, repoURL string) error {
+	entry := &repo.Entry{Name: name, URL: repoURL}
+	if existing := repoFile.Get(name); existing != nil && existing.URL == entry.URL {
+		return nil
+	}
+	repoFile.Update(entry)
+	data, mErr := k8syaml.Marshal(repoFile)
+	if mErr != nil {
+		return fmt.Errorf("marshaling repositories.yaml: %w", mErr)
+	}
+	if wErr := atomicWriteFile(configPath, data, 0644); wErr != nil {
+		return fmt.Errorf("writing repositories.yaml: %w", wErr)
+	}
+	return nil
 }
 
 // atomicWriteFile writes data to path via a temp file + rename so concurrent
@@ -389,7 +419,7 @@ type ociRef struct {
 // the helm SDK's own newReference (same last-colon tag heuristic); the
 // registry client validates the result anyway.
 func parseOCIRef(ref string) ociRef {
-	r := strings.TrimPrefix(ref, "oci://")
+	r := strings.TrimPrefix(ref, ociPrefix)
 	var out ociRef
 	if i := strings.LastIndex(r, "@"); i >= 0 {
 		out.digest = r[i+1:]
@@ -594,39 +624,52 @@ func (in *Inflater) resolveOCIChart(chartRef, version, username, password string
 
 	digest := r.digest
 	if digest == "" {
-		// A floating version (empty or a semver constraint) is resolved to a
-		// concrete tag first — mirroring the SDK's ValidateReference, which
-		// this resolver replaced.
-		if _, serr := semver.NewVersion(tag); serr != nil {
-			selected, err := in.selectOCITag(r.base, tag, username, password, plainHTTP)
-			if err != nil {
-				return "", err
-			}
-			tag = selected
-		}
-		key := r.base + ":" + tag
-		if d, ok := in.cachedOCIDigest(key); ok {
-			digest = d
-		} else {
-			client, err := in.ociClientFor(username, password, plainHTTP)
-			if err != nil {
-				return "", err
-			}
-			desc, rerr := client.Resolve(key)
-			if rerr != nil {
-				if d := in.staleOCIDigest(key); d != "" {
-					fmt.Fprintf(os.Stderr, "Warning: could not refresh digest for %s (%v), using cached\n", key, rerr)
-					digest = d
-				} else {
-					return "", fmt.Errorf("resolving %s: %w", key, rerr)
-				}
-			} else {
-				digest = desc.Digest.String()
-				in.storeOCIDigest(key, digest)
-			}
+		var dErr error
+		digest, dErr = in.resolveOCIDigest(r, tag, username, password, plainHTTP)
+		if dErr != nil {
+			return "", dErr
 		}
 	}
+	return in.pullOCIDigest(r, digest, username, password, plainHTTP)
+}
 
+// resolveOCIDigest resolves the chart's content digest: a floating version
+// (empty or a semver constraint) is resolved to a concrete tag first —
+// mirroring the SDK's ValidateReference this resolver replaced — then the
+// tag's digest comes from the digest cache, the registry, or a stale
+// cached copy with a warning (a local diff tool keeps working offline).
+func (in *Inflater) resolveOCIDigest(r ociRef, tag, username, password string, plainHTTP bool) (string, error) {
+	if _, serr := semver.NewVersion(tag); serr != nil {
+		selected, err := in.selectOCITag(r.base, tag, username, password, plainHTTP)
+		if err != nil {
+			return "", err
+		}
+		tag = selected
+	}
+	key := r.base + ":" + tag
+	if d, ok := in.cachedOCIDigest(key); ok {
+		return d, nil
+	}
+	client, err := in.ociClientFor(username, password, plainHTTP)
+	if err != nil {
+		return "", err
+	}
+	desc, rerr := client.Resolve(key)
+	if rerr != nil {
+		if d := in.staleOCIDigest(key); d != "" {
+			fmt.Fprintf(os.Stderr, "Warning: could not refresh digest for %s (%v), using cached\n", key, rerr)
+			return d, nil
+		}
+		return "", fmt.Errorf("resolving %s: %w", key, rerr)
+	}
+	digest := desc.Digest.String()
+	in.storeOCIDigest(key, digest)
+	return digest, nil
+}
+
+// pullOCIDigest materializes the chart at the digest into the content
+// cache, reusing a cached copy when present.
+func (in *Inflater) pullOCIDigest(r ociRef, digest, username, password string, plainHTTP bool) (string, error) {
 	key, err := digestToKey(digest)
 	if err != nil {
 		return "", err
@@ -644,7 +687,7 @@ func (in *Inflater) resolveOCIChart(chartRef, version, username, password string
 	if gerr != nil {
 		return "", fmt.Errorf("creating oci getter: %w", gerr)
 	}
-	digestRef := "oci://" + r.base + "@" + digest
+	digestRef := ociPrefix + r.base + "@" + digest
 	data, gerr := g.Get(digestRef, getter.WithRegistryClient(client), getter.WithPlainHTTP(plainHTTP))
 	if gerr != nil {
 		return "", fmt.Errorf("downloading chart %s: %w", digestRef, gerr)
@@ -700,7 +743,7 @@ type resolvedChart struct {
 // setting RepoURL for OCI causes index.yaml fetch failure.
 func (in *Inflater) resolveChart(ctx context.Context, chartName, version, repoURL, username, password string) (resolvedChart, error) {
 	switch {
-	case strings.HasPrefix(chartName, "oci://"):
+	case strings.HasPrefix(chartName, ociPrefix):
 		// OCIRepository pattern: chartName is the full OCI reference
 		// (URL + optional @digest). Use directly, don't append anything.
 		ref := chartName
@@ -709,7 +752,7 @@ func (in *Inflater) resolveChart(ctx context.Context, chartName, version, repoUR
 			return resolvedChart{}, fmt.Errorf("locating chart %s: %w", ref, err)
 		}
 		return resolvedChart{path: chartPath, ref: ref, oci: true}, nil
-	case strings.HasPrefix(repoURL, "oci://"):
+	case strings.HasPrefix(repoURL, ociPrefix):
 		// HelmRepository type=oci: append chart name to repo URL.
 		ref := strings.TrimSuffix(repoURL, "/") + "/" + chartName
 		chartPath, err := resolveOCIChartCancelable(ctx, in, ref, version, username, password)
@@ -800,10 +843,18 @@ func (in *Inflater) ChartMeta(ctx context.Context, hr fluxtypes.HelmRelease, rep
 	}, nil
 }
 
+// ChartCredentials authenticates chart repository access: HTTP basic auth
+// for classic repos, registry login for OCI — resolved from a Secret or the
+// environment by the caller. The zero value means anonymous access.
+type ChartCredentials struct {
+	Username string
+	Password string
+}
+
 // InflateHelmRelease inflates a Flux HelmRelease resource using the Helm Go SDK.
 // It locates/downloads the chart from the given repo URL and renders templates
 // equivalent to: helm template <name> <chart> --repo <url> --version <ver> --namespace <ns> --include-crds
-func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRelease, repoURL string, username, password string, configMaps []fluxtypes.ConfigMap, secrets []fluxtypes.Secret, repoRoot string) ([]byte, error) {
+func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRelease, repoURL string, creds ChartCredentials, configMaps []fluxtypes.ConfigMap, secrets []fluxtypes.Secret, repoRoot string) ([]byte, error) {
 	chartName := hr.Spec.Chart.Spec.Chart
 
 	// Set up the action configuration for template rendering (no k8s cluster needed).
@@ -835,7 +886,7 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 	// inside resolveChart stop waiting and return ctx.Err(), letting the
 	// caller exit while the download finishes in a goroutine (the process
 	// terminates on Ctrl-C, so the brief lingering download is acceptable).
-	resolved, err := in.resolveChart(ctx, chartName, hr.Spec.Chart.Spec.Version, repoURL, username, password)
+	resolved, err := in.resolveChart(ctx, chartName, hr.Spec.Chart.Spec.Version, repoURL, creds.Username, creds.Password)
 	if err != nil {
 		return nil, err
 	}
@@ -844,7 +895,7 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 	// A chart located over OCI may pull dependencies from the registry
 	// during rendering; the install action needs the shared client for that.
 	if resolved.oci {
-		registryClient, cerr := in.ociClientFor(username, password, ociPlainHTTP(chartRef))
+		registryClient, cerr := in.ociClientFor(creds.Username, creds.Password, ociPlainHTTP(chartRef))
 		if cerr != nil {
 			return nil, cerr
 		}
@@ -961,10 +1012,10 @@ func FindHelmRepoURL(repos map[string]fluxtypes.HelmRepository, name, namespace 
 		return "", "", "", fmt.Errorf("HelmRepository %s/%s not found", namespace, name)
 	}
 	url := repo.Spec.URL
-	if repo.Spec.Type == "oci" && !strings.HasPrefix(url, "oci://") {
+	if repo.Spec.Type == "oci" && !strings.HasPrefix(url, ociPrefix) {
 		url = strings.TrimPrefix(url, "https://")
 		url = strings.TrimPrefix(url, "http://")
-		url = "oci://" + url
+		url = ociPrefix + url
 	}
 
 	username := ""
@@ -996,47 +1047,54 @@ func ConvertJSONInYAMLToYAML(manifest []byte) ([]byte, error) {
 		return nil, nil
 	}
 
-	rawDocs := fluxtypes.SplitYAMLText(manifest)
-
 	var docs []string
-	for _, rawDoc := range rawDocs {
-		var node yaml.Node
-		if err := yaml.Unmarshal([]byte(rawDoc), &node); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: skipping unparseable YAML document: %v\n", err)
-			continue
+	for _, rawDoc := range fluxtypes.SplitYAMLText(manifest) {
+		if converted, ok := convertDoc(rawDoc); ok {
+			docs = append(docs, converted)
 		}
-		// Parity with the old `doc == nil` skip: a bare null document
-		// carries nothing to keep, and a comment-only document parses to
-		// an empty node tree — the zero Node has no root at all.
-		if root := documentRoot(&node); root == nil || root.Tag == "!!null" {
-			continue
-		}
-
-		if !yamlutil.NodeNeedsConversion(&node) {
-			docs = append(docs, rawDoc)
-			continue
-		}
-
-		var doc interface{}
-		if err := node.Decode(&doc); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: skipping unparseable YAML document: %v\n", err)
-			continue
-		}
-		if doc == nil {
-			continue
-		}
-		doc = RemoveNilValues(doc)
-		marshaled, err := yaml.Marshal(doc)
-		if err != nil {
-			continue
-		}
-		docs = append(docs, strings.TrimRight(string(marshaled), "\n"))
 	}
 
 	if len(docs) == 0 {
 		return nil, nil
 	}
 	return []byte(strings.Join(docs, "\n---\n")), nil
+}
+
+// convertDoc runs one document of ConvertJSONInYAMLToYAML: clean documents
+// (no JSON flow style, no nil values) pass through byte-identical; the
+// rest are re-marshalled with nils dropped. ok=false: the document is
+// skipped (unparseable, bare null or comment-only).
+func convertDoc(rawDoc string) (string, bool) {
+	var node yaml.Node
+	if err := yaml.Unmarshal([]byte(rawDoc), &node); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: skipping unparseable YAML document: %v\n", err)
+		return "", false
+	}
+	// Parity with the old `doc == nil` skip: a bare null document
+	// carries nothing to keep, and a comment-only document parses to
+	// an empty node tree — the zero Node has no root at all.
+	if root := documentRoot(&node); root == nil || root.Tag == "!!null" {
+		return "", false
+	}
+
+	if !yamlutil.NodeNeedsConversion(&node) {
+		return rawDoc, true
+	}
+
+	var doc interface{}
+	if err := node.Decode(&doc); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: skipping unparseable YAML document: %v\n", err)
+		return "", false
+	}
+	if doc == nil {
+		return "", false
+	}
+	doc = RemoveNilValues(doc)
+	marshaled, err := yaml.Marshal(doc)
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimRight(string(marshaled), "\n"), true
 }
 
 // documentRoot returns the document's root node, or nil for an empty tree.

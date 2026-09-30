@@ -40,13 +40,10 @@ type ValidateFlags struct {
 	// SchemaDownloadTimeout bounds one schema download attempt; 0 means
 	// no per-request limit (the run stays interruptible via Ctrl-C).
 	SchemaDownloadTimeout time.Duration
-	RemoteCacheDir        string
-	RemoteCacheTTL        time.Duration
-	RemoteCacheTimeout    time.Duration
-	BuildCacheDir         string
-	BuildCacheTTL         time.Duration
-	GitSourceCacheDir     string
-	GitSourceCacheTTL     time.Duration
+	// KsCache groups the kustomize cache flags (remote resources, build
+	// outputs, external git source clones) — populated by
+	// registerKustomizeCacheFlags.
+	KsCache kustomizeCacheOptions
 	// SchemaCacheDir and CRDSchemaCacheDir override the validate-side
 	// schema caches (downloaded schemas, converted CRDs); the disable spell
 	// turns each into a per-run temp cache (see runValidate).
@@ -149,7 +146,7 @@ Examples:
 	cmd.Flags().BoolVar(&flags.Strict, "strict", false, "Reject duplicated YAML keys; strict schemas for the default registry also reject unknown fields")
 	cmd.Flags().StringSliceVar(&flags.SkipKinds, "skip-kind", nil, "Kinds to skip (repeatable or comma-separated): Kind (e.g. Deployment, any apiVersion) or apiVersion/Kind (e.g. apps/v1/Deployment)")
 	cmd.Flags().StringVar(&flags.Output, "output", "text", "Output format: text, json or junit (machine formats go to stdout)")
-	registerKustomizeCacheFlags(cmd, &flags.RemoteCacheDir, &flags.RemoteCacheTTL, &flags.RemoteCacheTimeout, &flags.BuildCacheDir, &flags.BuildCacheTTL, &flags.GitSourceCacheDir, &flags.GitSourceCacheTTL)
+	registerKustomizeCacheFlags(cmd, &flags.KsCache)
 	registerNoGitSourceFetchFlag(cmd, &flags.NoGitSourceFetch)
 	flags.SchemaCacheDir = validate.DefaultSchemaCacheDir() // pre-seed: pflag.Var does not set defaults
 	cmd.Flags().Var(cachedir.NewFlag(&flags.SchemaCacheDir), "schema-cache-dir",
@@ -163,49 +160,13 @@ Examples:
 }
 
 func runValidate(ctx context.Context, flags *ValidateFlags) error {
-	switch flags.Output {
-	case "", "text", "json", "junit":
-	default:
-		return NewExitError(fmt.Errorf("unknown --output format %q (use text, json or junit)", flags.Output), ExitCodeError)
+	if err := checkValidateFlags(flags); err != nil {
+		return err
 	}
 
-	// Reject a malformed version before the build: a short form like "1.36"
-	// would 404 every default-registry schema and silently skip all native
-	// kinds, looking like a green run.
-	if err := validate.ValidateKubernetesVersion(flags.KubernetesVersion); err != nil {
-		return NewExitError(err, ExitCodeError)
-	}
-
-	if flags.SchemaDownloadTimeout < 0 {
-		return NewExitError(fmt.Errorf("invalid --schema-download-timeout %s: must be 0 (no limit) or a positive duration", flags.SchemaDownloadTimeout), ExitCodeError)
-	}
-
-	clusterPath := flags.Path
-	if clusterPath == "" {
-		clusterPath = "."
-	}
-
-	absClusterPath, err := filepath.Abs(clusterPath)
+	absClusterPath, repoRoot, err := resolveValidatePaths(flags)
 	if err != nil {
-		return NewExitError(fmt.Errorf("resolving path %s: %w", clusterPath, err), ExitCodeError)
-	}
-
-	if _, err := os.Stat(absClusterPath); os.IsNotExist(err) {
-		return NewExitError(fmt.Errorf("path %s does not exist", clusterPath), ExitCodeError)
-	}
-
-	// Check that the path contains Kustomization files directly (not just in subdirectories)
-	hasDirectKS, err := hasDirectKustomizations(absClusterPath)
-	if err != nil {
-		return NewExitError(fmt.Errorf("checking for Kustomization files: %w", err), ExitCodeError)
-	}
-	if !hasDirectKS {
-		return NewExitError(fmt.Errorf("no Kustomization files found in %s", clusterPath), ExitCodeError)
-	}
-
-	repoRoot, err := git.FindRepoRoot(absClusterPath)
-	if err != nil {
-		return NewExitError(fmt.Errorf("finding git repo root: %w", err), ExitCodeError)
+		return err
 	}
 
 	// Resolve the schema directory.
@@ -216,107 +177,33 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 
 	// Schema caches: the disable word turns each into a per-run temp cache.
 	// Both cleanups must run after validation (kubeconform reads schemas
-	// lazily) — plain defers at this function level are exactly that. One
-	// resolution pattern for both caches: validate.CacheDirOrTemp.
-	schemaCacheDir, cleanupSchemas, err := validate.CacheDirOrTemp(flags.schemaCacheDir(), "fluxview-schemas-")
+	// lazily) — plain defers at this function level are exactly that.
+	schemaCacheDir, crdCacheRoot, cleanupCaches, err := resolveValidateCaches(flags)
 	if err != nil {
-		return NewExitError(err, ExitCodeError)
+		return err
 	}
-	defer cleanupSchemas()
-	crdCacheRoot, cleanupCRDCache, err := validate.CacheDirOrTemp(flags.crdSchemaCacheDir(), "fluxview-crd-schemas-")
-	if err != nil {
-		return NewExitError(err, ExitCodeError)
-	}
-	defer cleanupCRDCache()
+	defer cleanupCaches()
 
 	// Announce the validation context before the (possibly slow) build, so
 	// it is clear what resources will be validated against while it runs.
-	if planned := plannedSchemaDisplay(flags, schemaDir); planned != "" {
-		if flags.disableDefaultSchemas {
-			fmt.Fprintf(os.Stderr, "Validating against %s\n", planned)
-		} else {
-			fmt.Fprintf(os.Stderr, "Validating against %s (Kubernetes %s)\n",
-				planned, validate.NormalizeKubernetesVersion(flags.KubernetesVersion))
-		}
-	}
+	announceValidationContext(flags, schemaDir)
 
-	scans := newScanCache()
-	parser := scans.parserFor(absClusterPath)
-	kustomizations, err := parser.ParseKustomizations(ctx)
+	output, buildState, err := buildValidationOutput(ctx, flags, absClusterPath, repoRoot)
 	if err != nil {
-		return NewExitError(fmt.Errorf("parsing Kustomization resources: %w", err), ExitCodeError)
+		return err
 	}
-
-	ksCache := kustomizeCacheOptions{
-		remoteDir:     flags.RemoteCacheDir,
-		remoteTtl:     flags.RemoteCacheTTL,
-		remoteTimeout: flags.RemoteCacheTimeout,
-		buildCacheDir: flags.BuildCacheDir,
-		buildCacheTTL: flags.BuildCacheTTL,
-		gitSourceDir:  flags.GitSourceCacheDir,
-		gitSourceTtl:  flags.GitSourceCacheTTL,
-	}
-	builder := kustomize.NewBuilder(repoRoot, ksCache.builderOptions()...)
-	buildCache := make(buildCache)
-	var report buildReport
-	configMaps := resolveConfigMaps(ctx, scans, absClusterPath, builder, buildCache)
-	secrets := resolveSecrets(ctx, scans, absClusterPath, builder, buildCache)
-
-	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache, flags.NoGitSourceFetch)
-	defer gitEnv.Close()
-	output, err := buildKSContent(ctx, scans, builder, kustomizations, repoRoot, absClusterPath, configMaps, secrets, false, buildCache, &report, gitEnv)
-	if err != nil {
-		return NewExitError(err, ExitCodeError)
-	}
+	defer buildState.close()
 
 	// A validation gate must not pass on a partial build: kustomize build
-	// failures (e.g. malformed YAML) are warn-and-continue for build and
-	// diff, but validating only the surviving subset would report success
-	// while resources are silently missing.
-	if failed := buildCache.failedDirs(); len(failed) > 0 {
-		return NewExitError(fmt.Errorf(
-			"kustomize build failed for %d path(s), cannot validate: %s",
-			len(failed), strings.Join(failed, ", ")), ExitCodeError)
+	// failures, KS paths missing from the repository, or unfetchable
+	// external sources all leave resources silently absent from the
+	// checked set. The first two fail the run; unfetchable external
+	// content is best-effort (warn) — failing would abort every
+	// --no-git-source-fetch run outright.
+	if err := gatePartialBuild(buildState); err != nil {
+		return err
 	}
-
-	// Same for Flux Kustomizations pointing outside the repository (or at
-	// a nonexistent path): their resources never reached the checked set.
-	if len(report.missingPaths) > 0 {
-		parts := make([]string, len(report.missingPaths))
-		for i, m := range report.missingPaths {
-			parts[i] = m.ks + " (" + m.path + ")"
-		}
-		return NewExitError(fmt.Errorf(
-			"%d Kustomization(s) point to a path missing from the repository, cannot validate: %s",
-			len(parts), strings.Join(parts, ", ")), ExitCodeError)
-	}
-
-	// External GitRepository sources that could not be fetched (an
-	// unreachable upstream or the --no-git-source-fetch kill switch) warn
-	// and leave the gate running: external content is best-effort here —
-	// failing would abort every --no-git-source-fetch run outright. The
-	// unchecked Kustomizations are named, grouped by cause.
-	if len(report.fetchErrors) > 0 {
-		// Group by cause (source + error): a single global cause — e.g. the
-		// --no-git-source-fetch kill switch — is then stated once, with all
-		// its Kustomizations listed together, instead of once per KS.
-		var order []string
-		byCause := make(map[string][]string)
-		for _, fe := range report.fetchErrors {
-			cause := fe.source + ": " + fe.err
-			if _, seen := byCause[cause]; !seen {
-				order = append(order, cause)
-			}
-			byCause[cause] = append(byCause[cause], fe.ks)
-		}
-		parts := make([]string, 0, len(order))
-		for _, cause := range order {
-			parts = append(parts, strings.Join(byCause[cause], ", ")+" ("+cause+")")
-		}
-		fmt.Fprintf(os.Stderr,
-			"Warning: %d Kustomization(s) left unchecked: %s\n",
-			len(report.fetchErrors), strings.Join(parts, ", "))
-	}
+	warnUncheckedKustomizations(buildState.report)
 
 	if output == nil {
 		fmt.Fprintln(os.Stderr, "No resources to validate.")
@@ -328,15 +215,12 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 		return err
 	}
 
-	// CRDs are schema definitions, not resources to validate — drop them.
+	// CRDs are schema definitions, not resources to validate — drop them,
+	// then apply the namespace filter (an empty result is a normal exit).
 	output = filterCRDDocs(output)
-
-	if flags.Namespace != "" {
-		output = filterByNamespace(output, flags.Namespace)
-		if len(output) == 0 {
-			fmt.Fprintf(os.Stderr, "No resources found in namespace %q\n", flags.Namespace)
-			return nil
-		}
+	output, done := filterValidationOutput(flags, output)
+	if done {
+		return nil
 	}
 
 	locations, coverage, err := composeSchemaLocations(flags, schemaDir, schemaCacheDir, crdCacheRoot)
@@ -348,49 +232,8 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 	// hung registry would hang validation forever. Instead, prefetch the
 	// schemas it would request under a cancellable client with per-request
 	// timeouts; validation then reads them from the local cache.
-	if !flags.disableDefaultSchemas {
-		uncovered := validate.UncoveredKinds(
-			validate.ResourceKinds(output), coverage, validate.NormalizeSkipKinds(flags.SkipKinds))
-
-		// The default registry never carries Flux CRs (groups
-		// *.fluxcd.io): fetching them is a guaranteed 404 and their
-		// absence says nothing about --kubernetes-version — keep them out
-		// of the prefetch and of the mass-skip warning below. A repo whose
-		// only uncovered kinds are Flux CRs must not trip the warning when
-		// every custom kind is covered by --schema-dir.
-		fetchable := make([]validate.ResourceKind, 0, len(uncovered))
-		for _, k := range uncovered {
-			if !validate.IsFluxKind(k) {
-				fetchable = append(fetchable, k)
-			}
-		}
-
-		if len(fetchable) > 0 {
-			missing, err := validate.PrefetchDefaultSchemas(ctx, fetchable, validate.PrefetchOptions{
-				KubernetesVersion: flags.KubernetesVersion,
-				Strict:            flags.Strict,
-				CacheDir:          filepath.Join(schemaCacheDir, "registry"),
-				BaseURL:           flags.testRegistryURL,
-				// Flag semantics: 0 = no limit → the library's negative
-				// sentinel; the flag default is a positive timeout.
-				RequestTimeout: schemaDownloadTimeout(flags.SchemaDownloadTimeout),
-			})
-			if err != nil {
-				if interrupted := CheckInterrupted(ctx); interrupted != nil {
-					return interrupted
-				}
-				return NewExitError(fmt.Errorf("downloading Kubernetes schemas: %w", err), ExitCodeError)
-			}
-			// Every fetched kind 404'd: nothing that the registry should
-			// carry was validated against. A published-but-wrong
-			// --kubernetes-version looks exactly like this, so warn instead
-			// of a green-but-empty run.
-			if len(missing) == len(fetchable) {
-				fmt.Fprintf(os.Stderr,
-					"Warning: the default registry has no schema for any of the %d kind(s) without a local schema (Kubernetes %s) — a wrong --kubernetes-version is a common cause; resources of these kinds are skipped\n",
-					len(missing), validate.NormalizeKubernetesVersion(flags.KubernetesVersion))
-			}
-		}
+	if err := prefetchSchemas(ctx, flags, output, coverage, schemaCacheDir); err != nil {
+		return err
 	}
 
 	validator, err := validate.New(validate.Options{
@@ -407,10 +250,262 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 	}
 
 	results := validator.ValidateAll(output)
-	failures := validate.Failures(results)
+	return emitValidationReport(flags, results, validate.Failures(results))
+}
 
-	// Machine formats go to stdout, human text to stderr (stdout stays
-	// reserved for machine output).
+// announceValidationContext prints what validation will run against,
+// before the (possibly slow) build — while it runs it stays clear which
+// schemas the resources are checked with.
+func announceValidationContext(flags *ValidateFlags, schemaDir string) {
+	planned := plannedSchemaDisplay(flags, schemaDir)
+	if planned == "" {
+		return
+	}
+	if flags.disableDefaultSchemas {
+		fmt.Fprintf(os.Stderr, "Validating against %s\n", planned)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Validating against %s (Kubernetes %s)\n",
+		planned, validate.NormalizeKubernetesVersion(flags.KubernetesVersion))
+}
+
+// checkValidateFlags rejects malformed flag combinations up front: an
+// unknown --output, a short Kubernetes version (a form like "1.36" would
+// 404 every default-registry schema and silently skip all native kinds,
+// looking like a green run) and a negative download timeout.
+func checkValidateFlags(flags *ValidateFlags) error {
+	switch flags.Output {
+	case "", "text", "json", "junit":
+	default:
+		return NewExitError(fmt.Errorf("unknown --output format %q (use text, json or junit)", flags.Output), ExitCodeError)
+	}
+	if err := validate.ValidateKubernetesVersion(flags.KubernetesVersion); err != nil {
+		return NewExitError(err, ExitCodeError)
+	}
+	if flags.SchemaDownloadTimeout < 0 {
+		return NewExitError(fmt.Errorf("invalid --schema-download-timeout %s: must be 0 (no limit) or a positive duration", flags.SchemaDownloadTimeout), ExitCodeError)
+	}
+	return nil
+}
+
+// resolveValidatePaths resolves and sanity-checks the cluster path: it
+// must exist and contain Kustomization files directly (not just in
+// subdirectories). Returns the absolute cluster path and repo root.
+func resolveValidatePaths(flags *ValidateFlags) (string, string, error) {
+	clusterPath := flags.Path
+	if clusterPath == "" {
+		clusterPath = "."
+	}
+
+	absClusterPath, err := filepath.Abs(clusterPath)
+	if err != nil {
+		return "", "", NewExitError(fmt.Errorf("resolving path %s: %w", clusterPath, err), ExitCodeError)
+	}
+
+	if _, err := os.Stat(absClusterPath); os.IsNotExist(err) {
+		return "", "", NewExitError(fmt.Errorf("path %s does not exist", clusterPath), ExitCodeError)
+	}
+
+	hasDirectKS, err := hasDirectKustomizations(absClusterPath)
+	if err != nil {
+		return "", "", NewExitError(fmt.Errorf("checking for Kustomization files: %w", err), ExitCodeError)
+	}
+	if !hasDirectKS {
+		return "", "", NewExitError(fmt.Errorf("no Kustomization files found in %s", clusterPath), ExitCodeError)
+	}
+
+	repoRoot, err := git.FindRepoRoot(absClusterPath)
+	if err != nil {
+		return "", "", NewExitError(fmt.Errorf("finding git repo root: %w", err), ExitCodeError)
+	}
+	return absClusterPath, repoRoot, nil
+}
+
+// resolveValidateCaches resolves the two validate-side schema caches; the
+// disable word turns each into a per-run temp directory. The returned
+// cleanup closes both (kubeconform reads schemas lazily — call it only
+// after validation).
+func resolveValidateCaches(flags *ValidateFlags) (schemaCacheDir, crdCacheRoot string, cleanup func(), err error) {
+	schemaCacheDir, cleanupSchemas, err := validate.CacheDirOrTemp(flags.schemaCacheDir(), "fluxview-schemas-")
+	if err != nil {
+		return "", "", nil, NewExitError(err, ExitCodeError)
+	}
+	crdCacheRoot, cleanupCRDCache, err := validate.CacheDirOrTemp(flags.crdSchemaCacheDir(), "fluxview-crd-schemas-")
+	if err != nil {
+		cleanupSchemas()
+		return "", "", nil, NewExitError(err, ExitCodeError)
+	}
+	return schemaCacheDir, crdCacheRoot, func() {
+		cleanupCRDCache()
+		cleanupSchemas()
+	}, nil
+}
+
+// validateBuildState carries what runValidate needs to inspect one build:
+// the build result cache, the anomaly report and the git source env
+// (closed after validation — the clones back external sources the build
+// already consumed).
+type validateBuildState struct {
+	cache  buildCache
+	report buildReport
+	close  func()
+}
+
+// buildValidationOutput builds the Flux Kustomization pipeline output the
+// gate validates. Errors are already exit-coded by the build pipeline.
+func buildValidationOutput(ctx context.Context, flags *ValidateFlags, absClusterPath, repoRoot string) ([]byte, *validateBuildState, error) {
+	scans := newScanCache()
+	kustomizations, err := scans.parserFor(absClusterPath).ParseKustomizations(ctx)
+	if err != nil {
+		return nil, nil, NewExitError(fmt.Errorf("parsing Kustomization resources: %w", err), ExitCodeError)
+	}
+
+	ksCache := flags.KsCache
+	builder := kustomize.NewBuilder(repoRoot, ksCache.builderOptions()...)
+	buildCache := make(buildCache)
+	var report buildReport
+	configMaps := resolveConfigMaps(ctx, scans, absClusterPath, builder, buildCache)
+	secrets := resolveSecrets(ctx, scans, absClusterPath, builder, buildCache)
+
+	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache, flags.NoGitSourceFetch)
+	output, err := buildKSContent(ctx, &ksBuildEnv{
+		scans:       scans,
+		builder:     builder,
+		repoRoot:    repoRoot,
+		clusterPath: absClusterPath,
+		cache:       buildCache,
+		report:      &report,
+		gitSources:  gitEnv,
+	}, kustomizations, substitutionSources{configMaps: configMaps, secrets: secrets})
+	if err != nil {
+		gitEnv.Close()
+		return nil, nil, NewExitError(err, ExitCodeError)
+	}
+	return output, &validateBuildState{cache: buildCache, report: report, close: func() { _ = gitEnv.Close() }}, nil
+}
+
+// gatePartialBuild turns build anomalies into gate failures: kustomize
+// build failures and Kustomizations whose spec.path is missing from the
+// repository — validating only the surviving subset would report success
+// while resources are silently missing.
+func gatePartialBuild(state *validateBuildState) error {
+	if failed := state.cache.failedDirs(); len(failed) > 0 {
+		return NewExitError(fmt.Errorf(
+			"kustomize build failed for %d path(s), cannot validate: %s",
+			len(failed), strings.Join(failed, ", ")), ExitCodeError)
+	}
+
+	if len(state.report.missingPaths) == 0 {
+		return nil
+	}
+	parts := make([]string, len(state.report.missingPaths))
+	for i, m := range state.report.missingPaths {
+		parts[i] = m.ks + " (" + m.path + ")"
+	}
+	return NewExitError(fmt.Errorf(
+		"%d Kustomization(s) point to a path missing from the repository, cannot validate: %s",
+		len(parts), strings.Join(parts, ", ")), ExitCodeError)
+}
+
+// warnUncheckedKustomizations warns about external GitRepository sources
+// that could not be fetched (an unreachable upstream or the
+// --no-git-source-fetch kill switch); external content is best-effort for
+// the gate. Causes are grouped (source + error) so a single global cause —
+// e.g. the kill switch — is stated once with all its Kustomizations,
+// instead of once per KS.
+func warnUncheckedKustomizations(report buildReport) {
+	if len(report.fetchErrors) == 0 {
+		return
+	}
+	var order []string
+	byCause := make(map[string][]string)
+	for _, fe := range report.fetchErrors {
+		cause := fe.source + ": " + fe.err
+		if _, seen := byCause[cause]; !seen {
+			order = append(order, cause)
+		}
+		byCause[cause] = append(byCause[cause], fe.ks)
+	}
+	parts := make([]string, 0, len(order))
+	for _, cause := range order {
+		parts = append(parts, strings.Join(byCause[cause], ", ")+" ("+cause+")")
+	}
+	fmt.Fprintf(os.Stderr,
+		"Warning: %d Kustomization(s) left unchecked: %s\n",
+		len(report.fetchErrors), strings.Join(parts, ", "))
+}
+
+// filterValidationOutput applies --namespace; done=true means there is
+// nothing to validate and the message has already been printed.
+func filterValidationOutput(flags *ValidateFlags, output []byte) (filtered []byte, done bool) {
+	if flags.Namespace == "" {
+		return output, false
+	}
+	filtered = filterByNamespace(output, flags.Namespace)
+	if len(filtered) == 0 {
+		fmt.Fprintf(os.Stderr, "No resources found in namespace %q\n", flags.Namespace)
+		return nil, true
+	}
+	return filtered, false
+}
+
+// prefetchSchemas downloads the schemas the default registry would be
+// asked for, under a cancellable client with per-request timeouts —
+// kubeconform's HTTP loader has neither — so validation itself reads from
+// the local cache and never waits on the network.
+func prefetchSchemas(ctx context.Context, flags *ValidateFlags, output []byte, coverage validate.KindCoverage, schemaCacheDir string) error {
+	if flags.disableDefaultSchemas {
+		return nil
+	}
+	uncovered := validate.UncoveredKinds(
+		validate.ResourceKinds(output), coverage, validate.NormalizeSkipKinds(flags.SkipKinds))
+
+	// The default registry never carries Flux CRs (groups *.fluxcd.io):
+	// fetching them is a guaranteed 404 and their absence says nothing
+	// about --kubernetes-version — keep them out of the prefetch and of
+	// the mass-skip warning below. A repo whose only uncovered kinds are
+	// Flux CRs must not trip the warning when every custom kind is covered
+	// by --schema-dir.
+	fetchable := make([]validate.ResourceKind, 0, len(uncovered))
+	for _, k := range uncovered {
+		if !validate.IsFluxKind(k) {
+			fetchable = append(fetchable, k)
+		}
+	}
+	if len(fetchable) == 0 {
+		return nil
+	}
+
+	missing, err := validate.PrefetchDefaultSchemas(ctx, fetchable, validate.PrefetchOptions{
+		KubernetesVersion: flags.KubernetesVersion,
+		Strict:            flags.Strict,
+		CacheDir:          filepath.Join(schemaCacheDir, "registry"),
+		BaseURL:           flags.testRegistryURL,
+		// Flag semantics: 0 = no limit → the library's negative sentinel;
+		// the flag default is a positive timeout.
+		RequestTimeout: schemaDownloadTimeout(flags.SchemaDownloadTimeout),
+	})
+	if err != nil {
+		if interrupted := CheckInterrupted(ctx); interrupted != nil {
+			return interrupted
+		}
+		return NewExitError(fmt.Errorf("downloading Kubernetes schemas: %w", err), ExitCodeError)
+	}
+	// Every fetched kind 404'd: nothing that the registry should carry was
+	// validated against. A published-but-wrong --kubernetes-version looks
+	// exactly like this, so warn instead of a green-but-empty run.
+	if len(missing) == len(fetchable) {
+		fmt.Fprintf(os.Stderr,
+			"Warning: the default registry has no schema for any of the %d kind(s) without a local schema (Kubernetes %s) — a wrong --kubernetes-version is a common cause; resources of these kinds are skipped\n",
+			len(missing), validate.NormalizeKubernetesVersion(flags.KubernetesVersion))
+	}
+	return nil
+}
+
+// emitValidationReport writes the validation report: machine formats to
+// stdout, human text to stderr (stdout stays reserved for machine
+// output), and turns failures into the validation exit code.
+func emitValidationReport(flags *ValidateFlags, results []validate.Result, failures []validate.Result) error {
 	switch flags.Output {
 	case "json":
 		if err := writeValidationJSON(os.Stdout, results); err != nil {

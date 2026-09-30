@@ -617,170 +617,206 @@ func TestResolveAuth_HTTP(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	t.Run("username and password", func(t *testing.T) {
-		t.Setenv(envGitCredentialHosts, "git.example.com")
-		t.Setenv(envGitUsername, "alice")
-		t.Setenv(envGitPassword, "hunter2")
-		auth, err := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
-		if err != nil {
-			t.Fatalf("resolveAuth: %v", err)
-		}
-		ba, ok := auth.(*githttp.BasicAuth)
-		if !ok {
-			t.Fatalf("want *http.BasicAuth, got %T", auth)
-		}
-		if ba.Username != "alice" || ba.Password != "hunter2" {
-			t.Errorf("basic auth = %q/%q", ba.Username, ba.Password)
-		}
-	})
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T, string)
+	}{
+		{"username and password", resolveAuthHTTPUsernameAndPassword},
+		{"env pair wins over token", resolveAuthHTTPEnvPairWinsOverToken},
+		{"token becomes oauth2", resolveAuthHTTPTokenBecomesOauth2},
+		{"credentials withheld without an allowlist", resolveAuthHTTPCredentialsWithheldWithoutAnAllowlist},
+		{"empty allowlist withholds credentials", resolveAuthHTTPEmptyAllowlistWithholdsCredentials},
+		{"host outside the allowlist withholds credentials", resolveAuthHTTPHostOutsideTheAllowlistWithholdsCredentials},
+		{"allowlist entry is case-insensitive and port-agnostic", resolveAuthHTTPAllowlistEntryIsCaseInsensitiveAndPortAgnostic},
+		{"withheld host still uses a netrc machine entry", resolveAuthHTTPWithheldHostStillUsesANetrcMachineEntry},
+		{"netrc fallback", resolveAuthHTTPNetrcFallback},
+		{"netrc default restricted by the allowlist", resolveAuthHTTPNetrcDefaultRestrictedByTheAllowlist},
+		{"no credentials is nil auth", resolveAuthHTTPNoCredentialsIsNilAuth},
+	} {
+		t.Run(tc.name, func(t *testing.T) { tc.run(t, home) })
+	}
+}
 
-	t.Run("env pair wins over token", func(t *testing.T) {
-		t.Setenv(envGitCredentialHosts, "git.example.com")
-		t.Setenv(envGitUsername, "alice")
-		t.Setenv(envGitPassword, "hunter2")
-		t.Setenv(envGitToken, "glpat-tok")
-		auth, _ := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
-		if ba := auth.(*githttp.BasicAuth); ba.Username != "alice" || ba.Password != "hunter2" {
-			t.Errorf("env pair must win, got %q/%q", ba.Username, ba.Password)
-		}
-	})
+// username and password
+func resolveAuthHTTPUsernameAndPassword(t *testing.T, home string) {
+	t.Setenv(envGitCredentialHosts, "git.example.com")
+	t.Setenv(envGitUsername, "alice")
+	t.Setenv(envGitPassword, "hunter2")
+	auth, err := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
+	if err != nil {
+		t.Fatalf("resolveAuth: %v", err)
+	}
+	ba, ok := auth.(*githttp.BasicAuth)
+	if !ok {
+		t.Fatalf("want *http.BasicAuth, got %T", auth)
+	}
+	if ba.Username != "alice" || ba.Password != "hunter2" {
+		t.Errorf("basic auth = %q/%q", ba.Username, ba.Password)
+	}
+}
 
-	t.Run("token becomes oauth2", func(t *testing.T) {
-		t.Setenv(envGitCredentialHosts, "git.example.com")
-		t.Setenv(envGitToken, "glpat-tok")
-		auth, _ := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
-		ba, ok := auth.(*githttp.BasicAuth)
-		if !ok {
-			t.Fatalf("want *http.BasicAuth, got %T", auth)
-		}
-		if ba.Username != "oauth2" || ba.Password != "glpat-tok" {
-			t.Errorf("token auth = %q/%q, want oauth2/glpat-tok", ba.Username, ba.Password)
-		}
-	})
+// env pair wins over token
+func resolveAuthHTTPEnvPairWinsOverToken(t *testing.T, home string) {
+	t.Setenv(envGitCredentialHosts, "git.example.com")
+	t.Setenv(envGitUsername, "alice")
+	t.Setenv(envGitPassword, "hunter2")
+	t.Setenv(envGitToken, "glpat-tok")
+	auth, _ := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
+	if ba := auth.(*githttp.BasicAuth); ba.Username != "alice" || ba.Password != "hunter2" {
+		t.Errorf("env pair must win, got %q/%q", ba.Username, ba.Password)
+	}
+}
 
-	t.Run("credentials withheld without an allowlist", func(t *testing.T) {
-		t.Setenv(envGitToken, "glpat-tok")
-		auth, err := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
-		if auth != nil || err != nil {
-			t.Fatalf("unset allowlist must withhold env credentials, got %v, %v", auth, err)
-		}
-	})
+// token becomes oauth2
+func resolveAuthHTTPTokenBecomesOauth2(t *testing.T, home string) {
+	t.Setenv(envGitCredentialHosts, "git.example.com")
+	t.Setenv(envGitToken, "glpat-tok")
+	auth, _ := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
+	ba, ok := auth.(*githttp.BasicAuth)
+	if !ok {
+		t.Fatalf("want *http.BasicAuth, got %T", auth)
+	}
+	if ba.Username != "oauth2" || ba.Password != "glpat-tok" {
+		t.Errorf("token auth = %q/%q, want oauth2/glpat-tok", ba.Username, ba.Password)
+	}
+}
 
-	t.Run("empty allowlist withholds credentials", func(t *testing.T) {
-		t.Setenv(envGitCredentialHosts, "  ")
-		t.Setenv(envGitUsername, "alice")
-		t.Setenv(envGitPassword, "hunter2")
-		auth, err := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
-		if auth != nil || err != nil {
-			t.Fatalf("empty allowlist must withhold env credentials, got %v, %v", auth, err)
-		}
-	})
+// credentials withheld without an allowlist
+func resolveAuthHTTPCredentialsWithheldWithoutAnAllowlist(t *testing.T, home string) {
+	t.Setenv(envGitToken, "glpat-tok")
+	auth, err := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
+	if auth != nil || err != nil {
+		t.Fatalf("unset allowlist must withhold env credentials, got %v, %v", auth, err)
+	}
+}
 
-	t.Run("host outside the allowlist withholds credentials", func(t *testing.T) {
-		t.Setenv(envGitCredentialHosts, "github.com, GitLab.com ")
-		t.Setenv(envGitToken, "glpat-tok")
-		auth, err := newAuthResolver().resolveAuth("https://attacker.example/repo.git")
-		if auth != nil || err != nil {
-			t.Fatalf("unlisted host must get no credentials, got %v, %v", auth, err)
-		}
-	})
+// empty allowlist withholds credentials
+func resolveAuthHTTPEmptyAllowlistWithholdsCredentials(t *testing.T, home string) {
+	t.Setenv(envGitCredentialHosts, "  ")
+	t.Setenv(envGitUsername, "alice")
+	t.Setenv(envGitPassword, "hunter2")
+	auth, err := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
+	if auth != nil || err != nil {
+		t.Fatalf("empty allowlist must withhold env credentials, got %v, %v", auth, err)
+	}
+}
 
-	t.Run("allowlist entry is case-insensitive and port-agnostic", func(t *testing.T) {
-		t.Setenv(envGitCredentialHosts, " GitHub.COM , gitlab.com")
-		t.Setenv(envGitToken, "glpat-tok")
-		auth, _ := newAuthResolver().resolveAuth("https://GiThub.com:443/crds.git")
-		ba, ok := auth.(*githttp.BasicAuth)
-		if !ok {
-			t.Fatalf("listed host (any case, default port) must get the token, got %T", auth)
-		}
-		if ba.Password != "glpat-tok" {
-			t.Errorf("token auth = %q/%q, want oauth2/glpat-tok", ba.Username, ba.Password)
-		}
-	})
+// host outside the allowlist withholds credentials
+func resolveAuthHTTPHostOutsideTheAllowlistWithholdsCredentials(t *testing.T, home string) {
+	t.Setenv(envGitCredentialHosts, "github.com, GitLab.com ")
+	t.Setenv(envGitToken, "glpat-tok")
+	auth, err := newAuthResolver().resolveAuth("https://attacker.example/repo.git")
+	if auth != nil || err != nil {
+		t.Fatalf("unlisted host must get no credentials, got %v, %v", auth, err)
+	}
+}
 
-	t.Run("withheld host still uses a netrc machine entry", func(t *testing.T) {
-		netrc := "machine git.example.com login bob password netrc-pass\n"
-		if err := os.WriteFile(filepath.Join(home, ".netrc"), []byte(netrc), 0o600); err != nil {
-			t.Fatalf("writing .netrc: %v", err)
-		}
+// allowlist entry is case-insensitive and port-agnostic
+func resolveAuthHTTPAllowlistEntryIsCaseInsensitiveAndPortAgnostic(t *testing.T, home string) {
+	t.Setenv(envGitCredentialHosts, " GitHub.COM , gitlab.com")
+	t.Setenv(envGitToken, "glpat-tok")
+	auth, _ := newAuthResolver().resolveAuth("https://GiThub.com:443/crds.git")
+	ba, ok := auth.(*githttp.BasicAuth)
+	if !ok {
+		t.Fatalf("listed host (any case, default port) must get the token, got %T", auth)
+	}
+	if ba.Password != "glpat-tok" {
+		t.Errorf("token auth = %q/%q, want oauth2/glpat-tok", ba.Username, ba.Password)
+	}
+}
+
+// withheld host still uses a netrc machine entry
+func resolveAuthHTTPWithheldHostStillUsesANetrcMachineEntry(t *testing.T, home string) {
+	netrc := "machine git.example.com login bob password netrc-pass\n"
+	if err := os.WriteFile(filepath.Join(home, ".netrc"), []byte(netrc), 0o600); err != nil {
+		t.Fatalf("writing .netrc: %v", err)
+	}
+	t.Setenv(envGitCredentialHosts, "github.com")
+	t.Setenv(envGitToken, "glpat-tok")
+	auth, err := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
+	if err != nil {
+		t.Fatalf("resolveAuth: %v", err)
+	}
+	ba, ok := auth.(*githttp.BasicAuth)
+	if !ok {
+		t.Fatalf("want *http.BasicAuth from netrc machine entry, got %T", auth)
+	}
+	if ba.Username != "bob" || ba.Password != "netrc-pass" {
+		t.Errorf("netrc auth = %q/%q, want bob/netrc-pass", ba.Username, ba.Password)
+	}
+}
+
+// netrc fallback
+func resolveAuthHTTPNetrcFallback(t *testing.T, home string) {
+	netrc := "machine git.example.com login bob password netrc-pass\n\nmachine other.example.com login x password y\n"
+	if err := os.WriteFile(filepath.Join(home, ".netrc"), []byte(netrc), 0o600); err != nil {
+		t.Fatalf("writing .netrc: %v", err)
+	}
+	auth, err := newAuthResolver().resolveAuth("https://git.example.com:8443/crds.git")
+	if err != nil {
+		t.Fatalf("resolveAuth: %v", err)
+	}
+	ba, ok := auth.(*githttp.BasicAuth)
+	if !ok {
+		t.Fatalf("want *http.BasicAuth, got %T", auth)
+	}
+	if ba.Username != "bob" || ba.Password != "netrc-pass" {
+		t.Errorf("netrc auth = %q/%q, want bob/netrc-pass", ba.Username, ba.Password)
+	}
+}
+
+// netrc default restricted by the allowlist
+func resolveAuthHTTPNetrcDefaultRestrictedByTheAllowlist(t *testing.T, home string) {
+	netrc := "default login default-user password default-pass\n"
+	netrcPath := filepath.Join(home, ".netrc")
+	if err := os.WriteFile(netrcPath, []byte(netrc), 0o600); err != nil {
+		t.Fatalf("writing .netrc: %v", err)
+	}
+	defer os.Remove(netrcPath) // keep later subtests credential-free
+	t.Run("listed host keeps the default stanza", func(t *testing.T) {
+		netrcDefaultForListedHost(t)
+	})
+	t.Run("unlisted host does not", func(t *testing.T) {
 		t.Setenv(envGitCredentialHosts, "github.com")
-		t.Setenv(envGitToken, "glpat-tok")
+		auth, err := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
+		if auth != nil || err != nil {
+			t.Errorf("default stanza must stay home for unlisted hosts, got %v, %v", auth, err)
+		}
+	})
+	t.Run("unset allowlist keeps the legacy default behavior", func(t *testing.T) {
 		auth, err := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
 		if err != nil {
 			t.Fatalf("resolveAuth: %v", err)
 		}
-		ba, ok := auth.(*githttp.BasicAuth)
-		if !ok {
-			t.Fatalf("want *http.BasicAuth from netrc machine entry, got %T", auth)
-		}
-		if ba.Username != "bob" || ba.Password != "netrc-pass" {
-			t.Errorf("netrc auth = %q/%q, want bob/netrc-pass", ba.Username, ba.Password)
+		if auth == nil {
+			t.Error("default stanza must keep matching every host while no allowlist is set")
 		}
 	})
+}
 
-	t.Run("netrc fallback", func(t *testing.T) {
-		netrc := "machine git.example.com login bob password netrc-pass\n\nmachine other.example.com login x password y\n"
-		if err := os.WriteFile(filepath.Join(home, ".netrc"), []byte(netrc), 0o600); err != nil {
-			t.Fatalf("writing .netrc: %v", err)
-		}
-		auth, err := newAuthResolver().resolveAuth("https://git.example.com:8443/crds.git")
-		if err != nil {
-			t.Fatalf("resolveAuth: %v", err)
-		}
-		ba, ok := auth.(*githttp.BasicAuth)
-		if !ok {
-			t.Fatalf("want *http.BasicAuth, got %T", auth)
-		}
-		if ba.Username != "bob" || ba.Password != "netrc-pass" {
-			t.Errorf("netrc auth = %q/%q, want bob/netrc-pass", ba.Username, ba.Password)
-		}
-	})
+// netrcDefaultForListedHost: with the host allowlisted, the default netrc
+// stanza's credentials travel to it.
+func netrcDefaultForListedHost(t *testing.T) {
+	t.Setenv(envGitCredentialHosts, "git.example.com")
+	auth, err := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
+	if err != nil {
+		t.Fatalf("resolveAuth: %v", err)
+	}
+	ba, ok := auth.(*githttp.BasicAuth)
+	if !ok {
+		t.Fatalf("want *http.BasicAuth, got %T", auth)
+	}
+	if ba.Username != "default-user" || ba.Password != "default-pass" {
+		t.Errorf("default stanza auth = %q/%q", ba.Username, ba.Password)
+	}
+}
 
-	t.Run("netrc default restricted by the allowlist", func(t *testing.T) {
-		netrc := "default login default-user password default-pass\n"
-		netrcPath := filepath.Join(home, ".netrc")
-		if err := os.WriteFile(netrcPath, []byte(netrc), 0o600); err != nil {
-			t.Fatalf("writing .netrc: %v", err)
-		}
-		defer os.Remove(netrcPath) // keep later subtests credential-free
-		t.Run("listed host keeps the default stanza", func(t *testing.T) {
-			t.Setenv(envGitCredentialHosts, "git.example.com")
-			auth, err := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
-			if err != nil {
-				t.Fatalf("resolveAuth: %v", err)
-			}
-			ba, ok := auth.(*githttp.BasicAuth)
-			if !ok {
-				t.Fatalf("want *http.BasicAuth, got %T", auth)
-			}
-			if ba.Username != "default-user" || ba.Password != "default-pass" {
-				t.Errorf("default stanza auth = %q/%q", ba.Username, ba.Password)
-			}
-		})
-		t.Run("unlisted host does not", func(t *testing.T) {
-			t.Setenv(envGitCredentialHosts, "github.com")
-			auth, err := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
-			if auth != nil || err != nil {
-				t.Errorf("default stanza must stay home for unlisted hosts, got %v, %v", auth, err)
-			}
-		})
-		t.Run("unset allowlist keeps the legacy default behavior", func(t *testing.T) {
-			auth, err := newAuthResolver().resolveAuth("https://git.example.com/crds.git")
-			if err != nil {
-				t.Fatalf("resolveAuth: %v", err)
-			}
-			if auth == nil {
-				t.Error("default stanza must keep matching every host while no allowlist is set")
-			}
-		})
-	})
-
-	t.Run("no credentials is nil auth", func(t *testing.T) {
-		auth, err := newAuthResolver().resolveAuth("https://public.example.com/crds.git")
-		if auth != nil || err != nil {
-			t.Errorf("public https must resolve to no auth, got %v, %v", auth, err)
-		}
-	})
+// no credentials is nil auth
+func resolveAuthHTTPNoCredentialsIsNilAuth(t *testing.T, home string) {
+	auth, err := newAuthResolver().resolveAuth("https://public.example.com/crds.git")
+	if auth != nil || err != nil {
+		t.Errorf("public https must resolve to no auth, got %v, %v", auth, err)
+	}
 }
 
 // TestResolveAuth_CredsWithheldFailureMsg pins the authFailureMsg remedy of

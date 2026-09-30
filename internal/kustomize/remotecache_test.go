@@ -803,9 +803,24 @@ func TestRemoteCacheDisabledViaDir(t *testing.T) {
 // TestDefaultRemoteCacheTTLAndDir covers the defaults and the
 // newRemoteCache normalization of empty dir / negative TTL.
 func TestDefaultRemoteCacheTTLAndDir(t *testing.T) {
-	if got := DefaultRemoteCacheTTL(); got != 10*time.Minute {
-		t.Errorf("DefaultRemoteCacheTTL() = %s, want 10m", got)
-	}
+	t.Run("timeout defaults, env override and invalid fallback", func(t *testing.T) {
+		checkRemoteCacheTimeoutDefaults(t)
+	})
+	t.Run("TTL defaults, env override and invalid fallback", func(t *testing.T) {
+		checkRemoteCacheTTLDefaults(t)
+	})
+	t.Run("cache dir env override and cache-home base", func(t *testing.T) {
+		checkRemoteCacheDirDefaults(t)
+	})
+	t.Run("empty dir means default; negative TTL/timeout normalize to 0", func(t *testing.T) {
+		checkRemoteCacheNormalization(t)
+	})
+}
+
+// checkRemoteCacheTimeoutDefaults: the default timeout, its env override,
+// the invalid-env fallback (one warning) and the explicit zero.
+func checkRemoteCacheTimeoutDefaults(t *testing.T) {
+	t.Helper()
 	if got := DefaultRemoteCacheTimeout(); got != 30*time.Second {
 		t.Errorf("DefaultRemoteCacheTimeout() = %s, want 30s", got)
 	}
@@ -824,7 +839,15 @@ func TestDefaultRemoteCacheTTLAndDir(t *testing.T) {
 	if got := DefaultRemoteCacheTimeout(); got != 0 {
 		t.Errorf("DefaultRemoteCacheTimeout() = %s, want 0 (env no-limit)", got)
 	}
+}
 
+// checkRemoteCacheTTLDefaults: the default TTL, its env override and the
+// invalid-env fallback (one warning).
+func checkRemoteCacheTTLDefaults(t *testing.T) {
+	t.Helper()
+	if got := DefaultRemoteCacheTTL(); got != 10*time.Minute {
+		t.Errorf("DefaultRemoteCacheTTL() = %s, want 10m", got)
+	}
 	warnEnvTTLOnce = sync.Once{}
 	t.Setenv("FLUXVIEW_REMOTE_CACHE_TTL", "5m")
 	if got := DefaultRemoteCacheTTL(); got != 5*time.Minute {
@@ -836,7 +859,12 @@ func TestDefaultRemoteCacheTTLAndDir(t *testing.T) {
 			t.Errorf("DefaultRemoteCacheTTL() = %s, want 10m fallback on invalid env", got)
 		}
 	})
+}
 
+// checkRemoteCacheDirDefaults: the dir env override and the cache-home
+// base fallback.
+func checkRemoteCacheDirDefaults(t *testing.T) {
+	t.Helper()
 	t.Setenv("FLUXVIEW_REMOTE_CACHE_DIR", "/custom/dir")
 	if got := DefaultRemoteCacheDir(); got != "/custom/dir" {
 		t.Errorf("DefaultRemoteCacheDir() = %s, want /custom/dir (env)", got)
@@ -846,6 +874,18 @@ func TestDefaultRemoteCacheTTLAndDir(t *testing.T) {
 	if got := DefaultRemoteCacheDir(); got != "/cache-home/kustomize-remote" {
 		t.Errorf("DefaultRemoteCacheDir() = %s, want /cache-home/kustomize-remote", got)
 	}
+}
+
+// checkRemoteCacheNormalization: an explicitly empty cache dir
+// (programmatic API; an empty flag value is a parse error) means
+// "default", and negative TTL/timeout values are normalized to 0 with one
+// explanatory warning each.
+func checkRemoteCacheNormalization(t *testing.T) {
+	t.Helper()
+	// Same env the dir-defaults section established in the original
+	// sequential test: cache-home set, no dir override.
+	t.Setenv("FLUXVIEW_CACHE_HOME", "/cache-home")
+	t.Setenv("FLUXVIEW_REMOTE_CACHE_DIR", "")
 
 	// An explicitly empty cache dir (programmatic API; an empty flag value
 	// is a parse error) means "default", and negative TTL/timeout values

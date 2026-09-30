@@ -39,89 +39,111 @@ type nativeKustomization struct {
 //   - directories referenced as resources by another discovered kustomization
 //     (e.g. sibling base/ referenced via resources: [../base])
 func DiscoverKustomizeDirsAndFiles(ctx context.Context, rootPath string) (buildDirs, fileDirs []string, err error) {
-	type kustEntry struct {
-		path      string
-		absPath   string
-		resources []string // resolved resource paths
-	}
-	var entries []kustEntry
-
 	// Resolve rootPath for consistent path comparison (macOS /var → /private/var).
 	absRootResolved, _ := filepath.Abs(rootPath)
-	if real, err := filepath.EvalSymlinks(absRootResolved); err == nil {
-		absRootResolved = real
+	if resolved, err := filepath.EvalSymlinks(absRootResolved); err == nil {
+		absRootResolved = resolved
 	}
 	walkRoot := filepath.Clean(rootPath)
 
+	w := &kustDiscoveryWalk{
+		walkRoot:        walkRoot,
+		absRootResolved: absRootResolved,
+	}
 	err = filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
-		// A read error on a single entry (permission denied on a subdir, broken
-		// symlink, etc.) is skipped best-effort: the walk continues over the rest
-		// of the tree. Returning err here would abort the whole discovery and,
-		// via the callers, silently drop every overlay or fall back to a flat
-		// read — strictly worse than skipping the one bad entry.
-		if err != nil {
-			return nil
-		}
-		// Honor context cancellation during what can be a long tree walk — this
-		// is the only case that intentionally aborts with an error.
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if !d.IsDir() {
-			return nil
-		}
-		// Never cross a repository boundary: skip the .git directory itself
-		// and nested git repository roots — external source clones cached
-		// inside the working tree (CI often keeps the fluxview cache under
-		// the checkout) are foreign content, never fleet overlays. Chart
-		// roots are deliberately NOT skipped here: unlike the raw resource
-		// parser, discovery must find kustomization files inside vendored
-		// charts (and register their directories, keeping the loose-file
-		// walker out of chart templates).
-		if d.Name() == ".git" {
-			return filepath.SkipDir
-		}
-		if filepath.Clean(path) != walkRoot && git.IsRepoRoot(path) {
-			return filepath.SkipDir
-		}
-
-		absPath, _ := filepath.Abs(path)
-		if real, err := filepath.EvalSymlinks(absPath); err == nil {
-			absPath = real
-		}
-		if absPath == absRootResolved {
-			return nil
-		}
-
-		kustData := readKustomizationFile(path)
-		if kustData == nil {
-			return nil
-		}
-		// Any directory with a kustomization file is a "file dir" — used to
-		// keep the loose-file walker out of kustomize inputs (Component,
-		// Flux Kustomization, native overlays alike).
-		fileDirs = append(fileDirs, path)
-
-		var kust nativeKustomization
-		if err := yaml.Unmarshal(kustData, &kust); err != nil {
-			return nil
-		}
-		if !isNativeKustomize(kust) {
-			return nil
-		}
-
-		entries = append(entries, kustEntry{
-			path:      path,
-			absPath:   absPath,
-			resources: parseResourcePaths(kustData, path),
-		})
-		return nil
+		return w.visit(ctx, path, d, err)
 	})
 	if err != nil {
 		return nil, nil, err
 	}
 
-	// Build set of all referenced paths (bases referenced by overlays).
+	return selectBuildDirs(w.entries), w.fileDirs, nil
+}
+
+// kustDiscoveryWalk accumulates what one discovery tree walk finds: every
+// directory holding a kustomization file (fileDirs, keeping the loose-file
+// walker out of kustomize inputs) and the parsed native-kustomize entries
+// (resources resolved, for the later referenced-by dedup).
+type kustDiscoveryWalk struct {
+	walkRoot        string
+	absRootResolved string
+	fileDirs        []string
+	entries         []kustEntry
+}
+
+// kustEntry is one native kustomize directory found by discovery.
+type kustEntry struct {
+	path      string
+	absPath   string
+	resources []string // resolved resource paths
+}
+
+// visit is the WalkDir callback: read errors on single entries are
+// skipped best-effort (aborting would silently drop every overlay —
+// strictly worse); context cancellation is honored during what can be a
+// long tree walk and is the only intentional abort.
+// Repository boundaries (.git, nested repo roots — external source clones
+// cached inside the working tree) are never crossed. Chart roots are
+// deliberately NOT skipped: unlike the raw resource parser, discovery
+// must find kustomization files inside vendored charts (and register
+// their directories, keeping the loose-file walker out of chart
+// templates).
+func (w *kustDiscoveryWalk) visit(ctx context.Context, path string, d fs.DirEntry, err error) error {
+	if err != nil {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !d.IsDir() {
+		return nil
+	}
+	if d.Name() == ".git" {
+		return filepath.SkipDir
+	}
+	if filepath.Clean(path) != w.walkRoot && git.IsRepoRoot(path) {
+		return filepath.SkipDir
+	}
+
+	absPath, _ := filepath.Abs(path)
+	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+		absPath = resolved
+	}
+	if absPath == w.absRootResolved {
+		return nil
+	}
+
+	kustData := readKustomizationFile(path)
+	if kustData == nil {
+		return nil
+	}
+	// Any directory with a kustomization file is a "file dir" — used to
+	// keep the loose-file walker out of kustomize inputs (Component,
+	// Flux Kustomization, native overlays alike).
+	w.fileDirs = append(w.fileDirs, path)
+
+	var kust nativeKustomization
+	if err := yaml.Unmarshal(kustData, &kust); err != nil {
+		return nil
+	}
+	if !isNativeKustomize(kust) {
+		return nil
+	}
+
+	w.entries = append(w.entries, kustEntry{
+		path:      path,
+		absPath:   absPath,
+		resources: parseResourcePaths(kustData, path),
+	})
+	return nil
+}
+
+// selectBuildDirs keeps the directories that are NOT referenced by another
+// kustomization (they will be built as part of that kustomization): the
+// resources: set is the primary dedup (nested and sibling bases alike);
+// physical subdirectories of already-selected dirs are a safety net for
+// kustomization files unreferenced in resources: (unusual but possible).
+func selectBuildDirs(entries []kustEntry) (buildDirs []string) {
 	referenced := make(map[string]bool)
 	for _, e := range entries {
 		for _, r := range e.resources {
@@ -129,36 +151,26 @@ func DiscoverKustomizeDirsAndFiles(ctx context.Context, rootPath string) (buildD
 		}
 	}
 
-	// Filter — keep only dirs that are NOT referenced by another kustomization
-	// (they'll be built as part of that kustomization).
 	discovered := make(map[string]bool)
 	for _, e := range entries {
-		// Skip if referenced by another kustomization via resources: field
-		// (e.g. sibling base/ referenced as ../base). This is the primary
-		// dedup mechanism and handles both nested and sibling patterns.
-		if referenced[e.absPath] {
+		if referenced[e.absPath] || underAnyDir(e.absPath, discovered) {
 			continue
 		}
-		// Safety-net: also skip physical subdirectories of already discovered
-		// kustomize dirs. The resources: check above is more precise, but this
-		// catches edge cases where a kustomization.yaml exists in a subdirectory
-		// without being referenced in resources: (unusual but possible).
-		skip := false
-		for parent := range discovered {
-			if strings.HasPrefix(e.absPath, parent+string(filepath.Separator)) {
-				skip = true
-				break
-			}
-		}
-		if skip {
-			continue
-		}
-
 		buildDirs = append(buildDirs, e.path)
 		discovered[e.absPath] = true
 	}
+	return buildDirs
+}
 
-	return buildDirs, fileDirs, nil
+// underAnyDir reports whether path is a physical subdirectory of any of
+// the already-discovered kustomize directories.
+func underAnyDir(path string, dirs map[string]bool) bool {
+	for parent := range dirs {
+		if strings.HasPrefix(path, parent+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // readKustomizationFile reads the first found kustomization file in dir.
@@ -190,8 +202,8 @@ func parseResourcePaths(data []byte, kustDir string) []string {
 			continue
 		}
 		// Resolve symlinks for reliable path comparison.
-		if real, err := filepath.EvalSymlinks(absRes); err == nil {
-			absRes = real
+		if resolvedPath, err := filepath.EvalSymlinks(absRes); err == nil {
+			absRes = resolvedPath
 		}
 		resolved = append(resolved, absRes)
 	}
@@ -323,6 +335,15 @@ func (r *ParsedResources) dispatch(kind, apiVersion string, node *yaml.Node) {
 		if err := node.Decode(&repo); err == nil {
 			r.GitRepositories = append(r.GitRepositories, repo)
 		}
+	default:
+		r.dispatchCoreKind(kind, apiVersion, node)
+	}
+}
+
+// dispatchCoreKind decodes one core (non-source) kind document: ConfigMaps
+// and Secrets at apiVersion v1.
+func (r *ParsedResources) dispatchCoreKind(kind, apiVersion string, node *yaml.Node) {
+	switch {
 	case kind == "ConfigMap" && apiVersion == "v1":
 		var cm ConfigMap
 		if err := node.Decode(&cm); err == nil {

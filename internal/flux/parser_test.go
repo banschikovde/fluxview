@@ -97,6 +97,22 @@ metadata:
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	t.Run("counts and flux sources", func(t *testing.T) {
+		checkWalkSources(t, snap)
+	})
+	t.Run("git repository details", func(t *testing.T) {
+		checkWalkGitRepository(t, snap)
+	})
+	t.Run("core kinds", func(t *testing.T) {
+		checkWalkCoreKinds(t, snap)
+	})
+}
+
+// checkWalkSources asserts the walk scanned the single fixture file and
+// dispatched the Flux resource kinds (Kustomization, HelmRepository,
+// OCIRepository).
+func checkWalkSources(t *testing.T, snap *ResourceSnapshot) {
+	t.Helper()
 	if snap.YAMLFilesScanned != 1 {
 		t.Errorf("YAMLFilesScanned = %d, want 1", snap.YAMLFilesScanned)
 	}
@@ -109,6 +125,12 @@ metadata:
 	if len(snap.OCIRepositories) != 1 || snap.OCIRepositories[0].Metadata.Name != "podinfo-oci" {
 		t.Errorf("OCIRepositories = %+v, want one named podinfo-oci", snap.OCIRepositories)
 	}
+}
+
+// checkWalkGitRepository asserts the fixture's GitRepository decoded with
+// its identity, URL and pinned tag.
+func checkWalkGitRepository(t *testing.T, snap *ResourceSnapshot) {
+	t.Helper()
 	if len(snap.GitRepositories) != 1 {
 		t.Fatalf("GitRepositories = %+v, want one", snap.GitRepositories)
 	}
@@ -119,6 +141,13 @@ metadata:
 	if gr.Spec.Ref == nil || gr.Spec.Ref.Tag != "v1.19.1" || !gr.Spec.Ref.IsPinned() {
 		t.Errorf("GitRepository ref = %+v, want pinned tag v1.19.1", gr.Spec.Ref)
 	}
+}
+
+// checkWalkCoreKinds asserts the v1 ConfigMap and Secret decoded, and
+// with them that the non-Flux Deployment was present in the walk but not
+// dispatched anywhere.
+func checkWalkCoreKinds(t *testing.T, snap *ResourceSnapshot) {
+	t.Helper()
 	if len(snap.ConfigMaps) != 1 || snap.ConfigMaps[0].Metadata.Name != "cluster-settings" {
 		t.Errorf("ConfigMaps = %+v, want one named cluster-settings", snap.ConfigMaps)
 	}

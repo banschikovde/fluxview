@@ -184,7 +184,7 @@ func TestEnsure_HeadNoRef(t *testing.T) {
 	}
 
 	up.commit("file.txt", "second\n")
-	if again := mustEnsure(t, f, up.url(), nil); again == first {
+	if mustEnsure(t, f, up.url(), nil) == first {
 		t.Error("no-ref HEAD must re-resolve with TTL 0, got the same clone dir")
 	}
 
@@ -446,50 +446,58 @@ func TestEnsure_ContextCancellation(t *testing.T) {
 	}
 }
 
-func TestPickSemverTag(t *testing.T) {
-	refs := func(names ...string) []*plumbing.Reference {
-		out := make([]*plumbing.Reference, 0, len(names))
-		for _, n := range names {
-			out = append(out, plumbing.NewReferenceFromStrings(n, "0000000000000000000000000000000000000001"))
-		}
-		return out
+// semverRefs builds tag references for the pickSemverTag table.
+func semverRefs(names ...string) []*plumbing.Reference {
+	out := make([]*plumbing.Reference, 0, len(names))
+	for _, n := range names {
+		out = append(out, plumbing.NewReferenceFromStrings(n, "0000000000000000000000000000000000000001"))
 	}
+	return out
+}
 
-	tests := []struct {
-		name       string
-		refs       []*plumbing.Reference
-		constraint string
-		want       string
-		wantErr    bool
-	}{
-		{"highest match", refs("refs/tags/v1.0.0", "refs/tags/v1.1.0", "refs/tags/v2.0.0"), ">=1.0.0 <2.0.0", "v1.1.0", false},
-		{"no v prefix", refs("refs/tags/1.0.0", "refs/tags/1.2.0"), "^1", "1.2.0", false},
-		{"v-prefix and bare mixed", refs("refs/tags/v1.0.0", "refs/tags/1.3.0"), ">=1.0.0", "1.3.0", false},
-		{"prerelease excluded without -0", refs("refs/tags/v1.0.0", "refs/tags/v1.1.0-rc.1"), ">=1.0.0", "v1.0.0", false},
-		{"prerelease allowed with -0", refs("refs/tags/v1.1.0-rc.1"), ">=1.0.0-0", "v1.1.0-rc.1", false},
-		{"peeled entries ignored", refs("refs/tags/v1.0.0", "refs/tags/v1.0.0^{}", "refs/tags/v1.2.0^{}"), ">=1.0.0", "v1.0.0", false},
-		{"non-semver tags ignored", refs("refs/tags/latest", "refs/tags/v1.0.0"), "*", "v1.0.0", false},
-		{"no match", refs("refs/tags/v0.1.0"), ">=1.0.0", "", true},
-		{"no tags at all", refs("refs/heads/main"), ">=1.0.0", "", true},
-		{"invalid constraint", refs("refs/tags/v1.0.0"), "not-a-constraint", "", true},
+func TestPickSemverTag(t *testing.T) {
+	tests := []pickSemverTagCase{
+		{"highest match", semverRefs("refs/tags/v1.0.0", "refs/tags/v1.1.0", "refs/tags/v2.0.0"), ">=1.0.0 <2.0.0", "v1.1.0", false},
+		{"no v prefix", semverRefs("refs/tags/1.0.0", "refs/tags/1.2.0"), "^1", "1.2.0", false},
+		{"v-prefix and bare mixed", semverRefs("refs/tags/v1.0.0", "refs/tags/1.3.0"), ">=1.0.0", "1.3.0", false},
+		{"prerelease excluded without -0", semverRefs("refs/tags/v1.0.0", "refs/tags/v1.1.0-rc.1"), ">=1.0.0", "v1.0.0", false},
+		{"prerelease allowed with -0", semverRefs("refs/tags/v1.1.0-rc.1"), ">=1.0.0-0", "v1.1.0-rc.1", false},
+		{"peeled entries ignored", semverRefs("refs/tags/v1.0.0", "refs/tags/v1.0.0^{}", "refs/tags/v1.2.0^{}"), ">=1.0.0", "v1.0.0", false},
+		{"non-semver tags ignored", semverRefs("refs/tags/latest", "refs/tags/v1.0.0"), "*", "v1.0.0", false},
+		{"no match", semverRefs("refs/tags/v0.1.0"), ">=1.0.0", "", true},
+		{"no tags at all", semverRefs("refs/heads/main"), ">=1.0.0", "", true},
+		{"invalid constraint", semverRefs("refs/tags/v1.0.0"), "not-a-constraint", "", true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := pickSemverTag(tt.refs, tt.constraint)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("pickSemverTag(%q) = %q, want error", tt.constraint, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("pickSemverTag(%q): %v", tt.constraint, err)
-			}
-			if got != tt.want {
-				t.Errorf("pickSemverTag(%q) = %q, want %q", tt.constraint, got, tt.want)
-			}
+			runPickSemverTagCase(t, tt)
 		})
+	}
+}
+
+// pickSemverTagCase is one row of the pickSemverTag table.
+type pickSemverTagCase struct {
+	name       string
+	refs       []*plumbing.Reference
+	constraint string
+	want       string
+	wantErr    bool
+}
+
+func runPickSemverTagCase(t *testing.T, tt pickSemverTagCase) {
+	got, err := pickSemverTag(tt.refs, tt.constraint)
+	if tt.wantErr {
+		if err == nil {
+			t.Fatalf("pickSemverTag(%q) = %q, want error", tt.constraint, got)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("pickSemverTag(%q): %v", tt.constraint, err)
+	}
+	if got != tt.want {
+		t.Errorf("pickSemverTag(%q) = %q, want %q", tt.constraint, got, tt.want)
 	}
 }
 
@@ -499,7 +507,7 @@ func TestCacheKey_NormalizesURLSpellings(t *testing.T) {
 	if a != b {
 		t.Errorf("https and scp spellings of one repo must share a cache key:\n%s\n%s", a, b)
 	}
-	if c := cacheKey("https://github.com/kyverno/kyverno.git", "tag:v1.1.0"); c == a {
+	if cacheKey("https://github.com/kyverno/kyverno.git", "tag:v1.1.0") == a {
 		t.Error("different refs must not collide on a cache key")
 	}
 }
@@ -598,57 +606,77 @@ func TestFetcher_CloseClosesAgentConnection(t *testing.T) {
 }
 
 func TestExplainAuthFailure(t *testing.T) {
-	sshRejected := errors.New("ssh: handshake failed: ssh: unable to authenticate, attempted methods [publickey], no supported methods remain")
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{"ssh rejected names the credential source", explainAuthSshRejectedNamesTheCredentialSource},
+		{"http 401 suggests credentials", explainAuthHttp401SuggestsCredentials},
+		{"http 403 too", explainAuthHttp403Too},
+		{"other errors pass through", explainAuthOtherErrorsPassThrough},
+		{"resolution-error outcomes never decorate", explainAuthResolutionErrorOutcomesNeverDecorate},
+	} {
+		t.Run(tc.name, tc.run)
+	}
+}
 
-	t.Run("ssh rejected names the credential source", func(t *testing.T) {
-		res := authOutcome{ssh: true, keySource: "ssh-agent"}
-		err := explainAuthFailure(res, sshRejected)
-		for _, want := range []string{"SSH authentication failed", "ssh-agent"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("error %q must mention %q", err, want)
-			}
-		}
-		if !strings.Contains(err.Error(), "unable to authenticate") {
-			t.Errorf("the transport error must stay in the message: %v", err)
-		}
-	})
+// errSSHRejected is the canonical go-git ssh rejection the
+// explainAuthFailure tests replay.
+var errSSHRejected = errors.New("ssh: handshake failed: ssh: unable to authenticate, attempted methods [publickey], no supported methods remain")
 
-	t.Run("http 401 suggests credentials", func(t *testing.T) {
-		res := authOutcome{}
-		err := explainAuthFailure(res, fmt.Errorf("listing refs: %w", transport.ErrAuthenticationRequired))
-		for _, want := range []string{"private repository or bad credentials", envGitUsername, ".netrc"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("error %q must mention %q", err, want)
-			}
+// ssh rejected names the credential source
+func explainAuthSshRejectedNamesTheCredentialSource(t *testing.T) {
+	res := authOutcome{ssh: true, keySource: "ssh-agent"}
+	err := explainAuthFailure(res, errSSHRejected)
+	for _, want := range []string{"SSH authentication failed", "ssh-agent"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q must mention %q", err, want)
 		}
-	})
+	}
+	if !strings.Contains(err.Error(), "unable to authenticate") {
+		t.Errorf("the transport error must stay in the message: %v", err)
+	}
+}
 
-	t.Run("http 403 too", func(t *testing.T) {
-		res := authOutcome{}
-		err := explainAuthFailure(res, fmt.Errorf("cloning: %w", transport.ErrAuthorizationFailed))
-		if !strings.Contains(err.Error(), "private repository or bad credentials") {
-			t.Errorf("error %q must name the auth problem", err)
+// http 401 suggests credentials
+func explainAuthHttp401SuggestsCredentials(t *testing.T) {
+	res := authOutcome{}
+	err := explainAuthFailure(res, fmt.Errorf("listing refs: %w", transport.ErrAuthenticationRequired))
+	for _, want := range []string{"private repository or bad credentials", envGitUsername, ".netrc"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q must mention %q", err, want)
 		}
-	})
+	}
+}
 
-	t.Run("other errors pass through", func(t *testing.T) {
-		plain := errors.New("dial tcp: connection refused")
-		for _, res := range []authOutcome{
-			{ssh: true, keySource: "ssh-agent"},
-			{},
-		} {
-			if got := explainAuthFailure(res, plain); got != plain {
-				t.Errorf("non-auth error must pass through unchanged, got: %v", got)
-			}
-		}
-	})
+// http 403 too
+func explainAuthHttp403Too(t *testing.T) {
+	res := authOutcome{}
+	err := explainAuthFailure(res, fmt.Errorf("cloning: %w", transport.ErrAuthorizationFailed))
+	if !strings.Contains(err.Error(), "private repository or bad credentials") {
+		t.Errorf("error %q must name the auth problem", err)
+	}
+}
 
-	t.Run("resolution-error outcomes never decorate", func(t *testing.T) {
-		res := authOutcome{ssh: true, err: errors.New("no SSH credentials found")}
-		if got := explainAuthFailure(res, sshRejected); got != sshRejected {
-			t.Errorf("a failed resolution must not decorate transport errors, got: %v", got)
+// other errors pass through
+func explainAuthOtherErrorsPassThrough(t *testing.T) {
+	plain := errors.New("dial tcp: connection refused")
+	for _, res := range []authOutcome{
+		{ssh: true, keySource: "ssh-agent"},
+		{},
+	} {
+		if got := explainAuthFailure(res, plain); got != plain {
+			t.Errorf("non-auth error must pass through unchanged, got: %v", got)
 		}
-	})
+	}
+}
+
+// resolution-error outcomes never decorate
+func explainAuthResolutionErrorOutcomesNeverDecorate(t *testing.T) {
+	res := authOutcome{ssh: true, err: errors.New("no SSH credentials found")}
+	if got := explainAuthFailure(res, errSSHRejected); got != errSSHRejected {
+		t.Errorf("a failed resolution must not decorate transport errors, got: %v", got)
+	}
 }
 
 // TestDefaultNoFetch pins the env spell: only the affirmative words disable

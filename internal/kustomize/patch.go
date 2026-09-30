@@ -117,47 +117,62 @@ func ApplyTransformations(resources []byte, patches []PatchSpec, images []ImageO
 func collectPatches(patches []PatchSpec, baseDir string) ([]types.Patch, error) {
 	var collected []types.Patch
 	for _, p := range patches {
-		// If Path is set, read patch content from file (with path traversal protection).
 		patchContent := p.Patch
 		if p.Path != "" {
-			resolved, err := securejoin.SecureJoin(baseDir, p.Path)
+			data, err := readPatchFile(p.Path, baseDir)
 			if err != nil {
-				return nil, fmt.Errorf("resolving patch path %s: %w", p.Path, err)
+				return nil, err
 			}
-			if !IsPathWithinRoot(resolved, baseDir) {
-				return nil, fmt.Errorf("patch path %s escapes base directory", p.Path)
-			}
-			data, err := os.ReadFile(resolved)
-			if err != nil {
-				return nil, fmt.Errorf("reading patch file %s: %w", p.Path, err)
-			}
-			patchContent = string(data)
+			patchContent = data
 		}
-		kp := types.Patch{
-			Patch: patchContent,
-		}
+		kp := types.Patch{Patch: patchContent}
 		if p.Target != nil {
-			kp.Target = &types.Selector{
-				ResId: resid.ResId{
-					Gvk: resid.Gvk{
-						Group:   p.Target.Group,
-						Version: p.Target.Version,
-						Kind:    p.Target.Kind,
-					},
-					Name:      p.Target.Name,
-					Namespace: p.Target.Namespace,
-				},
-			}
-			if p.Target.LabelSelector != "" {
-				kp.Target.LabelSelector = p.Target.LabelSelector
-			}
-			if p.Target.AnnotationSelector != "" {
-				kp.Target.AnnotationSelector = p.Target.AnnotationSelector
-			}
+			kp.Target = patchSelector(p.Target)
 		}
 		collected = append(collected, kp)
 	}
 	return collected, nil
+}
+
+// readPatchFile reads one file-referenced patch, resolved under baseDir —
+// any path escaping it is rejected, preventing path traversal from
+// untrusted repo content.
+func readPatchFile(path, baseDir string) (string, error) {
+	resolved, err := securejoin.SecureJoin(baseDir, path)
+	if err != nil {
+		return "", fmt.Errorf("resolving patch path %s: %w", path, err)
+	}
+	if !IsPathWithinRoot(resolved, baseDir) {
+		return "", fmt.Errorf("patch path %s escapes base directory", path)
+	}
+	data, err := os.ReadFile(resolved)
+	if err != nil {
+		return "", fmt.Errorf("reading patch file %s: %w", path, err)
+	}
+	return string(data), nil
+}
+
+// patchSelector builds the kustomize patch target selector from the spec's
+// target: identity first, then the optional label/annotation selectors.
+func patchSelector(target *PatchTarget) *types.Selector {
+	sel := &types.Selector{
+		ResId: resid.ResId{
+			Gvk: resid.Gvk{
+				Group:   target.Group,
+				Version: target.Version,
+				Kind:    target.Kind,
+			},
+			Name:      target.Name,
+			Namespace: target.Namespace,
+		},
+	}
+	if target.LabelSelector != "" {
+		sel.LabelSelector = target.LabelSelector
+	}
+	if target.AnnotationSelector != "" {
+		sel.AnnotationSelector = target.AnnotationSelector
+	}
+	return sel
 }
 
 // ApplyTargetNamespace sets metadata.namespace on all namespaced resources to
