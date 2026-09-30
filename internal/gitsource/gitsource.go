@@ -264,45 +264,16 @@ func (f *Fetcher) Ensure(ctx context.Context, repo flux.GitRepository) (string, 
 	// form alone would force a full clone (a resolved commit sha from a
 	// branch/HEAD is the branch tip — cloning the tip by name is the same
 	// tree, but shallow).
-	resolved := refSpec
-	cloneRef := ""
-	resolvedFresh := false
-	if !pinned {
-		if f != nil && f.dir != "" {
-			if p, ok := readPointer(f.dir, cacheKey(url, refSpec)); ok && f.fresh(p) {
-				resolved = p.Resolved
-				resolvedFresh = true
-			}
-		}
-		if !resolvedFresh {
-			r, ref, err := resolveFloating(ctx, url, repo.Spec.Ref, auth)
-			if err != nil {
-				return "", explainAuthFailure(res, err)
-			}
-			resolved, cloneRef = r, ref
-		}
+	resolved, cloneRef, resolvedFresh, err := f.resolveRef(ctx, url, repo, refSpec, pinned, auth)
+	if err != nil {
+		return "", explainAuthFailure(res, err)
 	}
 
 	// Clone directory: content-addressed by (url, resolved). Without the
 	// cache every Ensure gets a private temp clone — no reuse at all, all
 	// removed by Close.
 	if f == nil || f.dir == "" {
-		var base string
-		if f != nil {
-			var err error
-			if base, err = f.offTempDir(); err != nil {
-				return "", err
-			}
-		}
-		dst, err := os.MkdirTemp(base, "clone-*")
-		if err != nil {
-			return "", fmt.Errorf("preparing git source clone: %w", err)
-		}
-		dir, err := cloneOnce(ctx, url, resolved, cloneRef, dst, auth)
-		if err != nil {
-			return "", explainAuthFailure(res, err)
-		}
-		return dir, nil
+		return f.ensureUncached(ctx, url, resolved, cloneRef, auth, res)
 	}
 
 	dir := filepath.Join(f.dir, "data", cacheKey(url, resolved))
@@ -315,6 +286,47 @@ func (f *Fetcher) Ensure(ctx context.Context, repo flux.GitRepository) (string, 
 		return "", explainAuthFailure(res, err)
 	}
 	f.rememberPointer(url, refSpec, resolved, resolvedFresh)
+	return dir, nil
+}
+
+// resolveRef resolves the ref to clone: pinned refs are their own resolved
+// form; floating refs resolve through the cached pointer (network only
+// when it is missing or expired), returning the remote ref to clone
+// shallowly alongside (see Ensure).
+func (f *Fetcher) resolveRef(ctx context.Context, url string, repo flux.GitRepository, refSpec string, pinned bool, auth transport.AuthMethod) (resolved, cloneRef string, fresh bool, err error) {
+	if pinned {
+		return refSpec, "", false, nil
+	}
+	if f != nil && f.dir != "" {
+		if p, ok := readPointer(f.dir, cacheKey(url, refSpec)); ok && f.fresh(p) {
+			return p.Resolved, "", true, nil
+		}
+	}
+	r, ref, err := resolveFloating(ctx, url, repo.Spec.Ref, auth)
+	if err != nil {
+		return "", "", false, err
+	}
+	return r, ref, false, nil
+}
+
+// ensureUncached clones url once into a private temp directory — the no-
+// cache path, where every Ensure gets its own clone (removed by Close).
+func (f *Fetcher) ensureUncached(ctx context.Context, url, resolved, cloneRef string, auth transport.AuthMethod, res authOutcome) (string, error) {
+	var base string
+	if f != nil {
+		var err error
+		if base, err = f.offTempDir(); err != nil {
+			return "", err
+		}
+	}
+	dst, err := os.MkdirTemp(base, "clone-*")
+	if err != nil {
+		return "", fmt.Errorf("preparing git source clone: %w", err)
+	}
+	dir, err := cloneOnce(ctx, url, resolved, cloneRef, dst, auth)
+	if err != nil {
+		return "", explainAuthFailure(res, err)
+	}
 	return dir, nil
 }
 

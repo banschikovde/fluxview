@@ -99,25 +99,36 @@ func parseGitEndpoint(raw string) gitEndpoint {
 		return gitEndpoint{local: true, scheme: "file"}
 	}
 	if i := strings.Index(s, "://"); i >= 0 {
-		scheme := strings.ToLower(s[:i])
-		rest := s[i+3:]
-		user := ""
-		if at := strings.LastIndex(rest, "@"); at >= 0 {
-			user, rest = rest[:at], rest[at+1:]
-		}
-		host := rest
-		if slash := strings.IndexByte(rest, '/'); slash >= 0 {
-			host = rest[:slash]
-		}
-		if scheme == "http" || scheme == "https" {
-			// Credentials in URLs are ignored by design; the source of
-			// basic auth is the environment only.
-			user = ""
-		}
-		return gitEndpoint{scheme: scheme, user: user, host: strings.ToLower(host)}
+		return parseURLGitEndpoint(s, i)
 	}
-	// scp-style [user@]host:path — the colon must precede any slash, the
-	// same rule NormalizeGitURL applies.
+	return parseScpGitEndpoint(s)
+}
+
+// parseURLGitEndpoint parses scheme://[user@]host[/path]: scheme folded to
+// lowercase, host folded likewise, user stripped for http(s) — credentials
+// in URLs are ignored by design; the source of basic auth is the
+// environment only.
+func parseURLGitEndpoint(s string, schemeSep int) gitEndpoint {
+	scheme := strings.ToLower(s[:schemeSep])
+	rest := s[schemeSep+3:]
+	user := ""
+	if at := strings.LastIndex(rest, "@"); at >= 0 {
+		user, rest = rest[:at], rest[at+1:]
+	}
+	host := rest
+	if slash := strings.IndexByte(rest, '/'); slash >= 0 {
+		host = rest[:slash]
+	}
+	if scheme == "http" || scheme == "https" {
+		user = ""
+	}
+	return gitEndpoint{scheme: scheme, user: user, host: strings.ToLower(host)}
+}
+
+// parseScpGitEndpoint parses scp-style [user@]host:path — the colon must
+// precede any slash, the same rule NormalizeGitURL applies; anything else
+// is a local path.
+func parseScpGitEndpoint(s string) gitEndpoint {
 	user := ""
 	if at := strings.LastIndex(s, "@"); at >= 0 {
 		user, s = s[:at], s[at+1:]
@@ -608,35 +619,51 @@ func parseNetrc(data []byte) []netrcEntry {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		toks := strings.Fields(line)
-		for i := 0; i < len(toks); i++ {
-			switch toks[i] {
-			case "macdef":
-				inMacro = true
-			case "default":
-				entries = append(entries, netrcEntry{isDefault: true})
-			case "machine", "login", "password", "account":
-				key := toks[i]
-				i++
-				if i >= len(toks) {
-					continue // value missing — ignore the pair
-				}
-				switch key {
-				case "machine":
-					entries = append(entries, netrcEntry{machine: strings.ToLower(toks[i])})
-				case "login":
-					if n := len(entries); n > 0 {
-						entries[n-1].login = toks[i]
-					}
-				case "password":
-					if n := len(entries); n > 0 {
-						entries[n-1].password = toks[i]
-					}
-				}
+		entries, inMacro = applyNetrcTokens(strings.Fields(line), entries, inMacro)
+	}
+	return entries
+}
+
+// applyNetrcTokens folds one netrc line's tokens into entries:
+// machine/default stanzas open entries, login/password/account set fields
+// on the newest one, macdef switches the reader into macro-skip mode
+// (true on return — the rest of the line is a macro body).
+func applyNetrcTokens(toks []string, entries []netrcEntry, inMacro bool) ([]netrcEntry, bool) {
+	for i := 0; i < len(toks); i++ {
+		switch toks[i] {
+		case "macdef":
+			inMacro = true
+		case "default":
+			entries = append(entries, netrcEntry{isDefault: true})
+		case "machine", "login", "password", "account":
+			key := toks[i]
+			i++
+			if i >= len(toks) {
+				continue // value missing — ignore the pair
 			}
-			if inMacro {
-				break // the rest of the line is a macro body
-			}
+			entries = setNetrcField(entries, key, toks[i])
+		}
+		if inMacro {
+			break
+		}
+	}
+	return entries, inMacro
+}
+
+// setNetrcField applies one valued token to entries: machine opens a new
+// entry, login/password set the newest entry's field (account is parsed
+// but unused — the same tolerance real netrc readers show).
+func setNetrcField(entries []netrcEntry, key, value string) []netrcEntry {
+	switch key {
+	case "machine":
+		return append(entries, netrcEntry{machine: strings.ToLower(value)})
+	case "login":
+		if n := len(entries); n > 0 {
+			entries[n-1].login = value
+		}
+	case "password":
+		if n := len(entries); n > 0 {
+			entries[n-1].password = value
 		}
 	}
 	return entries
