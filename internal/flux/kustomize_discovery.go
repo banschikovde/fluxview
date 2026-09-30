@@ -190,8 +190,8 @@ func parseResourcePaths(data []byte, kustDir string) []string {
 			continue
 		}
 		// Resolve symlinks for reliable path comparison.
-		if resolved, err := filepath.EvalSymlinks(absRes); err == nil {
-			absRes = resolved
+		if resolvedPath, err := filepath.EvalSymlinks(absRes); err == nil {
+			absRes = resolvedPath
 		}
 		resolved = append(resolved, absRes)
 	}
