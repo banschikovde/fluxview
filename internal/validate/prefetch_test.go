@@ -201,189 +201,218 @@ func (s *registryStub) totalCount() int64 {
 	return s.total
 }
 
+// prefetchCM/prefetchDep are the canonical kinds the prefetch tests fetch.
+var (
+	prefetchCM  = ResourceKind{APIVersion: "v1", Kind: "ConfigMap"}
+	prefetchDep = ResourceKind{APIVersion: "apps/v1", Kind: "Deployment"}
+)
+
 func TestPrefetchDefaultSchemas(t *testing.T) {
-	configMap := ResourceKind{APIVersion: "v1", Kind: "ConfigMap"}
-	deployment := ResourceKind{APIVersion: "apps/v1", Kind: "Deployment"}
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{"downloads into the checkout layout and caches across runs", prefetchDownloadsIntoTheCheckoutLayoutAndCachesAcrossRuns},
+		{"strict selects the -strict variant", prefetchStrictSelectsTheStrictVariant},
+		{"404 is reported as missing, not an error", prefetch404IsReportedAsMissingNotAnError},
+		{"other HTTP failures fail closed after retries", prefetchOtherHTTPFailuresFailClosedAfterRetries},
+		{"hung requests are bounded by the timeout", prefetchHungRequestsAreBoundedByTheTimeout},
+		{"context cancellation aborts pending work", prefetchContextCancellationAbortsPendingWork},
+		{"non-JSON 200 responses fail and are not cached", prefetchNonJSON200ResponsesFailAndAreNotCached},
+		{"request timeout bounds a slow response; 0 and negative disable it differently", prefetchRequestTimeoutBoundsASlowResponse0AndNegativeDisableItDifferently},
+		{"no kinds to fetch is a no-op", prefetchNoKindsToFetchIsANoOp},
+	} {
+		t.Run(tc.name, func(t *testing.T) { tc.run(t) })
+	}
+}
 
-	t.Run("downloads into the checkout layout and caches across runs", func(t *testing.T) {
-		stub := newRegistryStub(t, nil)
-		cache := t.TempDir()
+// downloads into the checkout layout and caches across runs
+func prefetchDownloadsIntoTheCheckoutLayoutAndCachesAcrossRuns(t *testing.T) {
+	stub := newRegistryStub(t, nil)
+	cache := t.TempDir()
 
-		missing, err := PrefetchDefaultSchemas(context.Background(), []ResourceKind{configMap, deployment}, PrefetchOptions{
-			KubernetesVersion: "v1.36.1",
-			CacheDir:          cache,
-			BaseURL:           stub.url,
-		})
-		if err != nil {
-			t.Fatal(err)
+	missing, err := PrefetchDefaultSchemas(context.Background(), []ResourceKind{prefetchCM, prefetchDep}, PrefetchOptions{
+		KubernetesVersion: "v1.36.1",
+		CacheDir:          cache,
+		BaseURL:           stub.url,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(missing) != 0 {
+		t.Errorf("missing = %+v, want none", missing)
+	}
+	for _, name := range []string{"v1.36.1-standalone/configmap-v1.json", "v1.36.1-standalone/deployment-apps-v1.json"} {
+		if _, err := os.Stat(filepath.Join(cache, name)); err != nil {
+			t.Errorf("expected cached schema %s: %v", name, err)
 		}
-		if len(missing) != 0 {
-			t.Errorf("missing = %+v, want none", missing)
-		}
-		for _, name := range []string{"v1.36.1-standalone/configmap-v1.json", "v1.36.1-standalone/deployment-apps-v1.json"} {
-			if _, err := os.Stat(filepath.Join(cache, name)); err != nil {
-				t.Errorf("expected cached schema %s: %v", name, err)
-			}
-		}
-		if got := stub.totalCount(); got != 2 {
-			t.Errorf("registry requests = %d, want 2", got)
-		}
+	}
+	if got := stub.totalCount(); got != 2 {
+		t.Errorf("registry requests = %d, want 2", got)
+	}
 
-		// Second run: everything is cached, no new requests.
-		if _, err := PrefetchDefaultSchemas(context.Background(), []ResourceKind{configMap, deployment}, PrefetchOptions{
-			KubernetesVersion: "1.36.1", CacheDir: cache, BaseURL: stub.url,
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if got := stub.totalCount(); got != 2 {
-			t.Errorf("cached run must not re-request, requests = %d, want 2", got)
-		}
+	// Second run: everything is cached, no new requests.
+	if _, err := PrefetchDefaultSchemas(context.Background(), []ResourceKind{prefetchCM, prefetchDep}, PrefetchOptions{
+		KubernetesVersion: "1.36.1", CacheDir: cache, BaseURL: stub.url,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stub.totalCount(); got != 2 {
+		t.Errorf("cached run must not re-request, requests = %d, want 2", got)
+	}
+}
+
+// strict selects the -strict variant
+func prefetchStrictSelectsTheStrictVariant(t *testing.T) {
+	stub := newRegistryStub(t, nil)
+	cache := t.TempDir()
+
+	if _, err := PrefetchDefaultSchemas(context.Background(), []ResourceKind{prefetchCM}, PrefetchOptions{
+		KubernetesVersion: "1.36.1", Strict: true, CacheDir: cache, BaseURL: stub.url,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stub.count("/v1.36.1-standalone-strict/configmap-v1.json"); got != 1 {
+		t.Errorf("strict variant requests = %d, want 1", got)
+	}
+}
+
+// 404 is reported as missing, not an error
+func prefetch404IsReportedAsMissingNotAnError(t *testing.T) {
+	stub := newRegistryStub(t, map[string]bool{"/v1.36.1-standalone/configmap-v1.json": true})
+	missing, err := PrefetchDefaultSchemas(context.Background(), []ResourceKind{prefetchCM}, PrefetchOptions{
+		KubernetesVersion: "1.36.1", CacheDir: t.TempDir(), BaseURL: stub.url,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(missing) != 1 || missing[0] != prefetchCM {
+		t.Errorf("missing = %+v, want [ConfigMap]", missing)
+	}
+}
+
+// other HTTP failures fail closed after retries
+func prefetchOtherHTTPFailuresFailClosedAfterRetries(t *testing.T) {
+	var total int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&total, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := PrefetchDefaultSchemas(context.Background(), []ResourceKind{prefetchCM}, PrefetchOptions{
+		KubernetesVersion: "1.36.1", CacheDir: t.TempDir(), BaseURL: server.URL,
+	})
+	if err == nil {
+		t.Fatal("a persistent 500 must fail the prefetch")
+	}
+	if got := atomic.LoadInt64(&total); got != 3 { // 1 attempt + 2 retries
+		t.Errorf("attempts = %d, want 3", got)
+	}
+}
+
+// hung requests are bounded by the timeout
+func prefetchHungRequestsAreBoundedByTheTimeout(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	t.Cleanup(func() {
+		close(release)
+		server.Close()
 	})
 
-	t.Run("strict selects the -strict variant", func(t *testing.T) {
-		stub := newRegistryStub(t, nil)
-		cache := t.TempDir()
-
-		if _, err := PrefetchDefaultSchemas(context.Background(), []ResourceKind{configMap}, PrefetchOptions{
-			KubernetesVersion: "1.36.1", Strict: true, CacheDir: cache, BaseURL: stub.url,
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if got := stub.count("/v1.36.1-standalone-strict/configmap-v1.json"); got != 1 {
-			t.Errorf("strict variant requests = %d, want 1", got)
-		}
+	start := time.Now()
+	_, err := PrefetchDefaultSchemas(context.Background(), []ResourceKind{prefetchCM}, PrefetchOptions{
+		KubernetesVersion: "1.36.1", CacheDir: t.TempDir(), BaseURL: server.URL,
+		RequestTimeout: 50 * time.Millisecond,
 	})
+	if err == nil {
+		t.Fatal("a hung registry must fail the prefetch, not hang forever")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("prefetch took %s, the request timeout should bound it", elapsed)
+	}
+}
 
-	t.Run("404 is reported as missing, not an error", func(t *testing.T) {
-		stub := newRegistryStub(t, map[string]bool{"/v1.36.1-standalone/configmap-v1.json": true})
-		missing, err := PrefetchDefaultSchemas(context.Background(), []ResourceKind{configMap}, PrefetchOptions{
-			KubernetesVersion: "1.36.1", CacheDir: t.TempDir(), BaseURL: stub.url,
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(missing) != 1 || missing[0] != configMap {
-			t.Errorf("missing = %+v, want [ConfigMap]", missing)
-		}
+// context cancellation aborts pending work
+func prefetchContextCancellationAbortsPendingWork(t *testing.T) {
+	block := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block
+	}))
+	t.Cleanup(func() { close(block); server.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+	_, err := PrefetchDefaultSchemas(ctx, []ResourceKind{prefetchCM}, PrefetchOptions{
+		KubernetesVersion: "1.36.1", CacheDir: t.TempDir(), BaseURL: server.URL,
 	})
+	if err == nil {
+		t.Fatal("cancellation must surface as an error")
+	}
+}
 
-	t.Run("other HTTP failures fail closed after retries", func(t *testing.T) {
-		var total int64
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			atomic.AddInt64(&total, 1)
-			w.WriteHeader(http.StatusInternalServerError)
-		}))
-		t.Cleanup(server.Close)
+// non-JSON 200 responses fail and are not cached
+func prefetchNonJSON200ResponsesFailAndAreNotCached(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "<html>gateway error page</html>")
+	}))
+	t.Cleanup(server.Close)
 
-		_, err := PrefetchDefaultSchemas(context.Background(), []ResourceKind{configMap}, PrefetchOptions{
-			KubernetesVersion: "1.36.1", CacheDir: t.TempDir(), BaseURL: server.URL,
-		})
-		if err == nil {
-			t.Fatal("a persistent 500 must fail the prefetch")
-		}
-		if got := atomic.LoadInt64(&total); got != 3 { // 1 attempt + 2 retries
-			t.Errorf("attempts = %d, want 3", got)
-		}
+	cache := t.TempDir()
+	_, err := PrefetchDefaultSchemas(context.Background(), []ResourceKind{prefetchCM}, PrefetchOptions{
+		KubernetesVersion: "1.36.1", CacheDir: cache, BaseURL: server.URL,
 	})
+	if err == nil || !strings.Contains(err.Error(), "invalid JSON") {
+		t.Fatalf("a non-JSON 200 must fail the prefetch, got: %v", err)
+	}
+	entries, _ := os.ReadDir(filepath.Join(cache, "v1.36.1-standalone"))
+	if len(entries) != 0 {
+		t.Errorf("a garbage response must not be cached, got %d files", len(entries))
+	}
+}
 
-	t.Run("hung requests are bounded by the timeout", func(t *testing.T) {
-		release := make(chan struct{})
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			<-release
-		}))
-		t.Cleanup(func() {
-			close(release)
-			server.Close()
-		})
+// request timeout bounds a slow response; 0 and negative disable it differently
+func prefetchRequestTimeoutBoundsASlowResponse0AndNegativeDisableItDifferently(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		fmt.Fprint(w, `{"type": "object"}`)
+	}))
+	t.Cleanup(slow.Close)
 
-		start := time.Now()
-		_, err := PrefetchDefaultSchemas(context.Background(), []ResourceKind{configMap}, PrefetchOptions{
-			KubernetesVersion: "1.36.1", CacheDir: t.TempDir(), BaseURL: server.URL,
-			RequestTimeout: 50 * time.Millisecond,
-		})
-		if err == nil {
-			t.Fatal("a hung registry must fail the prefetch, not hang forever")
-		}
-		if elapsed := time.Since(start); elapsed > 5*time.Second {
-			t.Errorf("prefetch took %s, the request timeout should bound it", elapsed)
-		}
-	})
-
-	t.Run("context cancellation aborts pending work", func(t *testing.T) {
-		block := make(chan struct{})
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			<-block
-		}))
-		t.Cleanup(func() { close(block); server.Close() })
-
-		ctx, cancel := context.WithCancel(context.Background())
-		go func() {
-			time.Sleep(100 * time.Millisecond)
-			cancel()
-		}()
-		_, err := PrefetchDefaultSchemas(ctx, []ResourceKind{configMap}, PrefetchOptions{
-			KubernetesVersion: "1.36.1", CacheDir: t.TempDir(), BaseURL: server.URL,
-		})
-		if err == nil {
-			t.Fatal("cancellation must surface as an error")
-		}
-	})
-
-	t.Run("non-JSON 200 responses fail and are not cached", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, "<html>gateway error page</html>")
-		}))
-		t.Cleanup(server.Close)
-
-		cache := t.TempDir()
-		_, err := PrefetchDefaultSchemas(context.Background(), []ResourceKind{configMap}, PrefetchOptions{
-			KubernetesVersion: "1.36.1", CacheDir: cache, BaseURL: server.URL,
-		})
-		if err == nil || !strings.Contains(err.Error(), "invalid JSON") {
-			t.Fatalf("a non-JSON 200 must fail the prefetch, got: %v", err)
-		}
-		entries, _ := os.ReadDir(filepath.Join(cache, "v1.36.1-standalone"))
-		if len(entries) != 0 {
-			t.Errorf("a garbage response must not be cached, got %d files", len(entries))
-		}
-	})
-
-	t.Run("request timeout bounds a slow response; 0 and negative disable it differently", func(t *testing.T) {
-		slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			time.Sleep(300 * time.Millisecond)
-			fmt.Fprint(w, `{"type": "object"}`)
-		}))
-		t.Cleanup(slow.Close)
-
-		opts := func(timeout time.Duration) PrefetchOptions {
-			return PrefetchOptions{
-				KubernetesVersion: "1.36.1", CacheDir: t.TempDir(),
-				BaseURL: slow.URL, Retries: 0, RequestTimeout: timeout,
-			}
-		}
-
-		// Unset (0) picks the 30s default — a 300ms response fits.
-		if _, err := PrefetchDefaultSchemas(context.Background(), []ResourceKind{configMap}, opts(0)); err != nil {
-			t.Errorf("default timeout should allow a 300ms response, got: %v", err)
-		}
-		// Negative disables the per-request limit — also fits.
-		o := opts(-1)
-		if _, err := PrefetchDefaultSchemas(context.Background(), []ResourceKind{configMap}, o); err != nil {
-			t.Errorf("no per-request timeout should allow a 300ms response, got: %v", err)
-		}
-		// An explicit small timeout cuts the request off.
-		if _, err := PrefetchDefaultSchemas(context.Background(), []ResourceKind{configMap}, opts(50*time.Millisecond)); err == nil {
-			t.Error("a 50ms timeout must fail a 300ms response")
-		}
-	})
-
-	t.Run("no kinds to fetch is a no-op", func(t *testing.T) {
-		if missing, err := PrefetchDefaultSchemas(context.Background(), nil, PrefetchOptions{
+	opts := func(timeout time.Duration) PrefetchOptions {
+		return PrefetchOptions{
 			KubernetesVersion: "1.36.1", CacheDir: t.TempDir(),
-		}); err != nil || missing != nil {
-			t.Errorf("PrefetchDefaultSchemas(nil) = (%v, %v), want (nil, nil)", missing, err)
+			BaseURL: slow.URL, Retries: 0, RequestTimeout: timeout,
 		}
-	})
+	}
+
+	// Unset (0) picks the 30s default — a 300ms response fits.
+	if _, err := PrefetchDefaultSchemas(context.Background(), []ResourceKind{prefetchCM}, opts(0)); err != nil {
+		t.Errorf("default timeout should allow a 300ms response, got: %v", err)
+	}
+	// Negative disables the per-request limit — also fits.
+	o := opts(-1)
+	if _, err := PrefetchDefaultSchemas(context.Background(), []ResourceKind{prefetchCM}, o); err != nil {
+		t.Errorf("no per-request timeout should allow a 300ms response, got: %v", err)
+	}
+	// An explicit small timeout cuts the request off.
+	if _, err := PrefetchDefaultSchemas(context.Background(), []ResourceKind{prefetchCM}, opts(50*time.Millisecond)); err == nil {
+		t.Error("a 50ms timeout must fail a 300ms response")
+	}
+}
+
+// no kinds to fetch is a no-op
+func prefetchNoKindsToFetchIsANoOp(t *testing.T) {
+	if missing, err := PrefetchDefaultSchemas(context.Background(), nil, PrefetchOptions{
+		KubernetesVersion: "1.36.1", CacheDir: t.TempDir(),
+	}); err != nil || missing != nil {
+		t.Errorf("PrefetchDefaultSchemas(nil) = (%v, %v), want (nil, nil)", missing, err)
+	}
 }
 
 func TestRegistryVersionDir(t *testing.T) {

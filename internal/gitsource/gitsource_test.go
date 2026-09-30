@@ -620,14 +620,14 @@ func TestExplainAuthFailure(t *testing.T) {
 	}
 }
 
-// sshRejectedErr is the canonical go-git ssh rejection the
+// errSSHRejected is the canonical go-git ssh rejection the
 // explainAuthFailure tests replay.
-var sshRejectedErr = errors.New("ssh: handshake failed: ssh: unable to authenticate, attempted methods [publickey], no supported methods remain")
+var errSSHRejected = errors.New("ssh: handshake failed: ssh: unable to authenticate, attempted methods [publickey], no supported methods remain")
 
 // ssh rejected names the credential source
 func explainAuthSshRejectedNamesTheCredentialSource(t *testing.T) {
 	res := authOutcome{ssh: true, keySource: "ssh-agent"}
-	err := explainAuthFailure(res, sshRejectedErr)
+	err := explainAuthFailure(res, errSSHRejected)
 	for _, want := range []string{"SSH authentication failed", "ssh-agent"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q must mention %q", err, want)
@@ -674,7 +674,7 @@ func explainAuthOtherErrorsPassThrough(t *testing.T) {
 // resolution-error outcomes never decorate
 func explainAuthResolutionErrorOutcomesNeverDecorate(t *testing.T) {
 	res := authOutcome{ssh: true, err: errors.New("no SSH credentials found")}
-	if got := explainAuthFailure(res, sshRejectedErr); got != sshRejectedErr {
+	if got := explainAuthFailure(res, errSSHRejected); got != errSSHRejected {
 		t.Errorf("a failed resolution must not decorate transport errors, got: %v", got)
 	}
 }

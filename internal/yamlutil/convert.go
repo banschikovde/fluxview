@@ -20,14 +20,24 @@ func NodeNeedsConversion(node *yaml.Node) bool {
 			}
 		}
 	case yaml.MappingNode:
-		for i := 1; i < len(node.Content); i += 2 {
-			if node.Content[i].Tag == "!!null" {
-				return true
-			}
-			if NodeNeedsConversion(node.Content[i]) {
-				return true
-			}
+		if mappingValueNeedsConversion(node) {
+			return true
 		}
 	}
 	return node.Style&yaml.FlowStyle != 0
+}
+
+// mappingValueNeedsConversion reports whether any value of the mapping
+// holds a conversion target: a null value under a key, or a subtree that
+// needs conversion itself.
+func mappingValueNeedsConversion(node *yaml.Node) bool {
+	for i := 1; i < len(node.Content); i += 2 {
+		if node.Content[i].Tag == "!!null" {
+			return true
+		}
+		if NodeNeedsConversion(node.Content[i]) {
+			return true
+		}
+	}
+	return false
 }
