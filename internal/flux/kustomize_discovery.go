@@ -47,11 +47,12 @@ func DiscoverKustomizeDirsAndFiles(ctx context.Context, rootPath string) (buildD
 	walkRoot := filepath.Clean(rootPath)
 
 	w := &kustDiscoveryWalk{
-		ctx:             ctx,
 		walkRoot:        walkRoot,
 		absRootResolved: absRootResolved,
 	}
-	err = filepath.WalkDir(rootPath, w.visit)
+	err = filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
+		return w.visit(ctx, path, d, err)
+	})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -64,7 +65,6 @@ func DiscoverKustomizeDirsAndFiles(ctx context.Context, rootPath string) (buildD
 // walker out of kustomize inputs) and the parsed native-kustomize entries
 // (resources resolved, for the later referenced-by dedup).
 type kustDiscoveryWalk struct {
-	ctx             context.Context
 	walkRoot        string
 	absRootResolved string
 	fileDirs        []string
@@ -88,11 +88,11 @@ type kustEntry struct {
 // must find kustomization files inside vendored charts (and register
 // their directories, keeping the loose-file walker out of chart
 // templates).
-func (w *kustDiscoveryWalk) visit(path string, d fs.DirEntry, err error) error {
+func (w *kustDiscoveryWalk) visit(ctx context.Context, path string, d fs.DirEntry, err error) error {
 	if err != nil {
 		return nil
 	}
-	if err := w.ctx.Err(); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if !d.IsDir() {

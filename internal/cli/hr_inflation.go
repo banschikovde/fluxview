@@ -410,7 +410,7 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, inp
 			continue
 		}
 
-		target, ok := resolveHRChartTarget(&hr, input, ociRepoIndex, helmRepoIndex, secretIndex, opts.repoRoot, fail, stderr)
+		target, ok := resolveHRChartTarget(&hr, input, sourceIndexes{oci: ociRepoIndex, helm: helmRepoIndex, secret: secretIndex}, opts.repoRoot, fail, stderr)
 		if !ok {
 			continue
 		}
@@ -465,13 +465,12 @@ type (
 func resolveHRChartTarget(
 	hr *flux.HelmRelease,
 	input helmInflationInput,
-	ociRepoIndex map[string]flux.OCIRepository,
-	helmRepoIndex map[string]flux.HelmRepository,
-	secretIndex map[string]flux.Secret,
+	idx sourceIndexes,
 	repoRoot string,
 	fail hrFailFunc,
 	stderr hrStderrFunc,
 ) (hrChartTarget, bool) {
+	ociRepoIndex, helmRepoIndex, secretIndex := idx.oci, idx.helm, idx.secret
 	// ChartRef-based HR (Flux v2 OCIRepository pattern).
 	if hr.Spec.ChartRef != nil && hr.Spec.ChartRef.Kind == flux.KindOCIRepository {
 		ociRef, ociVersion := resolveOCIRepoURL(*hr, ociRepoIndex)

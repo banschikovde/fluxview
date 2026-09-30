@@ -220,7 +220,8 @@ func PrefetchDefaultSchemas(ctx context.Context, kinds []ResourceKind, opts Pref
 		return nil, fmt.Errorf("creating schema cache dir: %w", err)
 	}
 
-	missingByIndex, err := fetchSchemasConcurrently(ctx, fetch, policy, baseURL, versionDir, opts.CacheDir, opts.Concurrency)
+	job := schemaFetchJob{policy: policy, baseURL: baseURL, versionDir: versionDir, cacheDir: opts.CacheDir}
+	missingByIndex, err := fetchSchemasConcurrently(ctx, fetch, job, opts.Concurrency)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +263,7 @@ func prefetchPlan(opts PrefetchOptions) (policy schemaFetchPolicy, baseURL, vers
 // worker pool over a prefilled queue — a worker that hit a hard error
 // simply stops; the queue is drained or abandoned, never deadlocked.
 // It returns the per-kind 404 marks and the first hard error, if any.
-func fetchSchemasConcurrently(ctx context.Context, fetch []ResourceKind, policy schemaFetchPolicy, baseURL, versionDir, cacheDir string, concurrency int) ([]bool, error) {
+func fetchSchemasConcurrently(ctx context.Context, fetch []ResourceKind, job schemaFetchJob, concurrency int) ([]bool, error) {
 	if concurrency <= 0 {
 		concurrency = prefetchConcurrency
 	}
@@ -283,11 +284,20 @@ func fetchSchemasConcurrently(ctx context.Context, fetch []ResourceKind, policy 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			fetchSchemaWorker(ctx, work, fetch, policy, baseURL, versionDir, cacheDir, res)
+			fetchSchemaWorker(ctx, work, fetch, job, res)
 		}()
 	}
 	wg.Wait()
 	return res.missingByIndex, res.firstErr
+}
+
+// schemaFetchJob bundles one prefetch run's immutable fetch context: the
+// policy, the registry URL pieces and the cache directory.
+type schemaFetchJob struct {
+	policy     schemaFetchPolicy
+	baseURL    string
+	versionDir string
+	cacheDir   string
 }
 
 // fetchResults accumulates the pool's outcome under one mutex: per-kind
@@ -313,9 +323,9 @@ func (r *fetchResults) record(idx int, notFound bool, err error) {
 // fetchSchemaWorker drains the work queue, fetching each kind's schema;
 // after a hard error it stops (the queue is drained by siblings or
 // abandoned, never deadlocked).
-func fetchSchemaWorker(ctx context.Context, work <-chan int, fetch []ResourceKind, policy schemaFetchPolicy, baseURL, versionDir, cacheDir string, res *fetchResults) {
+func fetchSchemaWorker(ctx context.Context, work <-chan int, fetch []ResourceKind, job schemaFetchJob, res *fetchResults) {
 	for idx := range work {
-		notFound, err := fetchSchema(ctx, policy, baseURL, versionDir, fetch[idx], cacheDir)
+		notFound, err := fetchSchema(ctx, job.policy, job.baseURL, job.versionDir, fetch[idx], job.cacheDir)
 		res.record(idx, notFound, err)
 		if err != nil {
 			return

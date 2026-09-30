@@ -533,7 +533,7 @@ func enrichHelmRows(ctx context.Context, env *inventoryEnv, fleet *helmFleet, re
 		if !row.renderable {
 			continue
 		}
-		failed, split, err := enrichOneHelmRow(ctx, env, fleet, repoRoot, row, components, seenCR, knownCR)
+		failed, split, err := enrichOneHelmRow(ctx, env, fleet, repoRoot, row, components, crDedup{seen: seenCR, known: knownCR})
 		if err != nil {
 			return failedParents, splitParents, err
 		}
@@ -552,7 +552,7 @@ func enrichHelmRows(ctx context.Context, env *inventoryEnv, fleet *helmFleet, re
 // returned strings are the release's parent key when it failed to render
 // or was umbrella-split ("" otherwise); an unsplit release's images are
 // written straight into its component.
-func enrichOneHelmRow(ctx context.Context, env *inventoryEnv, fleet *helmFleet, repoRoot string, row helmRow, components *[]inventory.Component, seenCR, knownCR map[string]bool) (failed, split string, err error) {
+func enrichOneHelmRow(ctx context.Context, env *inventoryEnv, fleet *helmFleet, repoRoot string, row helmRow, components *[]inventory.Component, dedup crDedup) (failed, split string, err error) {
 	if err := CheckInterrupted(ctx); err != nil {
 		return "", "", err
 	}
@@ -568,7 +568,7 @@ func enrichOneHelmRow(ctx context.Context, env *inventoryEnv, fleet *helmFleet, 
 	}
 
 	docs := renderedDocs(rendered)
-	*components = chartCRs(*components, docs, row, env.rules, seenCR, knownCR)
+	*components = chartCRs(*components, docs, row, env.rules, dedup.seen, dedup.known)
 
 	if env.splitUmbrella {
 		if children, ok := umbrellaChildren((*components)[idx], docs); ok {
@@ -584,6 +584,14 @@ func enrichOneHelmRow(ctx context.Context, env *inventoryEnv, fleet *helmFleet, 
 // parentKey is the namespace-qualified identity of a parent HelmRelease —
 // two releases may share a name across namespaces.
 func parentKey(namespace, name string) string { return namespace + "/" + name }
+
+// crDedup bundles enrichment's custom-resource dedup sets: the identity
+// index of already-collected CRs and the chart-rendered ones this run has
+// emitted.
+type crDedup struct {
+	seen  map[string]bool
+	known map[string]bool
+}
 
 // knownCRIndex indexes the already-collected custom resources by identity
 // (kind/namespace/name) for O(1) chart-rendered CR dedup during
