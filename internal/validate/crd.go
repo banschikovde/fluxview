@@ -19,6 +19,10 @@ import (
 	"github.com/banschikovde/fluxview/internal/git"
 )
 
+// metaJSONName is the CRD conversion cache manifest: one JSON file per
+// cache directory recording the inputs the schemas were built from.
+const metaJSONName = "meta.json"
+
 // CRDYAMLToSchemaDir reads CRD definition files (.yaml/.yml, any depth) from
 // dir and writes one kubeconform-named JSON Schema per CRD version into a
 // schema directory, returning its path — or "" when no CRD documents were
@@ -108,7 +112,7 @@ func CRDYAMLToSchemaDir(dir, cacheRoot string) (string, error) {
 	// Sweep the directory to the claimed set: removes schemas of removed
 	// or changed sources, and orphans left by an interrupted run (outputs
 	// written but meta.json not yet saved, temp files).
-	live := map[string]struct{}{"meta.json": {}}
+	live := map[string]struct{}{metaJSONName: {}}
 	for _, entry := range meta.Files {
 		for _, name := range entry.Outputs {
 			live[name] = struct{}{}
@@ -146,7 +150,7 @@ type crdCacheEntry struct {
 
 func loadCRDCacheMeta(dir string) crdCacheMeta {
 	meta := crdCacheMeta{Files: map[string]crdCacheEntry{}}
-	data, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	data, err := os.ReadFile(filepath.Join(dir, metaJSONName))
 	if err != nil {
 		return meta // missing or unreadable: convert everything fresh
 	}
@@ -162,7 +166,7 @@ func saveCRDCacheMeta(dir string, meta crdCacheMeta) error {
 	if err != nil {
 		return fmt.Errorf("encoding CRD cache meta: %w", err)
 	}
-	if err := writeFileAtomic(filepath.Join(dir, "meta.json"), data); err != nil {
+	if err := writeFileAtomic(filepath.Join(dir, metaJSONName), data); err != nil {
 		return fmt.Errorf("writing CRD cache meta: %w", err)
 	}
 	return nil
@@ -194,7 +198,7 @@ func dropEmptyDir(dir string, persistent bool) string {
 		return dir
 	}
 	for _, e := range entries {
-		if persistent && e.Name() == "meta.json" {
+		if persistent && e.Name() == metaJSONName {
 			continue
 		}
 		return dir // a real schema file

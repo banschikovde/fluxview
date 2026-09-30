@@ -48,8 +48,8 @@ func DiscoverKustomizeDirsAndFiles(ctx context.Context, rootPath string) (buildD
 
 	// Resolve rootPath for consistent path comparison (macOS /var → /private/var).
 	absRootResolved, _ := filepath.Abs(rootPath)
-	if real, err := filepath.EvalSymlinks(absRootResolved); err == nil {
-		absRootResolved = real
+	if resolved, err := filepath.EvalSymlinks(absRootResolved); err == nil {
+		absRootResolved = resolved
 	}
 	walkRoot := filepath.Clean(rootPath)
 
@@ -86,8 +86,8 @@ func DiscoverKustomizeDirsAndFiles(ctx context.Context, rootPath string) (buildD
 		}
 
 		absPath, _ := filepath.Abs(path)
-		if real, err := filepath.EvalSymlinks(absPath); err == nil {
-			absPath = real
+		if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+			absPath = resolved
 		}
 		if absPath == absRootResolved {
 			return nil
@@ -190,8 +190,8 @@ func parseResourcePaths(data []byte, kustDir string) []string {
 			continue
 		}
 		// Resolve symlinks for reliable path comparison.
-		if real, err := filepath.EvalSymlinks(absRes); err == nil {
-			absRes = real
+		if resolved, err := filepath.EvalSymlinks(absRes); err == nil {
+			absRes = resolved
 		}
 		resolved = append(resolved, absRes)
 	}

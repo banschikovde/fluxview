@@ -13,7 +13,7 @@ func NodeNeedsConversion(node *yaml.Node) bool {
 		return false
 	}
 	switch node.Kind {
-	case yaml.DocumentNode:
+	case yaml.DocumentNode, yaml.SequenceNode:
 		for _, child := range node.Content {
 			if NodeNeedsConversion(child) {
 				return true
@@ -25,12 +25,6 @@ func NodeNeedsConversion(node *yaml.Node) bool {
 				return true
 			}
 			if NodeNeedsConversion(node.Content[i]) {
-				return true
-			}
-		}
-	case yaml.SequenceNode:
-		for _, child := range node.Content {
-			if NodeNeedsConversion(child) {
 				return true
 			}
 		}

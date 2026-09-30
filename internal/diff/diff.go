@@ -241,15 +241,16 @@ func computeEditScript(a, b []string) []editOp {
 		return ops
 	}
 
-	max := n + m
-	offset := max
-	v := make([]int, 2*max+1)
+	// maxEdits bounds the edit distance search (Myers): n deletions + m insertions.
+	maxEdits := n + m
+	offset := maxEdits
+	v := make([]int, 2*maxEdits+1)
 
 	// Store V snapshots for backtracking.
 	var trace [][]int
 	dFound := -1
 
-	for d := 0; d <= max && dFound < 0; d++ {
+	for d := 0; d <= maxEdits && dFound < 0; d++ {
 		snap := make([]int, len(v))
 		copy(snap, v)
 		trace = append(trace, snap)
@@ -277,7 +278,7 @@ func computeEditScript(a, b []string) []editOp {
 	}
 
 	if dFound < 0 {
-		dFound = max
+		dFound = maxEdits
 	}
 
 	// Backtrack through trace to build edit script.

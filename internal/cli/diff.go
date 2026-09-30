@@ -27,6 +27,10 @@ import (
 // this directory. Callers should skip their own follow-up warning.
 var errAlreadyWarned = errors.New("build already warned")
 
+// sectionSeparator joins consecutive YAML documents in the built output:
+// newline, the --- document separator, newline.
+const sectionSeparator = "\n---\n"
+
 // DiffFlags holds flags for the diff command.
 type DiffFlags struct {
 	Path                string
@@ -387,7 +391,7 @@ func buildKSContent(ctx context.Context, scans *scanCache, builder *kustomize.Bu
 		overlayOutputs := buildKustomizeOverlays(ctx, scans, builder, clusterPath, ksPaths, cache)
 		for _, overlay := range overlayOutputs {
 			if len(output) > 0 {
-				output = append(output, []byte("\n---\n")...)
+				output = append(output, []byte(sectionSeparator)...)
 			}
 			output = append(output, reorderYAMLFields(overlay)...)
 		}
@@ -632,7 +636,7 @@ func buildAllKustomizations(ctx context.Context, scans *scanCache, builder *kust
 		return nil, nil
 	}
 
-	combined := strings.Join(results, "\n---\n")
+	combined := strings.Join(results, sectionSeparator)
 
 	// No dedup here on purpose: buildKSContent deduplicates the combined
 	// output (KS builds + native overlays) once — deduplicating the KS part
@@ -729,7 +733,7 @@ func readYAMLFilesRecursive(ctx context.Context, dir, repoRoot string) ([]byte, 
 			return err
 		}
 		if buf.Len() > 0 {
-			buf.WriteString("\n---\n")
+			buf.WriteString(sectionSeparator)
 		}
 		buf.Write(data)
 		return nil
@@ -757,7 +761,7 @@ func inflateAllHelmReleases(ctx context.Context, inflater *helm.Inflater, helmRe
 			return nil, err
 		}
 		if i > 0 {
-			buf.WriteString("\n---\n")
+			buf.WriteString(sectionSeparator)
 		}
 		buf.Write(out)
 	}

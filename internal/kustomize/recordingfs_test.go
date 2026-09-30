@@ -79,7 +79,7 @@ func TestRecordingFs_HashReflectsServedBytes(t *testing.T) {
 	if !ok || len(files) != 1 {
 		t.Fatalf("manifest: ok=%v files=%v", ok, files)
 	}
-	if want := sha256Hex([]byte("original: true\n")); files[0].SHA256 != want {
+	if files[0].SHA256 != sha256Hex([]byte("original: true\n")) {
 		t.Fatalf("hash must reflect the served bytes, got %s", files[0].SHA256)
 	}
 }
@@ -111,7 +111,7 @@ func TestRecordingFs_OpenHashesServedBytes(t *testing.T) {
 	if !ok || len(files) != 1 {
 		t.Fatalf("manifest: ok=%v files=%v", ok, files)
 	}
-	if want := sha256Hex([]byte("served: true\n")); files[0].SHA256 != want {
+	if files[0].SHA256 != sha256Hex([]byte("served: true\n")) {
 		t.Fatalf("hash must reflect the bytes served through Open, got %s", files[0].SHA256)
 	}
 }

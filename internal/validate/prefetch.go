@@ -324,7 +324,7 @@ func fetchSchema(ctx context.Context, client *http.Client, baseURL, versionDir s
 		// A negative timeout disables the per-request limit: the request
 		// then runs under the caller's context alone.
 		reqCtx := ctx
-		cancel := context.CancelFunc(func() {})
+		cancel := context.CancelFunc(func() { /* no-op: replaced by WithTimeout below when timeout > 0 */ })
 		if timeout > 0 {
 			reqCtx, cancel = context.WithTimeout(ctx, timeout)
 		}

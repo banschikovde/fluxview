@@ -138,7 +138,7 @@ func (e gitEndpoint) hostWithPort() string {
 	if h == "" {
 		return h
 	}
-	if colon := strings.LastIndexByte(h, ':'); colon > strings.LastIndexByte(h, ']') {
+	if strings.LastIndexByte(h, ':') > strings.LastIndexByte(h, ']') {
 		return h
 	}
 	return h + ":22"

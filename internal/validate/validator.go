@@ -62,7 +62,7 @@ func DefaultCRDSchemaCacheDir() string {
 // cache both go through it, so the next cache copies a single known shape.
 func CacheDirOrTemp(dir, tempPrefix string) (string, func(), error) {
 	if !cachedir.Disabled(dir) {
-		return dir, func() {}, nil
+		return dir, func() { /* no-op cleanup: the directory is caller-owned */ }, nil
 	}
 	tmp, err := os.MkdirTemp("", tempPrefix)
 	if err != nil {

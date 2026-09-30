@@ -588,7 +588,7 @@ func TestComposeSchemaLocations_KubernetesJSONSchemaCheckout(t *testing.T) {
 		if locations[1] != want {
 			t.Errorf("checkout location = %q,\nwant %q", locations[1], want)
 		}
-		if registry := filepath.Join(filepath.Join(flags.schemaCacheDir(), "registry"), "{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json"); locations[2] != registry {
+		if locations[2] != filepath.Join(filepath.Join(flags.schemaCacheDir(), "registry"), "{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json") {
 			t.Errorf("last location = %q, want the prefetched registry copy", locations[2])
 		}
 	})

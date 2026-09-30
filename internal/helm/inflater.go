@@ -117,6 +117,10 @@ func WithDownloadTimeout(d time.Duration) InflaterOption {
 	return func(in *Inflater) { in.downloadTimeout = d }
 }
 
+// ociPrefix marks an OCI chart reference; OCI differs from the classic
+// repo/index flow enough that every resolver entry point branches on it.
+const ociPrefix = "oci://"
+
 // DefaultCacheDir returns the Helm cache directory: $FLUXVIEW_HELM_CACHE_DIR,
 // else <cachedir.DefaultDir base>/helm. The disable word "disabled" turns the
 // cache off (checked in NewInflater).
@@ -389,7 +393,7 @@ type ociRef struct {
 // the helm SDK's own newReference (same last-colon tag heuristic); the
 // registry client validates the result anyway.
 func parseOCIRef(ref string) ociRef {
-	r := strings.TrimPrefix(ref, "oci://")
+	r := strings.TrimPrefix(ref, ociPrefix)
 	var out ociRef
 	if i := strings.LastIndex(r, "@"); i >= 0 {
 		out.digest = r[i+1:]
@@ -644,7 +648,7 @@ func (in *Inflater) resolveOCIChart(chartRef, version, username, password string
 	if gerr != nil {
 		return "", fmt.Errorf("creating oci getter: %w", gerr)
 	}
-	digestRef := "oci://" + r.base + "@" + digest
+	digestRef := ociPrefix + r.base + "@" + digest
 	data, gerr := g.Get(digestRef, getter.WithRegistryClient(client), getter.WithPlainHTTP(plainHTTP))
 	if gerr != nil {
 		return "", fmt.Errorf("downloading chart %s: %w", digestRef, gerr)
@@ -700,7 +704,7 @@ type resolvedChart struct {
 // setting RepoURL for OCI causes index.yaml fetch failure.
 func (in *Inflater) resolveChart(ctx context.Context, chartName, version, repoURL, username, password string) (resolvedChart, error) {
 	switch {
-	case strings.HasPrefix(chartName, "oci://"):
+	case strings.HasPrefix(chartName, ociPrefix):
 		// OCIRepository pattern: chartName is the full OCI reference
 		// (URL + optional @digest). Use directly, don't append anything.
 		ref := chartName
@@ -709,7 +713,7 @@ func (in *Inflater) resolveChart(ctx context.Context, chartName, version, repoUR
 			return resolvedChart{}, fmt.Errorf("locating chart %s: %w", ref, err)
 		}
 		return resolvedChart{path: chartPath, ref: ref, oci: true}, nil
-	case strings.HasPrefix(repoURL, "oci://"):
+	case strings.HasPrefix(repoURL, ociPrefix):
 		// HelmRepository type=oci: append chart name to repo URL.
 		ref := strings.TrimSuffix(repoURL, "/") + "/" + chartName
 		chartPath, err := resolveOCIChartCancelable(ctx, in, ref, version, username, password)
@@ -961,10 +965,10 @@ func FindHelmRepoURL(repos map[string]fluxtypes.HelmRepository, name, namespace 
 		return "", "", "", fmt.Errorf("HelmRepository %s/%s not found", namespace, name)
 	}
 	url := repo.Spec.URL
-	if repo.Spec.Type == "oci" && !strings.HasPrefix(url, "oci://") {
+	if repo.Spec.Type == "oci" && !strings.HasPrefix(url, ociPrefix) {
 		url = strings.TrimPrefix(url, "https://")
 		url = strings.TrimPrefix(url, "http://")
-		url = "oci://" + url
+		url = ociPrefix + url
 	}
 
 	username := ""

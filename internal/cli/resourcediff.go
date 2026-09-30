@@ -158,7 +158,7 @@ func stripAttrsNode(node *yaml.Node, attrs map[string]bool) {
 		return
 	}
 	switch node.Kind {
-	case yaml.DocumentNode:
+	case yaml.DocumentNode, yaml.SequenceNode:
 		for _, child := range node.Content {
 			stripAttrsNode(child, attrs)
 		}
@@ -174,10 +174,6 @@ func stripAttrsNode(node *yaml.Node, attrs map[string]bool) {
 			stripAttrsNode(valNode, attrs)
 		}
 		node.Content = kept
-	case yaml.SequenceNode:
-		for _, child := range node.Content {
-			stripAttrsNode(child, attrs)
-		}
 	}
 }
 

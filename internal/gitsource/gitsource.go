@@ -54,6 +54,13 @@ import (
 // clone itself; its presence and integrity mark the directory as complete.
 const seedFileName = ".fluxview-source.json"
 
+// The canonical resolved-ref spellings: a pinned revision is "commit:<sha>",
+// a floating branch tracks the git ref "refs/heads/<branch>".
+const (
+	commitPrefix    = "commit:"
+	refsHeadsPrefix = "refs/heads/"
+)
+
 // DefaultCacheDir returns the git source cache directory: env
 // FLUXVIEW_GIT_SOURCE_CACHE_DIR, else <cachedir.DefaultDir base>/
 // git-sources. The disable word "disabled" disables clone reuse (checked
@@ -378,11 +385,11 @@ func (f *Fetcher) fresh(m meta) bool {
 func resolveFloating(ctx context.Context, url string, ref *flux.GitRepositoryRef, auth transport.AuthMethod) (resolved, cloneRef string, err error) {
 	switch {
 	case ref != nil && ref.Branch != "":
-		sha, err := lsRemoteHash(ctx, url, "refs/heads/"+ref.Branch, auth)
+		sha, err := lsRemoteHash(ctx, url, refsHeadsPrefix+ref.Branch, auth)
 		if err != nil {
 			return "", "", fmt.Errorf("resolving branch %q of %s: %w", ref.Branch, url, err)
 		}
-		return "commit:" + sha, "refs/heads/" + ref.Branch, nil
+		return commitPrefix + sha, refsHeadsPrefix + ref.Branch, nil
 	case ref != nil && ref.Semver != "":
 		refs, err := listRefs(ctx, url, auth)
 		if err != nil {
@@ -399,11 +406,11 @@ func resolveFloating(ctx context.Context, url string, ref *flux.GitRepositoryRef
 			return "", "", fmt.Errorf("resolving HEAD of %s: %w", url, err)
 		}
 		if branch == "" {
-			return "commit:" + sha, "", nil
+			return commitPrefix + sha, "", nil
 		}
 		// Zero-hash HEAD worked around via a named branch — clone that
 		// branch shallowly instead of defaulting to a full clone.
-		return "commit:" + sha, "refs/heads/" + branch, nil
+		return commitPrefix + sha, refsHeadsPrefix + branch, nil
 	}
 }
 
@@ -582,8 +589,8 @@ func lsRemoteHead(ctx context.Context, url string, auth transport.AuthMethod) (s
 			if !ref.Hash().IsZero() {
 				return ref.Hash().String(), "", nil
 			}
-		case strings.HasPrefix(name, "refs/heads/"):
-			branches[strings.TrimPrefix(name, "refs/heads/")] = ref.Hash().String()
+		case strings.HasPrefix(name, refsHeadsPrefix):
+			branches[strings.TrimPrefix(name, refsHeadsPrefix)] = ref.Hash().String()
 		}
 	}
 	if len(branches) == 0 {

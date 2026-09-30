@@ -184,7 +184,7 @@ func TestEnsure_HeadNoRef(t *testing.T) {
 	}
 
 	up.commit("file.txt", "second\n")
-	if again := mustEnsure(t, f, up.url(), nil); again == first {
+	if mustEnsure(t, f, up.url(), nil) == first {
 		t.Error("no-ref HEAD must re-resolve with TTL 0, got the same clone dir")
 	}
 
@@ -499,7 +499,7 @@ func TestCacheKey_NormalizesURLSpellings(t *testing.T) {
 	if a != b {
 		t.Errorf("https and scp spellings of one repo must share a cache key:\n%s\n%s", a, b)
 	}
-	if c := cacheKey("https://github.com/kyverno/kyverno.git", "tag:v1.1.0"); c == a {
+	if cacheKey("https://github.com/kyverno/kyverno.git", "tag:v1.1.0") == a {
 		t.Error("different refs must not collide on a cache key")
 	}
 }
