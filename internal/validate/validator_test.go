@@ -748,7 +748,36 @@ func TestCacheDirOrTemp(t *testing.T) {
 		{"plain value passes through", cacheDirOrTempPlainValuePassesThrough},
 		{"empty value passes through (means default upstream)", cacheDirOrTempEmptyValuePassesThroughMeansDefaultUpstream},
 	} {
-		t.Run(tc.name, func(t *testing.T) { tc.run(t) })
+		t.Run(tc.name, tc.run)
+	}
+	for _, spell := range []string{"disabled", "DISABLED", "Disabled"} {
+		t.Run("spell "+spell, func(t *testing.T) {
+			runCacheDirOrTempSpellCase(t, spell)
+		})
+	}
+}
+
+// runCacheDirOrTempSpellCase exercises the disable word in one spelling:
+// CacheDirOrTemp must map it to a fresh temp directory named by the
+// prefix, removed again by the returned cleanup.
+func runCacheDirOrTempSpellCase(t *testing.T, spell string) {
+	t.Helper()
+	dir, cleanup, err := CacheDirOrTemp(spell, "fluxview-crd-schemas-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dir == spell || dir == "" {
+		t.Fatalf("dir = %q, want a temp dir", dir)
+	}
+	if !strings.HasPrefix(dir, os.TempDir()) {
+		t.Errorf("dir %q not under the temp root", dir)
+	}
+	if base := filepath.Base(dir); !strings.HasPrefix(base, "fluxview-crd-schemas-") {
+		t.Errorf("temp dir %q should be named by the prefix", base)
+	}
+	cleanup()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("temp dir must be removed by cleanup, stat err = %v", err)
 	}
 }
 

@@ -113,6 +113,9 @@ type looseYAMLWalker struct {
 	outputs      [][]byte
 }
 
+// newLooseYAMLWalker builds the walker for one walk: the repo-root FS
+// loose reads go through, the walk root, the kustomization directories to
+// prune and the caller's filtering options.
 func newLooseYAMLWalker(rootFS *os.Root, repoRoot, root string, kustDirs map[string]bool, opts overlayWalkOptions) *looseYAMLWalker {
 	return &looseYAMLWalker{
 		rootFS:       rootFS,

@@ -697,7 +697,7 @@ func renderKSContent(ctx context.Context, env *ksBuildEnv, ks flux.Kustomization
 // build output, with the plain "---" document separator (no surrounding
 // blank lines: sectionSeparator adds those between KS results).
 func prependKSResource(ksYAML, output []byte) string {
-	if len(ksYAML) == 0 {
+	if ksYAML == nil {
 		return string(output)
 	}
 	combined := string(ksYAML)

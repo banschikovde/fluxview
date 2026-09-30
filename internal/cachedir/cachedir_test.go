@@ -189,6 +189,7 @@ func TestDefaultDir(t *testing.T) {
 	// state independent across subtests.
 	var buf syncBuffer
 	warnOut = &buf
+	resetWarnOnce()
 	t.Cleanup(func() { warnOut = os.Stderr })
 
 	for _, tc := range []struct {

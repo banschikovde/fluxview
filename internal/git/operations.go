@@ -149,7 +149,7 @@ func ensureDir(created map[string]bool, dir string) error {
 func checkoutSymlink(f *object.File, filePath, root string) error {
 	target, err := fileContents(f)
 	if err != nil {
-		return fmt.Errorf("reading symlink %s: %w", f.Name, err)
+		return err
 	}
 	linkTarget := strings.TrimSpace(target)
 
@@ -174,7 +174,7 @@ func checkoutSymlink(f *object.File, filePath, root string) error {
 func checkoutRegularFile(f *object.File, filePath string) error {
 	contents, err := fileContents(f)
 	if err != nil {
-		return fmt.Errorf("reading file %s: %w", f.Name, err)
+		return err
 	}
 	if err := os.WriteFile(filePath, []byte(contents), os.FileMode(f.Mode)); err != nil {
 		return fmt.Errorf("writing file %s: %w", f.Name, err)
@@ -182,16 +182,18 @@ func checkoutRegularFile(f *object.File, filePath string) error {
 	return nil
 }
 
-// fileContents reads one tree file's blob.
+// fileContents reads one tree file's blob; an open failure keeps the
+// "opening" wording, a read failure the "reading" one, matching the
+// pre-refactor per-callsite messages.
 func fileContents(f *object.File) (string, error) {
 	reader, err := f.Reader()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("opening %s: %w", f.Name, err)
 	}
 	defer reader.Close()
 	contents, err := io.ReadAll(reader)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("reading %s: %w", f.Name, err)
 	}
 	return string(contents), nil
 }
