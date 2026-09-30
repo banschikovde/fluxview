@@ -405,31 +405,39 @@ func crdGitSourceVersions(ctx context.Context, scans *scanCache, repoRoot string
 
 	groupVersions := map[string]string{}
 	for _, key := range keys {
-		gr := index[key]
-		if git.SameGitRepo(gr.Spec.URL, gitEnv.originURL) {
-			continue // local source, not an external CRD upstream
-		}
-		version := ""
-		if gr.Spec.Ref != nil {
-			version = gr.Spec.Ref.Tag
-		}
-		if version == "" {
-			continue // floating ref (branch/HEAD/semver) — not a version
-		}
-		cloneDir, err := gitEnv.ensure(ctx, gr)
-		if err != nil {
-			if !quiet {
-				fmt.Fprintf(os.Stderr, "Warning: could not read CRD source %s (%s): %v\n", gr.Spec.URL, version, err)
-			}
-			continue
-		}
-		for group := range crdGroupsIn(cloneDir) {
-			if _, exists := groupVersions[group]; !exists {
-				groupVersions[group] = version
-			}
-		}
+		recordCRDGroupVersions(ctx, gitEnv, index[key], groupVersions, quiet)
 	}
 	return groupVersions
+}
+
+// recordCRDGroupVersions resolves one external GitRepository CRD source
+// and records its CRD groups' versions into groupVersions (first writer
+// per group wins — keys arrive sorted, so that winner is deterministic).
+// Local sources, floating refs and failed clones are skipped with at most
+// a warning.
+func recordCRDGroupVersions(ctx context.Context, gitEnv *gitSourceEnv, gr flux.GitRepository, groupVersions map[string]string, quiet bool) {
+	if git.SameGitRepo(gr.Spec.URL, gitEnv.originURL) {
+		return // local source, not an external CRD upstream
+	}
+	version := ""
+	if gr.Spec.Ref != nil {
+		version = gr.Spec.Ref.Tag
+	}
+	if version == "" {
+		return // floating ref (branch/HEAD/semver) — not a version
+	}
+	cloneDir, err := gitEnv.ensure(ctx, gr)
+	if err != nil {
+		if !quiet {
+			fmt.Fprintf(os.Stderr, "Warning: could not read CRD source %s (%s): %v\n", gr.Spec.URL, version, err)
+		}
+		return
+	}
+	for group := range crdGroupsIn(cloneDir) {
+		if _, exists := groupVersions[group]; !exists {
+			groupVersions[group] = version
+		}
+	}
 }
 
 // crdGroupsIn walks a clone for CustomResourceDefinition documents and
@@ -443,33 +451,39 @@ func crdGroupsIn(dir string) map[string]bool {
 		if err != nil || d.IsDir() {
 			return err
 		}
-		name := d.Name()
-		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil || !bytes.Contains(data, []byte(crdMarker)) {
-			return nil
-		}
-		for _, doc := range flux.SplitYAMLText(data) {
-			trimmed := strings.TrimSpace(doc)
-			if trimmed == "" {
-				continue
-			}
-			var crd struct {
-				Kind string `yaml:"kind"`
-				Spec struct {
-					Group string `yaml:"group"`
-				} `yaml:"spec"`
-			}
-			if err := yaml.Unmarshal([]byte(trimmed), &crd); err != nil || crd.Kind != crdMarker || crd.Spec.Group == "" {
-				continue
-			}
-			groups[crd.Spec.Group] = true
+		if name := d.Name(); strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") {
+			crdGroupsInFile(path, crdMarker, groups)
 		}
 		return nil
 	})
 	return groups
+}
+
+// crdGroupsInFile adds the API groups of every CustomResourceDefinition
+// document in one YAML file to groups. The caller pre-filters candidates
+// with a byte search; each surviving document still parses cheaply into a
+// kind+group projection only.
+func crdGroupsInFile(path, crdMarker string, groups map[string]bool) {
+	data, err := os.ReadFile(path)
+	if err != nil || !bytes.Contains(data, []byte(crdMarker)) {
+		return
+	}
+	for _, doc := range flux.SplitYAMLText(data) {
+		trimmed := strings.TrimSpace(doc)
+		if trimmed == "" {
+			continue
+		}
+		var crd struct {
+			Kind string `yaml:"kind"`
+			Spec struct {
+				Group string `yaml:"group"`
+			} `yaml:"spec"`
+		}
+		if err := yaml.Unmarshal([]byte(trimmed), &crd); err != nil || crd.Kind != crdMarker || crd.Spec.Group == "" {
+			continue
+		}
+		groups[crd.Spec.Group] = true
+	}
 }
 
 // enrichHelmRows renders the chart of every resolvable helm row and mines
@@ -499,7 +513,6 @@ func crdGroupsIn(dir string) map[string]bool {
 // A context cancellation aborts with the error. quiet suppresses the
 // progress line (the --branch-orig comparison side).
 func enrichHelmRows(ctx context.Context, env *inventoryEnv, fleet *helmFleet, repoRoot string, rows []helmRow, components *[]inventory.Component, quiet bool) (failedParents, splitParents []string, err error) {
-	inflater, rules, splitUmbrella := env.inflater, env.rules, env.splitUmbrella
 	renderable := 0
 	for _, row := range rows {
 		if row.renderable {
@@ -512,12 +525,7 @@ func enrichHelmRows(ctx context.Context, env *inventoryEnv, fleet *helmFleet, re
 
 	// Identity index of already-collected CRs (from the fleet output) —
 	// O(1) lookups for chart-rendered CR dedup.
-	knownCR := map[string]bool{}
-	for i := range *components {
-		if c := (*components)[i]; c.Source == inventory.SourceCR {
-			knownCR[c.Kind+"/"+c.Namespace+"/"+c.Name] = true
-		}
-	}
+	knownCR := knownCRIndex(*components)
 
 	seenCR := map[string]bool{}
 	for i := range rows {
@@ -525,40 +533,70 @@ func enrichHelmRows(ctx context.Context, env *inventoryEnv, fleet *helmFleet, re
 		if !row.renderable {
 			continue
 		}
-		if err := CheckInterrupted(ctx); err != nil {
+		failed, split, err := enrichOneHelmRow(ctx, env, fleet, repoRoot, row, components, seenCR, knownCR)
+		if err != nil {
 			return failedParents, splitParents, err
 		}
-
-		rendered, err := inflater.InflateHelmRelease(ctx, row.hr, row.repoURL, helm.ChartCredentials{Username: row.username, Password: row.password}, fleet.configMaps, fleet.secrets, repoRoot)
-		idx := findHelmComponent(*components, row.component.Namespace, row.component.Name)
-		if idx < 0 {
-			continue
+		if failed != "" {
+			failedParents = append(failedParents, failed)
 		}
-		if err != nil {
-			(*components)[idx].Warnings = append((*components)[idx].Warnings, fmt.Sprintf("could not render images: %v", err))
-			failedParents = append(failedParents, parentKey(row.component.Namespace, row.component.Name))
-			continue
+		if split != "" {
+			splitParents = append(splitParents, split)
 		}
-
-		docs := renderedDocs(rendered)
-		*components = chartCRs(*components, docs, row, rules, seenCR, knownCR)
-
-		if splitUmbrella {
-			if children, ok := umbrellaChildren((*components)[idx], docs); ok {
-				*components = append((*components)[:idx], (*components)[idx+1:]...)
-				*components = append(*components, children...)
-				splitParents = append(splitParents, parentKey(row.component.Namespace, row.component.Name))
-				continue
-			}
-		}
-		(*components)[idx].Images = inventory.ImagesFromDocs(rawsOfDocs(docs))
 	}
 	return failedParents, splitParents, nil
+}
+
+// enrichOneHelmRow renders one resolvable helm row's chart and mines the
+// rendered manifest (see enrichHelmRows for what it collects). The
+// returned strings are the release's parent key when it failed to render
+// or was umbrella-split ("" otherwise); an unsplit release's images are
+// written straight into its component.
+func enrichOneHelmRow(ctx context.Context, env *inventoryEnv, fleet *helmFleet, repoRoot string, row helmRow, components *[]inventory.Component, seenCR, knownCR map[string]bool) (failed, split string, err error) {
+	if err := CheckInterrupted(ctx); err != nil {
+		return "", "", err
+	}
+
+	rendered, err := env.inflater.InflateHelmRelease(ctx, row.hr, row.repoURL, helm.ChartCredentials{Username: row.username, Password: row.password}, fleet.configMaps, fleet.secrets, repoRoot)
+	idx := findHelmComponent(*components, row.component.Namespace, row.component.Name)
+	if idx < 0 {
+		return "", "", nil
+	}
+	if err != nil {
+		(*components)[idx].Warnings = append((*components)[idx].Warnings, fmt.Sprintf("could not render images: %v", err))
+		return parentKey(row.component.Namespace, row.component.Name), "", nil
+	}
+
+	docs := renderedDocs(rendered)
+	*components = chartCRs(*components, docs, row, env.rules, seenCR, knownCR)
+
+	if env.splitUmbrella {
+		if children, ok := umbrellaChildren((*components)[idx], docs); ok {
+			*components = append((*components)[:idx], (*components)[idx+1:]...)
+			*components = append(*components, children...)
+			return "", parentKey(row.component.Namespace, row.component.Name), nil
+		}
+	}
+	(*components)[idx].Images = inventory.ImagesFromDocs(rawsOfDocs(docs))
+	return "", "", nil
 }
 
 // parentKey is the namespace-qualified identity of a parent HelmRelease —
 // two releases may share a name across namespaces.
 func parentKey(namespace, name string) string { return namespace + "/" + name }
+
+// knownCRIndex indexes the already-collected custom resources by identity
+// (kind/namespace/name) for O(1) chart-rendered CR dedup during
+// enrichment.
+func knownCRIndex(components []inventory.Component) map[string]bool {
+	known := map[string]bool{}
+	for i := range components {
+		if c := components[i]; c.Source == inventory.SourceCR {
+			known[c.Kind+"/"+c.Namespace+"/"+c.Name] = true
+		}
+	}
+	return known
+}
 
 // dropChartDerived restores the symmetry of a render failure on either
 // --branch-orig side, so the diff cannot report rows one side simply could
@@ -681,19 +719,7 @@ func umbrellaChildren(parent inventory.Component, docs []renderedDoc) ([]invento
 		if !inventory.IsWorkload(doc.kind) {
 			continue
 		}
-		app := ""
-		if metadata, ok := doc.raw["metadata"].(map[string]interface{}); ok {
-			if labels, ok := metadata["labels"].(map[string]interface{}); ok {
-				if v, ok := labels["app.kubernetes.io/name"].(string); ok && v != "" {
-					app = v
-				} else if v, ok := labels["app.kubernetes.io/part-of"].(string); ok && v != "" {
-					app = v
-				}
-			}
-		}
-		if app == "" {
-			app = parent.Name
-		}
+		app := workloadAppName(doc.raw, parent.Name)
 		g, exists := groups[app]
 		if !exists {
 			g = &group{name: app}
@@ -708,39 +734,64 @@ func umbrellaChildren(parent inventory.Component, docs []renderedDoc) ([]invento
 
 	children := make([]inventory.Component, 0, len(groups))
 	for _, app := range order {
-		g := groups[app]
-		child := inventory.Component{
-			Source: inventory.SourceHelm,
-			Chart:  parent.Chart,
-			Parent: parentKey(parent.Namespace, parent.Name),
-			Images: inventory.ImagesFromDocs(g.raws),
-			FluxKs: parent.FluxKs,
-			Path:   parent.Path,
-		}
-		child.Name = parent.Name + "/" + g.name
-		child.Software = g.name
-		// Copy: children share the parent's chart warnings, and a later
-		// append on one child must never write through a shared backing
-		// array into a sibling.
-		child.Warnings = append([]string(nil), parent.Warnings...)
-		if v, source, warning := inventory.WorkloadGroupVersion(g.raws, g.name); v != "" {
-			child.Version = v
-			child.VersionSource = source
-			if warning != "" {
-				child.Warnings = append(child.Warnings, warning)
-			}
-		} else {
-			child.Version = inventory.UnknownVersion
-		}
-		child.Kind = inventory.WorkloadGroupKind(g.raws)
-		if ns := inventory.WorkloadGroupNamespace(g.raws); ns != "" {
-			child.Namespace = ns
-		} else {
-			child.Namespace = parent.Namespace
-		}
-		children = append(children, child)
+		children = append(children, umbrellaChildComponent(parent, groups[app].name, groups[app].raws))
 	}
 	return children, true
+}
+
+// workloadAppName names one workload document's application group: the
+// app.kubernetes.io/name label, falling back to part-of, then the parent
+// release's own name (the ungrouped bucket).
+func workloadAppName(raw map[string]interface{}, parentName string) string {
+	metadata, ok := raw["metadata"].(map[string]interface{})
+	if !ok {
+		return parentName
+	}
+	labels, ok := metadata["labels"].(map[string]interface{})
+	if !ok {
+		return parentName
+	}
+	for _, label := range []string{"app.kubernetes.io/name", "app.kubernetes.io/part-of"} {
+		if v, ok := labels[label].(string); ok && v != "" {
+			return v
+		}
+	}
+	return parentName
+}
+
+// umbrellaChildComponent builds one application group's component from
+// the parent release's chart row: the group's own version (from its
+// workloads' images) with the parent's chart/path context, and the
+// parent's warnings copied — a later append on one child must never write
+// through a shared backing array into a sibling.
+func umbrellaChildComponent(parent inventory.Component, name string, raws []map[string]interface{}) inventory.Component {
+	child := inventory.Component{
+		Source: inventory.SourceHelm,
+		Chart:  parent.Chart,
+		Parent: parentKey(parent.Namespace, parent.Name),
+		Images: inventory.ImagesFromDocs(raws),
+		FluxKs: parent.FluxKs,
+		Path:   parent.Path,
+	}
+	child.Name = parent.Name + "/" + name
+	child.Software = name
+	child.Warnings = append([]string(nil), parent.Warnings...)
+	if v, source, warning := inventory.WorkloadGroupVersion(raws, name); v != "" {
+		child.Version = v
+		child.VersionSource = source
+		if warning != "" {
+			child.Warnings = append(child.Warnings, warning)
+		}
+	} else {
+		child.Version = inventory.UnknownVersion
+	}
+	child.Kind = inventory.WorkloadGroupKind(raws)
+	if ns := inventory.WorkloadGroupNamespace(raws); ns != "" {
+		child.Namespace = ns
+	} else {
+		child.Namespace = parent.Namespace
+	}
+	return child
 }
 
 // manifestInputs prepares workload documents for grouping, with Flux
@@ -761,17 +812,28 @@ func manifestInputs(kustomizations []flux.Kustomization, docs []map[string]inter
 			continue
 		}
 		in := inventory.ManifestInput{Raw: raw}
-		if metadata, ok := raw["metadata"].(map[string]interface{}); ok {
-			if labels, ok := metadata["labels"].(map[string]interface{}); ok {
-				if ks, ok := labels["kustomize.toolkit.fluxcd.io/name"].(string); ok {
-					in.FluxKs = ks
-					in.Path = ksPathByName[ks]
-				}
-			}
+		if ks, ok := ksNameLabel(raw); ok {
+			in.FluxKs = ks
+			in.Path = ksPathByName[ks]
 		}
 		inputs = append(inputs, in)
 	}
 	return inputs
+}
+
+// ksNameLabel reads the kustomize.toolkit.fluxcd.io/name label naming the
+// Flux Kustomization a document was built by, if present.
+func ksNameLabel(raw map[string]interface{}) (string, bool) {
+	metadata, ok := raw["metadata"].(map[string]interface{})
+	if !ok {
+		return "", false
+	}
+	labels, ok := metadata["labels"].(map[string]interface{})
+	if !ok {
+		return "", false
+	}
+	ks, ok := labels["kustomize.toolkit.fluxcd.io/name"].(string)
+	return ks, ok
 }
 
 // helmRow pairs one helm component with its resolved chart context, so
@@ -834,31 +896,38 @@ func collectHelmComponents(ctx context.Context, inflater *helm.Inflater, fleet *
 		row.username = res.username
 		row.password = res.password
 		row.renderable = metaOK
-
-		switch {
-		case metaOK && meta.Name != "":
-			c.Software = meta.Name
-		default:
-			c.Software = chartInfo.Name
-		}
-		if metaOK {
-			chartInfo.Version = meta.Version
-			if hr.Spec.Chart.Spec.Version != "" && hr.Spec.Chart.Spec.Version != meta.Version {
-				chartInfo.Constraint = hr.Spec.Chart.Spec.Version
-			}
-			c.Version = meta.AppVersion
-			c.VersionSource = inventory.VersionAppVersion
-		}
-		if c.Version == "" {
-			c.Version = "-"
-			if !metaOK && len(c.Warnings) == 0 {
-				c.Warnings = append(c.Warnings, "appVersion unknown (chart metadata unavailable)")
-			}
-		}
+		applyChartMeta(hr, meta, metaOK, chartInfo, c)
 
 		rows = append(rows, row)
 	}
 	return rows, nil
+}
+
+// applyChartMeta writes the resolved chart metadata into one row's
+// component: the chart's own name as software, the appVersion as version
+// (the spec version kept as a constraint when it differs), and a
+// placeholder with a warning when nothing resolved — the row still shows
+// the spec chart version.
+func applyChartMeta(hr flux.HelmRelease, meta helm.ChartMeta, metaOK bool, chartInfo *inventory.ChartInfo, c *inventory.Component) {
+	if metaOK && meta.Name != "" {
+		c.Software = meta.Name
+	} else {
+		c.Software = chartInfo.Name
+	}
+	if metaOK {
+		chartInfo.Version = meta.Version
+		if hr.Spec.Chart.Spec.Version != "" && hr.Spec.Chart.Spec.Version != meta.Version {
+			chartInfo.Constraint = hr.Spec.Chart.Spec.Version
+		}
+		c.Version = meta.AppVersion
+		c.VersionSource = inventory.VersionAppVersion
+	}
+	if c.Version == "" {
+		c.Version = "-"
+		if !metaOK && len(c.Warnings) == 0 {
+			c.Warnings = append(c.Warnings, "appVersion unknown (chart metadata unavailable)")
+		}
+	}
 }
 
 // chartResolution carries what resolveHRChartMeta resolved, so enrichment can
@@ -901,25 +970,10 @@ func resolveHRChartMeta(ctx context.Context, inflater *helm.Inflater, hr flux.He
 
 	switch {
 	case hr.Spec.ChartRef != nil && hr.Spec.ChartRef.Kind == flux.KindOCIRepository:
-		repoNS := hr.Spec.ChartRef.Namespace
-		if repoNS == "" {
-			repoNS = hr.Metadata.Namespace
-		}
-		repo, ok := ociRepoIndex[repoNS+"/"+hr.Spec.ChartRef.Name]
-		if ok {
-			chartInfo.SourceURL = repo.Spec.URL
-		}
-		ociRef, ociVersion := resolveOCIRepoURL(hr, ociRepoIndex)
-		if ociRef == "" {
+		if !resolveOCIChartRefSource(hr, ociRepoIndex, chartInfo, &res) {
 			warn("could not resolve OCIRepository source (chartRef %s/%s) — not found",
 				hr.Spec.ChartRef.Namespace, hr.Spec.ChartRef.Name)
 			return helm.ChartMeta{}, res, false
-		}
-		res.hr.Spec.Chart.Spec.Chart = ociRef
-		res.hr.Spec.Chart.Spec.Version = ociVersion
-		chartInfo.Version = ociVersion
-		if chartInfo.Name == "" {
-			chartInfo.Name = path.Base(strings.TrimSuffix(repo.Spec.URL, "/"))
 		}
 	case chartSpec.Chart == "":
 		// Includes chartRef.kind=HelmChart (documented limitation).
@@ -928,23 +982,8 @@ func resolveHRChartMeta(ctx context.Context, inflater *helm.Inflater, hr flux.He
 	case chartSpec.SourceRef.Kind == flux.KindGitRepository:
 		// The chart lives in the local checkout: resolve as a directory path
 		// (no network), mirroring inflateHelmReleasesShared.
-		resolved, err := securejoin.SecureJoin(repoRoot, chartSpec.Chart)
-		if err != nil {
-			warn("cannot safely resolve chart path %s: %v", chartSpec.Chart, err)
+		if !resolveGitChartSource(hr, chartSpec, repoRoot, chartInfo, gitRepoIndex, &res, warn) {
 			return helm.ChartMeta{}, res, false
-		}
-		if _, err := os.Stat(resolved); err != nil {
-			warn("chart %q not found locally (%s source)", chartSpec.Chart, chartSpec.SourceRef.Kind)
-			return helm.ChartMeta{}, res, false
-		}
-		res.hr.Spec.Chart.Spec.Chart = resolved
-		chartInfo.Name = path.Base(strings.TrimSuffix(chartSpec.Chart, "/"))
-		repoNS := chartSpec.SourceRef.Namespace
-		if repoNS == "" {
-			repoNS = hr.Metadata.Namespace
-		}
-		if repo, ok := gitRepoIndex[repoNS+"/"+chartSpec.SourceRef.Name]; ok {
-			chartInfo.SourceURL = repo.Spec.URL
 		}
 	case chartSpec.SourceRef.Kind == flux.KindBucket:
 		// Chart unavailable for Bucket sources — keep the spec version.
@@ -965,6 +1004,59 @@ func resolveHRChartMeta(ctx context.Context, inflater *helm.Inflater, hr flux.He
 		return helm.ChartMeta{}, res, false
 	}
 	return meta, res, true
+}
+
+// resolveOCIChartRefSource resolves the OCIRepository chartRef pattern:
+// the resolved OCI ref and version are written into res.hr's chart spec,
+// the chartInfo gains the source URL and (when the HR names no chart) a
+// name derived from the repository URL. ok=false when the referenced
+// OCIRepository is not in the fleet.
+func resolveOCIChartRefSource(hr flux.HelmRelease, ociRepoIndex map[string]flux.OCIRepository, chartInfo *inventory.ChartInfo, res *chartResolution) bool {
+	repoNS := hr.Spec.ChartRef.Namespace
+	if repoNS == "" {
+		repoNS = hr.Metadata.Namespace
+	}
+	repo, ok := ociRepoIndex[repoNS+"/"+hr.Spec.ChartRef.Name]
+	if ok {
+		chartInfo.SourceURL = repo.Spec.URL
+	}
+	ociRef, ociVersion := resolveOCIRepoURL(hr, ociRepoIndex)
+	if ociRef == "" {
+		return false
+	}
+	res.hr.Spec.Chart.Spec.Chart = ociRef
+	res.hr.Spec.Chart.Spec.Version = ociVersion
+	chartInfo.Version = ociVersion
+	if chartInfo.Name == "" {
+		chartInfo.Name = path.Base(strings.TrimSuffix(repo.Spec.URL, "/"))
+	}
+	return true
+}
+
+// resolveGitChartSource resolves a GitRepository chart source to the
+// chart's local path inside the checkout and records the source URL from
+// the referenced GitRepository; ok=false (message recorded through warn)
+// when the path cannot be resolved or does not exist.
+func resolveGitChartSource(hr flux.HelmRelease, chartSpec flux.HelmReleaseChartSpec, repoRoot string, chartInfo *inventory.ChartInfo, gitRepoIndex map[string]flux.GitRepository, res *chartResolution, warn func(string, ...any)) bool {
+	resolved, err := securejoin.SecureJoin(repoRoot, chartSpec.Chart)
+	if err != nil {
+		warn("cannot safely resolve chart path %s: %v", chartSpec.Chart, err)
+		return false
+	}
+	if _, err := os.Stat(resolved); err != nil {
+		warn("chart %q not found locally (%s source)", chartSpec.Chart, chartSpec.SourceRef.Kind)
+		return false
+	}
+	res.hr.Spec.Chart.Spec.Chart = resolved
+	chartInfo.Name = path.Base(strings.TrimSuffix(chartSpec.Chart, "/"))
+	repoNS := chartSpec.SourceRef.Namespace
+	if repoNS == "" {
+		repoNS = hr.Metadata.Namespace
+	}
+	if repo, ok := gitRepoIndex[repoNS+"/"+chartSpec.SourceRef.Name]; ok {
+		chartInfo.SourceURL = repo.Spec.URL
+	}
+	return true
 }
 
 // chartKindOf names a chartRef-based HelmRelease's referenced kind, for

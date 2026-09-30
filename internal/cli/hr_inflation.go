@@ -410,135 +410,173 @@ func inflateHelmReleasesShared(ctx context.Context, inflater *helm.Inflater, inp
 			continue
 		}
 
-		var repoURL string
-		var username string
-		var password string
-
-		// ChartRef-based HR (Flux v2 OCIRepository pattern).
-		if hr.Spec.ChartRef != nil && hr.Spec.ChartRef.Kind == flux.KindOCIRepository {
-			ociRef, ociVersion := resolveOCIRepoURL(hr, ociRepoIndex)
-			if ociRef == "" {
-				fail(hr, fmt.Sprintf("could not resolve OCIRepository source (chartRef %s/%s) — not found",
-					hr.Spec.ChartRef.Namespace, hr.Spec.ChartRef.Name))
-				continue
-			}
-			hr.Spec.Chart.Spec.Chart = ociRef
-			hr.Spec.Chart.Spec.Version = ociVersion
-		} else {
-			if hr.Spec.Chart.Spec.Chart == "" {
-				// Includes chartRef.kind=HelmChart (documented limitation) —
-				// deterministic skip, warning even in strict mode.
-				stderr("Warning: HelmRelease %s/%s has no chart name, skipping\n",
-					hr.Metadata.Namespace, hr.Metadata.Name)
-				continue
-			}
-			// Chart sourced from a GitRepository: the chart already lives in the
-			// local checkout, so resolve it as a directory path (no network).
-			// Mirrors how Kustomization.spec.path is resolved via securejoin.
-			// (Bucket sources are not supported — their content lives in object
-			// storage, never in the git checkout; see README limitations.)
-			if sourceKind := hr.Spec.Chart.Spec.SourceRef.Kind; sourceKind == flux.KindGitRepository {
-				resolved, err := securejoin.SecureJoin(opts.repoRoot, hr.Spec.Chart.Spec.Chart)
-				if err != nil {
-					fail(hr, fmt.Sprintf("cannot safely resolve chart path %s: %v",
-						hr.Spec.Chart.Spec.Chart, err))
-					continue
-				}
-				info, err := os.Stat(resolved)
-				if err != nil {
-					fail(hr, fmt.Sprintf("chart %q not found locally (%s source)",
-						hr.Spec.Chart.Spec.Chart, sourceKind))
-					continue
-				}
-				// A chart source is either a directory (Chart.yaml inside) or a
-				// packaged .tgz archive. Pointing at any other kind of file is
-				// almost certainly a mistake — fail early with a clear message
-				// rather than letting loader.Load emit a cryptic one.
-				lower := strings.ToLower(resolved)
-				isArchive := strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".tar.gz")
-				if !info.IsDir() && !isArchive {
-					fail(hr, fmt.Sprintf("chart path %q is not a chart directory or .tgz archive (%s source)",
-						hr.Spec.Chart.Spec.Chart, sourceKind))
-					continue
-				}
-				hr.Spec.Chart.Spec.Chart = resolved
-				// repoURL stays empty → InflateHelmRelease renders from the local directory.
-			} else if hr.Spec.Chart.Spec.SourceRef.Kind == flux.KindBucket {
-				// Bucket content lives in object storage, never in the local git
-				// checkout, so it cannot be resolved offline. Emit a dedicated,
-				// explicit warning (see README limitations). Deterministic skip —
-				// warning even in strict mode.
-				stderr("Warning: Bucket-sourced chart for HelmRelease %s/%s (chart %q) is not supported, skipping\n",
-					hr.Metadata.Namespace, hr.Metadata.Name, hr.Spec.Chart.Spec.Chart)
-				continue
-			} else {
-				repoURL, username, password = resolveHelmRepoURL(hr, helmRepoIndex, secretIndex)
-				if repoURL == "" {
-					fail(hr, fmt.Sprintf("could not resolve source (chart %q) — HelmRepository not found",
-						hr.Spec.Chart.Spec.Chart))
-					continue
-				}
-			}
+		target, ok := resolveHRChartTarget(&hr, input, ociRepoIndex, helmRepoIndex, secretIndex, opts.repoRoot, fail, stderr)
+		if !ok {
+			continue
 		}
 
 		stderr("Inflating HelmRelease %s/%s\n",
 			hr.Metadata.Namespace, hr.Metadata.Name)
 
-		output, err := inflater.InflateHelmRelease(ctx, hr, repoURL, helm.ChartCredentials{Username: username, Password: password}, input.configMaps, input.secrets, opts.repoRoot)
+		output, err := inflater.InflateHelmRelease(ctx, hr, target.repoURL,
+			helm.ChartCredentials{Username: target.username, Password: target.password},
+			input.configMaps, input.secrets, opts.repoRoot)
 		if err != nil {
 			fail(hr, fmt.Sprintf("failed to inflate: %v", err))
 			continue
 		}
 
-		// Fill in metadata.namespace for resources that lack one, matching
-		// `helm install --namespace <ns>` semantics (NOT
-		// Kustomization.spec.targetNamespace force-override).
-		//
-		// Helm renders with --namespace=<ns> but does NOT inject
-		// metadata.namespace into templates that don't use
-		// {{ .Release.Namespace }}. Without this step, downstream
-		// resource-level filters (diff hr --namespace) would drop those
-		// resources ("No resources found in namespace X") even though the
-		// HelmRelease was correctly inflated.
-		//
-		// Critically, this is **fill-missing** semantics: a resource whose
-		// template hard-codes a different namespace (e.g. cert-manager
-		// webhooks in kube-system, or a chart resource intentionally placed
-		// in a separate namespace) is preserved as-is. Real HelmController
-		// honors an explicit metadata.namespace and applies the resource
-		// there — overriding it would produce a quietly-wrong diff.
-		// Kustomization.spec.targetNamespace (force-override) is a different
-		// mechanism for a different entity.
-		//
-		// We still reuse kustomize's namespace transformer (via
-		// ApplyTargetNamespace) for the cluster-scoped detection — it
-		// correctly skips CRDs/Namespace/ClusterRole and custom cluster-scoped
-		// CRDs through kustomize's CRD registry. To combine the two, we split
-		// the rendered output into "already has namespace" (preserved) and
-		// "missing namespace" (run through the transformer), then merge back.
-		hrNamespace := hr.Metadata.Namespace
-		if hr.Spec.TargetNamespace != "" {
-			hrNamespace = hr.Spec.TargetNamespace
-		}
-		if filled, err := applyHelmNamespace(output, hrNamespace); err == nil {
-			output = filled
-		} else {
-			stderr("Warning: failed to fill namespace %q in HelmRelease %s/%s output: %v\n",
-				hrNamespace, hr.Metadata.Namespace, hr.Metadata.Name, err)
-		}
-
-		outputs = append(outputs, output)
+		outputs = append(outputs, fillHelmNamespace(output, hr, stderr))
 	}
 
-	if len(failures) > 0 {
-		if len(failures) == 1 {
-			return nil, fmt.Errorf("HelmRelease %s — diff would be incomplete", failures[0])
-		}
-		return nil, fmt.Errorf("%d HelmReleases could not be inflated — diff would be incomplete:\n  %s",
-			len(failures), strings.Join(failures, "\n  "))
+	if err := strictFailuresError(failures); err != nil {
+		return nil, err
 	}
 
 	return outputs, nil
+}
+
+// hrChartTarget is where one HelmRelease's chart comes from after source
+// resolution: the classic repo URL with its credentials. A zero value
+// means the chart reference is self-contained (local path or OCI ref
+// inside the mutated chart spec — InflateHelmRelease resolves it).
+type hrChartTarget struct {
+	repoURL  string
+	username string
+	password string
+}
+
+// hrFailFunc records one skip-worthy HelmRelease failure (strict mode
+// collects it, lenient mode warns); hrStderrFunc prints a diagnostic
+// gated on !quiet. Shared by the chart-source resolver so its branches
+// report exactly like the surrounding loop.
+type (
+	hrFailFunc   func(hr flux.HelmRelease, reason string)
+	hrStderrFunc func(format string, args ...any)
+)
+
+// resolveHRChartTarget resolves one HelmRelease's chart source into an
+// inflation target, mutating hr.Spec.Chart.Spec in place for the
+// self-contained shapes: the OCIRepository chartRef pattern writes the
+// resolved OCI ref, a GitRepository chart source writes the resolved
+// local directory/archive path (the chart already lives in the checkout —
+// no network; mirrors how Kustomization.spec.path is resolved via
+// securejoin). ok=false means skip — the reason was already reported.
+func resolveHRChartTarget(
+	hr *flux.HelmRelease,
+	input helmInflationInput,
+	ociRepoIndex map[string]flux.OCIRepository,
+	helmRepoIndex map[string]flux.HelmRepository,
+	secretIndex map[string]flux.Secret,
+	repoRoot string,
+	fail hrFailFunc,
+	stderr hrStderrFunc,
+) (hrChartTarget, bool) {
+	// ChartRef-based HR (Flux v2 OCIRepository pattern).
+	if hr.Spec.ChartRef != nil && hr.Spec.ChartRef.Kind == flux.KindOCIRepository {
+		ociRef, ociVersion := resolveOCIRepoURL(*hr, ociRepoIndex)
+		if ociRef == "" {
+			fail(*hr, fmt.Sprintf("could not resolve OCIRepository source (chartRef %s/%s) — not found",
+				hr.Spec.ChartRef.Namespace, hr.Spec.ChartRef.Name))
+			return hrChartTarget{}, false
+		}
+		hr.Spec.Chart.Spec.Chart = ociRef
+		hr.Spec.Chart.Spec.Version = ociVersion
+		return hrChartTarget{}, true
+	}
+
+	if hr.Spec.Chart.Spec.Chart == "" {
+		// Includes chartRef.kind=HelmChart (documented limitation) —
+		// deterministic skip, warning even in strict mode.
+		stderr("Warning: HelmRelease %s/%s has no chart name, skipping\n",
+			hr.Metadata.Namespace, hr.Metadata.Name)
+		return hrChartTarget{}, false
+	}
+
+	switch hr.Spec.Chart.Spec.SourceRef.Kind {
+	case flux.KindGitRepository:
+		return resolveLocalChartTarget(hr, repoRoot, fail)
+	case flux.KindBucket:
+		// Bucket content lives in object storage, never in the local git
+		// checkout, so it cannot be resolved offline. Emit a dedicated,
+		// explicit warning (see README limitations). Deterministic skip —
+		// warning even in strict mode.
+		stderr("Warning: Bucket-sourced chart for HelmRelease %s/%s (chart %q) is not supported, skipping\n",
+			hr.Metadata.Namespace, hr.Metadata.Name, hr.Spec.Chart.Spec.Chart)
+		return hrChartTarget{}, false
+	}
+
+	repoURL, username, password := resolveHelmRepoURL(*hr, helmRepoIndex, secretIndex)
+	if repoURL == "" {
+		fail(*hr, fmt.Sprintf("could not resolve source (chart %q) — HelmRepository not found",
+			hr.Spec.Chart.Spec.Chart))
+		return hrChartTarget{}, false
+	}
+	return hrChartTarget{repoURL: repoURL, username: username, password: password}, true
+}
+
+// resolveLocalChartTarget resolves a GitRepository chart source to the
+// chart's local path (directory with Chart.yaml or a packaged .tgz
+// archive) inside the checkout, writing it into hr.Spec.Chart.Spec.Chart
+// — repoURL stays empty, InflateHelmRelease renders from the local path.
+func resolveLocalChartTarget(hr *flux.HelmRelease, repoRoot string, fail hrFailFunc) (hrChartTarget, bool) {
+	resolved, err := securejoin.SecureJoin(repoRoot, hr.Spec.Chart.Spec.Chart)
+	if err != nil {
+		fail(*hr, fmt.Sprintf("cannot safely resolve chart path %s: %v",
+			hr.Spec.Chart.Spec.Chart, err))
+		return hrChartTarget{}, false
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		fail(*hr, fmt.Sprintf("chart %q not found locally (%s source)",
+			hr.Spec.Chart.Spec.Chart, flux.KindGitRepository))
+		return hrChartTarget{}, false
+	}
+	// A chart source is either a directory (Chart.yaml inside) or a
+	// packaged .tgz archive. Pointing at any other kind of file is almost
+	// certainly a mistake — fail early with a clear message rather than
+	// letting loader.Load emit a cryptic one.
+	lower := strings.ToLower(resolved)
+	isArchive := strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".tar.gz")
+	if !info.IsDir() && !isArchive {
+		fail(*hr, fmt.Sprintf("chart path %q is not a chart directory or .tgz archive (%s source)",
+			hr.Spec.Chart.Spec.Chart, flux.KindGitRepository))
+		return hrChartTarget{}, false
+	}
+	hr.Spec.Chart.Spec.Chart = resolved
+	return hrChartTarget{}, true
+}
+
+// fillHelmNamespace fills metadata.namespace on resources that lack one
+// (see applyHelmNamespace for the fill-missing semantics and why real
+// HelmController behavior must be preserved); a transformer failure warns
+// and keeps the unfilled output.
+func fillHelmNamespace(output []byte, hr flux.HelmRelease, stderr hrStderrFunc) []byte {
+	hrNamespace := hr.Metadata.Namespace
+	if hr.Spec.TargetNamespace != "" {
+		hrNamespace = hr.Spec.TargetNamespace
+	}
+	filled, err := applyHelmNamespace(output, hrNamespace)
+	if err != nil {
+		stderr("Warning: failed to fill namespace %q in HelmRelease %s/%s output: %v\n",
+			hrNamespace, hr.Metadata.Namespace, hr.Metadata.Name, err)
+		return output
+	}
+	return filled
+}
+
+// strictFailuresError turns collected strict-mode failures into the loop's
+// error: partial output would make a diff report the missing resources as
+// added/removed, so everything is reported at once and the run fails.
+func strictFailuresError(failures []string) error {
+	if len(failures) == 0 {
+		return nil
+	}
+	if len(failures) == 1 {
+		return fmt.Errorf("HelmRelease %s — diff would be incomplete", failures[0])
+	}
+	return fmt.Errorf("%d HelmReleases could not be inflated — diff would be incomplete:\n  %s",
+		len(failures), strings.Join(failures, "\n  "))
 }
 
 // applyHelmNamespace fills metadata.namespace on resources that lack one,

@@ -1459,59 +1459,77 @@ func TestGitSourceAuthFlags_Wiring(t *testing.T) {
 // three commands, defaults to fetching enabled, picks up
 // FLUXVIEW_NO_GIT_SOURCE_FETCH, and an explicit flag beats the env.
 func TestNoGitSourceFetchFlag_Wiring(t *testing.T) {
-	newCmd := func(t *testing.T) (*cobra.Command, *bool) {
-		t.Helper()
-		var noFetch bool
-		cmd := &cobra.Command{
-			RunE: func(cmd *cobra.Command, args []string) error { return nil },
-		}
-		registerNoGitSourceFetchFlag(cmd, &noFetch)
-		return cmd, &noFetch
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{"registered on build, diff and validate", noFetchWiringRegisteredOnBuildDiffAndValidate},
+		{"default keeps fetching on", noFetchWiringDefaultKeepsFetchingOn},
+		{"flag default comes from the env", noFetchWiringFlagDefaultComesFromTheEnv},
+		{"explicit flag overrides the env", noFetchWiringExplicitFlagOverridesTheEnv},
+	} {
+		t.Run(tc.name, tc.run)
 	}
+}
 
-	t.Run("registered on build, diff and validate", func(t *testing.T) {
-		for name, cmd := range map[string]*cobra.Command{
-			"build": newBuildCmd(), "diff": newDiffCmd(), "validate": newValidateCmd(),
-		} {
-			if cmd.Flags().Lookup("no-git-source-fetch") == nil {
-				t.Errorf("%s must register --no-git-source-fetch", name)
-			}
+// registered on build, diff and validate
+func noFetchWiringRegisteredOnBuildDiffAndValidate(t *testing.T) {
+	for name, cmd := range map[string]*cobra.Command{
+		"build": newBuildCmd(), "diff": newDiffCmd(), "validate": newValidateCmd(),
+	} {
+		if cmd.Flags().Lookup("no-git-source-fetch") == nil {
+			t.Errorf("%s must register --no-git-source-fetch", name)
 		}
-	})
+	}
+}
 
-	t.Run("default keeps fetching on", func(t *testing.T) {
-		t.Setenv(gitsource.EnvNoFetch, "")
-		cmd, noFetch := newCmd(t)
-		if err := cmd.Execute(); err != nil {
-			t.Fatalf("execute: %v", err)
-		}
-		if *noFetch {
-			t.Error("fetching must be on by default")
-		}
-	})
+// noFetchWiringCmd is a throwaway command with only the
+// --no-git-source-fetch flag wired, for the wiring tests.
+func noFetchWiringCmd(t *testing.T) (*cobra.Command, *bool) {
+	t.Helper()
+	var noFetch bool
+	cmd := &cobra.Command{
+		RunE: func(cmd *cobra.Command, args []string) error { return nil },
+	}
+	registerNoGitSourceFetchFlag(cmd, &noFetch)
+	return cmd, &noFetch
+}
 
-	t.Run("flag default comes from the env", func(t *testing.T) {
-		t.Setenv(gitsource.EnvNoFetch, "1")
-		cmd, noFetch := newCmd(t)
-		if err := cmd.Execute(); err != nil {
-			t.Fatalf("execute: %v", err)
-		}
-		if !*noFetch {
-			t.Error("env must disable fetching by default")
-		}
-	})
+// default keeps fetching on
+func noFetchWiringDefaultKeepsFetchingOn(t *testing.T) {
+	t.Setenv(gitsource.EnvNoFetch, "")
+	cmd, noFetch := noFetchWiringCmd(t)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if *noFetch {
+		t.Error("fetching must be on by default")
+	}
+}
 
-	t.Run("explicit flag overrides the env", func(t *testing.T) {
-		t.Setenv(gitsource.EnvNoFetch, "1")
-		cmd, noFetch := newCmd(t)
-		cmd.SetArgs([]string{"--no-git-source-fetch=false"})
-		if err := cmd.Execute(); err != nil {
-			t.Fatalf("execute: %v", err)
-		}
-		if *noFetch {
-			t.Error("explicit --no-git-source-fetch=false must beat the env")
-		}
-	})
+// flag default comes from the env
+func noFetchWiringFlagDefaultComesFromTheEnv(t *testing.T) {
+	t.Setenv(gitsource.EnvNoFetch, "1")
+	cmd, noFetch := noFetchWiringCmd(t)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !*noFetch {
+		t.Error("env must disable fetching by default")
+	}
+}
+
+// explicit flag overrides the env
+func noFetchWiringExplicitFlagOverridesTheEnv(t *testing.T) {
+	t.Setenv(gitsource.EnvNoFetch, "1")
+	cmd, noFetch := noFetchWiringCmd(t)
+	cmd.SetArgs([]string{"--no-git-source-fetch=false"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if *noFetch {
+		t.Error("explicit --no-git-source-fetch=false must beat the env")
+	}
 }
 
 // TestRunValidate_ExternalSSHAcceptNewFlag chains the whole policy path:

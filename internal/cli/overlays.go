@@ -59,15 +59,7 @@ func walkOverlaysAndLooseFiles(ctx context.Context, scans *scanCache, builder *k
 	// kind: Component dir would leak its inputs.
 	kustDirs := make(map[string]bool)
 	if err == nil {
-		for _, dir := range kustomizeDirs {
-			kustDirs[dir] = true
-			if isExcludedDir(dir, opts.excludePaths) {
-				continue
-			}
-			if output, ok := buildDirCached(ctx, builder, dir, cache); ok {
-				outputs = append(outputs, output)
-			}
-		}
+		outputs = buildDiscoveredOverlays(ctx, builder, kustomizeDirs, opts.excludePaths, cache, outputs, kustDirs)
 		// Also skip ANY directory containing a kustomization file (any kind),
 		// including orphan kind: Component dirs not selected for building.
 		for _, dir := range allKustFileDirs {
@@ -85,47 +77,105 @@ func walkOverlaysAndLooseFiles(ctx context.Context, scans *scanCache, builder *k
 	}
 	defer rootFS.Close()
 
-	// Read loose YAML files not inside any kustomization directory.
-	walkRoot := filepath.Clean(root)
-	walkErr := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		if info.IsDir() {
-			// Prune directories that have a kustomization file (regardless of
-			// build success/failure) or fall under an excluded path.
-			if kustDirs[path] || isExcludedDir(path, opts.excludePaths) {
-				return filepath.SkipDir
-			}
-			// Never cross a repository boundary: the .git directory itself and
-			// nested git repository roots (external source clones cached
-			// inside the working tree) hold no loose fleet files.
-			if info.Name() == ".git" || (filepath.Clean(path) != walkRoot && git.IsRepoRoot(path)) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(path))
-		if ext != ".yaml" && ext != ".yml" {
-			return nil
-		}
-		data, err := fsx.ReadRootFile(rootFS, repoRoot, path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not read %s: %v\n", path, err)
-			return nil
-		}
-		if opts.filterK8s {
-			// Only include documents that look like k8s resources.
-			if filtered := filterK8sResources(data); filtered != nil {
-				outputs = append(outputs, filtered)
-			}
-			return nil
-		}
-		outputs = append(outputs, data)
-		return nil
-	})
+	loose := newLooseYAMLWalker(rootFS, repoRoot, root, kustDirs, opts)
+	walkErr := filepath.Walk(root, loose.visit)
 
-	return outputs, walkErr
+	return append(outputs, loose.outputs...), walkErr
+}
+
+// buildDiscoveredOverlays builds each discovered native kustomize
+// directory (excluded paths pruned) and marks every one as a
+// kustomization directory in kustDirs — regardless of build success — so
+// the loose-file walker skips them entirely.
+func buildDiscoveredOverlays(ctx context.Context, builder *kustomize.Builder, kustomizeDirs []string, excludePaths map[string]bool, cache buildCache, outputs [][]byte, kustDirs map[string]bool) [][]byte {
+	for _, dir := range kustomizeDirs {
+		kustDirs[dir] = true
+		if isExcludedDir(dir, excludePaths) {
+			continue
+		}
+		if output, ok := buildDirCached(ctx, builder, dir, cache); ok {
+			outputs = append(outputs, output)
+		}
+	}
+	return outputs
+}
+
+// looseYAMLWalker reads loose YAML files from directories not covered by
+// any kustomization during one filepath.Walk. Pruning decisions are made
+// once on directory entry instead of per file (O(files×dirs) → O(dirs)).
+type looseYAMLWalker struct {
+	rootFS       *os.Root
+	repoRoot     string
+	walkRoot     string
+	kustDirs     map[string]bool
+	filterK8s    bool
+	excludePaths map[string]bool
+	outputs      [][]byte
+}
+
+func newLooseYAMLWalker(rootFS *os.Root, repoRoot, root string, kustDirs map[string]bool, opts overlayWalkOptions) *looseYAMLWalker {
+	return &looseYAMLWalker{
+		rootFS:       rootFS,
+		repoRoot:     repoRoot,
+		walkRoot:     filepath.Clean(root),
+		kustDirs:     kustDirs,
+		filterK8s:    opts.filterK8s,
+		excludePaths: opts.excludePaths,
+	}
+}
+
+// visit is the filepath.Walk callback: prune kustomization/excluded/git
+// directories, collect loose .yaml/.yml files (k8s-filtered when the
+// caller asked). Read errors warn and skip — the walk continues.
+func (w *looseYAMLWalker) visit(path string, info os.FileInfo, err error) error {
+	if err != nil {
+		return nil
+	}
+	if info.IsDir() {
+		return w.visitDir(path)
+	}
+	w.visitFile(path)
+	return nil
+}
+
+// visitDir decides whether a directory's subtree participates: directories
+// with a kustomization file (regardless of build success/failure) and
+// excluded paths are pruned, and the walk never crosses a repository
+// boundary — the .git directory itself and nested git repository roots
+// (external source clones cached inside the working tree) hold no loose
+// fleet files.
+func (w *looseYAMLWalker) visitDir(path string) error {
+	if w.kustDirs[path] || isExcludedDir(path, w.excludePaths) {
+		return filepath.SkipDir
+	}
+	if filepath.Base(path) == ".git" || (filepath.Clean(path) != w.walkRoot && git.IsRepoRoot(path)) {
+		return filepath.SkipDir
+	}
+	return nil
+}
+
+// visitFile reads one loose YAML file (symlink-safe through the repo root
+// FS — a symlink resolving outside the repository is rejected, CWE-367)
+// and appends its documents to the outputs: k8s-filtered when filterK8s
+// is set, raw otherwise.
+func (w *looseYAMLWalker) visitFile(path string) {
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext != ".yaml" && ext != ".yml" {
+		return
+	}
+	data, err := fsx.ReadRootFile(w.rootFS, w.repoRoot, path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not read %s: %v\n", path, err)
+		return
+	}
+	if w.filterK8s {
+		// Only include documents that look like k8s resources.
+		if filtered := filterK8sResources(data); filtered != nil {
+			w.outputs = append(w.outputs, filtered)
+		}
+		return
+	}
+	w.outputs = append(w.outputs, data)
 }
 
 // buildKustomizeOverlays builds native kustomize overlays under clusterPath

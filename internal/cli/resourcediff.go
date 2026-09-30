@@ -68,66 +68,79 @@ func (m docMeta) matchesNamespace(namespace string) bool {
 // filtering. This replaces the previous multi-step pipeline that parsed YAML 4+ times.
 func buildResourceMap(data []byte, flags *DiffFlags) map[resourceKey]string {
 	stripAttrs := parseAttrs(flags.StripAttrs)
-	docs := flux.SplitYAMLText(data)
 	result := make(map[resourceKey]string)
 
-	for _, doc := range docs {
-		trimmed := strings.TrimSpace(doc)
-		if trimmed == "" {
+	for _, doc := range flux.SplitYAMLText(data) {
+		key, processed, ok, warnDup := mapOneResource(doc, flags, stripAttrs, result)
+		if !ok {
 			continue
 		}
-
-		// Parse metadata only (fast — small struct).
-		var meta docMeta
-		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: skipping unparseable YAML document: %v\n", err)
-			continue
-		}
-
-		// Namespace filter: metadata is already parsed here, so filtering
-		// inside the map build avoids a separate parse of every document.
-		if flags.Namespace != "" && !meta.matchesNamespace(flags.Namespace) {
-			continue
-		}
-
-		if meta.Kind == "" || meta.Metadata.Name == "" {
-			continue
-		}
-
-		// Skip CRDs if requested.
-		if flags.SkipCRDs && meta.Kind == "CustomResourceDefinition" {
-			continue
-		}
-
-		processed := trimmed
-
-		// Strip specified attrs if requested.
-		if len(stripAttrs) > 0 {
-			processed = stripAttrsFromDoc(processed, stripAttrs)
-		}
-
-		// Redact secrets (only for Secret kind).
-		if strings.EqualFold(meta.Kind, "secret") {
-			processed = string(flux.RedactSecrets([]byte(processed)))
-		}
-
-		key := resourceKey{
-			Kind:      meta.Kind,
-			Namespace: meta.Metadata.Namespace,
-			Name:      meta.Metadata.Name,
-		}
-		if existing, exists := result[key]; exists {
+		if warnDup {
 			// Only warn for genuinely conflicting resources.
 			// Kustomization duplicates are expected from recursive discovery
 			// (KS YAML prepended + same KS in kustomize output).
-			if existing != processed && meta.Kind != "Kustomization" {
-				fmt.Fprintf(os.Stderr, "Warning: duplicate resource %s — overwriting with different content\n", key)
-			}
+			fmt.Fprintf(os.Stderr, "Warning: duplicate resource %s — overwriting with different content\n", key)
 		}
 		result[key] = processed
 	}
 
 	return result
+}
+
+// mapOneResource runs one document through the resource-map pipeline:
+// identity parse, namespace/CRD/kind filters, attribute stripping and
+// secret redaction. warnDup=true asks the caller to warn before
+// overwriting an existing different-content entry (the map itself must
+// stay a pure data pass for the loop).
+func mapOneResource(doc string, flags *DiffFlags, stripAttrs map[string]bool, result map[resourceKey]string) (key resourceKey, processed string, ok, warnDup bool) {
+	trimmed := strings.TrimSpace(doc)
+	if trimmed == "" {
+		return key, "", false, false
+	}
+
+	// Parse metadata only (fast — small struct).
+	var meta docMeta
+	if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: skipping unparseable YAML document: %v\n", err)
+		return key, "", false, false
+	}
+
+	// Namespace filter: metadata is already parsed here, so filtering
+	// inside the map build avoids a separate parse of every document.
+	if flags.Namespace != "" && !meta.matchesNamespace(flags.Namespace) {
+		return key, "", false, false
+	}
+
+	if meta.Kind == "" || meta.Metadata.Name == "" {
+		return key, "", false, false
+	}
+
+	// Skip CRDs if requested.
+	if flags.SkipCRDs && meta.Kind == "CustomResourceDefinition" {
+		return key, "", false, false
+	}
+
+	processed = trimmed
+
+	// Strip specified attrs if requested.
+	if len(stripAttrs) > 0 {
+		processed = stripAttrsFromDoc(processed, stripAttrs)
+	}
+
+	// Redact secrets (only for Secret kind).
+	if strings.EqualFold(meta.Kind, "secret") {
+		processed = string(flux.RedactSecrets([]byte(processed)))
+	}
+
+	key = resourceKey{
+		Kind:      meta.Kind,
+		Namespace: meta.Metadata.Namespace,
+		Name:      meta.Metadata.Name,
+	}
+	if existing, exists := result[key]; exists {
+		warnDup = existing != processed && meta.Kind != "Kustomization"
+	}
+	return key, processed, true, warnDup
 }
 
 // stripAttrsFromDoc removes the specified keys recursively from a YAML document.
@@ -320,47 +333,59 @@ func formatResourceDiffs(diffs []resourceDiffResult, useColor bool) string {
 	var buf strings.Builder
 
 	for _, d := range diffs {
-		header := d.Key.String()
-		if d.Status != "modified" {
-			header += fmt.Sprintf(" (%s)", d.Status)
-		}
-		border := strings.Repeat("-", len(header)+2)
-		buf.WriteString(border + "\n")
-		buf.WriteString(" " + header + "\n")
-		buf.WriteString(border + "\n")
-
-		switch d.Status {
-		case "modified":
-			if useColor {
-				buf.WriteString(diffpkg.Colorize(d.RawDiff))
-			} else {
-				buf.WriteString(d.RawDiff)
-			}
-		case "added":
-			for _, line := range strings.Split(strings.TrimSpace(d.RawDiff), "\n") {
-				if line == "" {
-					continue
-				}
-				if useColor {
-					buf.WriteString(diffpkg.ANSIGreen + line + diffpkg.ANSIReset + "\n")
-				} else {
-					buf.WriteString("+ " + line + "\n")
-				}
-			}
-		case "removed":
-			for _, line := range strings.Split(strings.TrimSpace(d.RawDiff), "\n") {
-				if line == "" {
-					continue
-				}
-				if useColor {
-					buf.WriteString(diffpkg.ANSIRed + line + diffpkg.ANSIReset + "\n")
-				} else {
-					buf.WriteString("- " + line + "\n")
-				}
-			}
-		}
+		writeDiffHeader(&buf, d)
+		writeDiffBody(&buf, d, useColor)
 		buf.WriteString("\n")
 	}
 
 	return buf.String()
+}
+
+// writeDiffHeader writes the boxed resource header; a status other than
+// "modified" is appended in parentheses (added/removed are evident from
+// the body's +/- prefixes only without color).
+func writeDiffHeader(buf *strings.Builder, d resourceDiffResult) {
+	header := d.Key.String()
+	if d.Status != "modified" {
+		header += fmt.Sprintf(" (%s)", d.Status)
+	}
+	border := strings.Repeat("-", len(header)+2)
+	buf.WriteString(border + "\n")
+	buf.WriteString(" " + header + "\n")
+	buf.WriteString(border + "\n")
+}
+
+// writeDiffBody writes one resource's diff: the raw unified diff for
+// modifications (colorized on request), or the per-line +/- rendering for
+// added/removed — plain lines carry the sign prefix, colorized lines the
+// green/red escape pair.
+func writeDiffBody(buf *strings.Builder, d resourceDiffResult, useColor bool) {
+	switch d.Status {
+	case "modified":
+		if useColor {
+			buf.WriteString(diffpkg.Colorize(d.RawDiff))
+		} else {
+			buf.WriteString(d.RawDiff)
+		}
+	case "added":
+		writeSignedLines(buf, d.RawDiff, useColor, diffpkg.ANSIGreen, "+ ")
+	case "removed":
+		writeSignedLines(buf, d.RawDiff, useColor, diffpkg.ANSIRed, "- ")
+	}
+}
+
+// writeSignedLines renders trimmed diff content one line at a time: with
+// color as full-line escape-wrapped text, without color with the plain
+// sign prefix.
+func writeSignedLines(buf *strings.Builder, raw string, useColor bool, ansiColor, sign string) {
+	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+		if line == "" {
+			continue
+		}
+		if useColor {
+			buf.WriteString(ansiColor + line + diffpkg.ANSIReset + "\n")
+		} else {
+			buf.WriteString(sign + line + "\n")
+		}
+	}
 }

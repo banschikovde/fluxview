@@ -52,86 +52,11 @@ func processResources(data []byte, opts outputOptions) []resourceEntry {
 		if trimmed == "" {
 			continue
 		}
-
-		var meta docMeta
-		// meta is intentionally parsed BEFORE stripping: --strip-attrs targets
-		// noise fields (status, creationTimestamp, helm.sh/chart), and stripping
-		// the identity fields (kind/name/namespace) is outside the contract.
-		if err := yaml.Unmarshal([]byte(trimmed), &meta); err != nil {
-			if opts.namespace != "" {
-				// Parity with filterByNamespace: warn about unparseable
-				// documents only while namespace-filtering.
-				fmt.Fprintf(os.Stderr, "Warning: skipping unparseable document in namespace filter: %v\n", err)
-			}
+		entry, ok := processOneResource([]byte(trimmed), opts)
+		if !ok {
 			continue
 		}
-
-		if opts.namespace != "" && !meta.matchesNamespace(opts.namespace) {
-			continue
-		}
-
-		// Skip CRDs if requested.
-		if opts.skipCRDs && meta.Kind == "CustomResourceDefinition" {
-			continue
-		}
-
-		if meta.Kind == "" || meta.Metadata.Name == "" {
-			continue
-		}
-
-		var node yaml.Node
-		if err := yaml.Unmarshal([]byte(trimmed), &node); err != nil {
-			// Parity with the old chain: a document the generic parser
-			// rejects was dropped by ConvertJSONInYAMLToYAML.
-			continue
-		}
-		mapping := mappingNode(&node)
-		if mapping == nil {
-			continue
-		}
-
-		if len(opts.stripAttrs) > 0 {
-			stripAttrsNode(&node, opts.stripAttrs)
-		}
-		removeMapKey(mapping, "sops")
-		reorderMapKeys(mapping, []string{"apiVersion", "kind", "metadata"})
-
-		var content string
-		if !yamlutil.NodeNeedsConversion(&node) {
-			// Clean document — no JSON flow style, no nil values: the
-			// transforms above are all it needed, so encode the node once
-			// and keep its key order. Only Secrets pay the extra redaction
-			// round-trip (same as before).
-			out := encodeNode(&node)
-			if strings.EqualFold(meta.Kind, "secret") {
-				out = flux.RedactSecrets(out)
-			}
-			content = strings.TrimSpace(string(out))
-		} else {
-			// JSON-in-YAML conversion without the text round-trip: decode
-			// the transformed node into a generic value (this is what
-			// helm.ConvertJSONInYAMLToYAML re-parsed from text), drop nils
-			// and marshal — the alphabetical-key marshal IS the conversion
-			// output.
-			var v interface{}
-			if err := node.Decode(&v); err != nil || v == nil {
-				continue
-			}
-			marshaled, err := yaml.Marshal(helm.RemoveNilValues(v))
-			if err != nil {
-				continue
-			}
-			content = strings.TrimSpace(string(flux.RedactSecrets(marshaled)))
-		}
-
-		entries = append(entries, resourceEntry{
-			key: resourceKey{
-				Kind:      meta.Kind,
-				Namespace: meta.Metadata.Namespace,
-				Name:      meta.Metadata.Name,
-			},
-			content: content,
-		})
+		entries = append(entries, entry)
 	}
 
 	slices.SortFunc(entries, func(a, b resourceEntry) int {
@@ -143,6 +68,99 @@ func processResources(data []byte, opts outputOptions) []resourceEntry {
 	})
 
 	return entries
+}
+
+// processOneResource runs one document through the output pipeline:
+// identity parse (meta), the namespace/CRD/kind filters, the single-node
+// transforms (strip, SOPS removal, key reorder) and the content tail —
+// a direct encode for clean documents, the JSON-in-YAML conversion
+// (alphabetical marshal with nils dropped) for the rest, with secret
+// redaction on both paths. ok=false means the document is dropped (empty,
+// unparseable or filtered) with any warning already printed.
+func processOneResource(doc []byte, opts outputOptions) (resourceEntry, bool) {
+	var meta docMeta
+	// meta is intentionally parsed BEFORE stripping: --strip-attrs targets
+	// noise fields (status, creationTimestamp, helm.sh/chart), and stripping
+	// the identity fields (kind/name/namespace) is outside the contract.
+	if err := yaml.Unmarshal(doc, &meta); err != nil {
+		if opts.namespace != "" {
+			// Parity with filterByNamespace: warn about unparseable
+			// documents only while namespace-filtering.
+			fmt.Fprintf(os.Stderr, "Warning: skipping unparseable document in namespace filter: %v\n", err)
+		}
+		return resourceEntry{}, false
+	}
+
+	if opts.namespace != "" && !meta.matchesNamespace(opts.namespace) {
+		return resourceEntry{}, false
+	}
+
+	// Skip CRDs if requested.
+	if opts.skipCRDs && meta.Kind == "CustomResourceDefinition" {
+		return resourceEntry{}, false
+	}
+
+	if meta.Kind == "" || meta.Metadata.Name == "" {
+		return resourceEntry{}, false
+	}
+
+	var node yaml.Node
+	if err := yaml.Unmarshal(doc, &node); err != nil {
+		// Parity with the old chain: a document the generic parser
+		// rejects was dropped by ConvertJSONInYAMLToYAML.
+		return resourceEntry{}, false
+	}
+	mapping := mappingNode(&node)
+	if mapping == nil {
+		return resourceEntry{}, false
+	}
+
+	if len(opts.stripAttrs) > 0 {
+		stripAttrsNode(&node, opts.stripAttrs)
+	}
+	removeMapKey(mapping, "sops")
+	reorderMapKeys(mapping, []string{"apiVersion", "kind", "metadata"})
+
+	content, ok := resourceContent(&node, meta.Kind)
+	if !ok {
+		return resourceEntry{}, false
+	}
+	return resourceEntry{
+		key: resourceKey{
+			Kind:      meta.Kind,
+			Namespace: meta.Metadata.Namespace,
+			Name:      meta.Metadata.Name,
+		},
+		content: content,
+	}, true
+}
+
+// resourceContent renders one transformed document: a clean document (no
+// JSON flow style, no nil values) is encoded once, keeping its key order —
+// only Secrets pay the extra redaction round-trip; a document carrying
+// JSON-in-YAML is decoded from the node (this is what the former
+// ConvertJSONInYAMLToYAML re-parsed from text), nils dropped and
+// marshalled — the alphabetical-key marshal IS the conversion output.
+// ok=false means the document must be dropped (parity with the old chain:
+// one the generic parser rejects was dropped there too).
+func resourceContent(node *yaml.Node, kind string) (content string, ok bool) {
+	if !yamlutil.NodeNeedsConversion(node) {
+		out := encodeNode(node)
+		if strings.EqualFold(kind, "secret") {
+			out = flux.RedactSecrets(out)
+		}
+		return strings.TrimSpace(string(out)), true
+	}
+
+	var v interface{}
+	if err := node.Decode(&v); err != nil || v == nil {
+		return "", false
+	}
+	marshaled, err := yaml.Marshal(helm.RemoveNilValues(v))
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(flux.RedactSecrets(marshaled))), true
 }
 
 // printResourceEntries prints already-processed resources, each with a box
