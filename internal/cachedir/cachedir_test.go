@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -265,6 +266,9 @@ func TestHome(t *testing.T) {
 	})
 
 	t.Run("no home directory falls back to a private unpredictable temp base", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("os.UserHomeDir reads USERPROFILE and os.TempDir ignores TMPDIR on windows; the fallback path needs a windows-specific harness")
+		}
 		tmp := t.TempDir() // hermetic TMPDIR so the assertions never see the real /tmp
 		t.Setenv("TMPDIR", tmp)
 		t.Setenv(CacheHomeEnv, "")

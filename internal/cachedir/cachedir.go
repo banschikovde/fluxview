@@ -159,8 +159,10 @@ func Home() string {
 // tempBase is Home's last resort when no home directory exists ($HOME
 // unset or unreadable): a fresh unpredictable temp directory, created once
 // per process — MkdirTemp's random suffix keeps another local user from
-// pre-creating or squatting the cache base. If even the temp dir is
-// unusable it returns "".
+// pre-creating or squatting the cache base. The directory is deliberately
+// never removed: it is the cache base for the whole process life, and OS
+// temp reaping (tmpfs, tmpfiles.d) owns it afterwards. If even the temp
+// dir is unusable it returns "".
 var (
 	tempBaseOnce sync.Once
 	tempBaseDir  string
