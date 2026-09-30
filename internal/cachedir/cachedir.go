@@ -101,7 +101,11 @@ func DefaultDir(envName, name string) string {
 			warnEnvOnce(CacheHomeEnv, "Warning: invalid %s %q (retired disable words apply to the per-cache vars; the base takes a path or \"disabled\"), using the default cache base\n", CacheHomeEnv, base)
 		}
 	}
-	return filepath.Join(Home(), name)
+	home := Home()
+	if home == "" {
+		return "disabled" // no usable cache base: every cache off for the run
+	}
+	return filepath.Join(home, name)
 }
 
 // EnvDir reads a cache directory environment variable with the same policy
@@ -135,6 +139,9 @@ func EnvDir(name string) string {
 // DefaultDir composes the per-cache defaults from it. The base itself
 // cannot be disabled — the disable word on it is the global switch handled
 // by DefaultDir; a padded value warns once and falls back to the default.
+// With no home directory at all it degrades to a private unpredictable
+// temp base ("" if even that fails — DefaultDir then disables every cache
+// for the run rather than writing to a guessable path).
 func Home() string {
 	if v := os.Getenv(CacheHomeEnv); v != "" {
 		if v != strings.TrimSpace(v) {
@@ -143,11 +150,29 @@ func Home() string {
 			return v
 		}
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), "fluxview-cache")
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".cache", "fluxview")
 	}
-	return filepath.Join(home, ".cache", "fluxview")
+	return tempBase()
+}
+
+// tempBase is Home's last resort when no home directory exists ($HOME
+// unset or unreadable): a fresh unpredictable temp directory, created once
+// per process — MkdirTemp's random suffix keeps another local user from
+// pre-creating or squatting the cache base. If even the temp dir is
+// unusable it returns "".
+var (
+	tempBaseOnce sync.Once
+	tempBaseDir  string
+)
+
+func tempBase() string {
+	tempBaseOnce.Do(func() {
+		if d, err := os.MkdirTemp("", "fluxview-cache-"); err == nil {
+			tempBaseDir = d
+		}
+	})
+	return tempBaseDir
 }
 
 // warnOut is where env warnings go: os.Stderr in production, swapped in

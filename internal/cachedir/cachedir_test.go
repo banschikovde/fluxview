@@ -263,6 +263,27 @@ func TestHome(t *testing.T) {
 			t.Errorf("Home() = %q, want the default (the switch is handled by DefaultDir)", got)
 		}
 	})
+
+	t.Run("no home directory falls back to a private unpredictable temp base", func(t *testing.T) {
+		tmp := t.TempDir() // hermetic TMPDIR so the assertions never see the real /tmp
+		t.Setenv("TMPDIR", tmp)
+		t.Setenv(CacheHomeEnv, "")
+		t.Setenv("HOME", "")
+		got := Home()
+		if got == "" {
+			t.Fatal(`Home() = "", want a temp base directory`)
+		}
+		if got == filepath.Join(os.TempDir(), "fluxview-cache") {
+			t.Errorf("Home() = %q, want an unpredictable path, not a squattable one", got)
+		}
+		if filepath.Dir(got) != tmp || !strings.HasPrefix(filepath.Base(got), "fluxview-cache-") {
+			t.Errorf("Home() = %q, want a fresh fluxview-cache-* directory under %s", got, tmp)
+		}
+		if fi, err := os.Stat(got); err != nil || !fi.IsDir() {
+			t.Errorf("Home() = %q: want an existing directory (stat err: %v)", got, err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(got) })
+	})
 }
 
 // resetWarnOnce clears the process-wide warn-once state: warn-once is per
