@@ -32,12 +32,7 @@ func TestDisabled(t *testing.T) {
 }
 
 func TestFlagSet(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		in      string
-		want    string
-		wantErr bool
-	}{
+	for _, tc := range []flagSetCase{
 		{"disable word", "disabled", "disabled", false},
 		{"upper case canonicalized", "DISABLED", "disabled", false},
 		{"retired off rejected", "off", "", true},
@@ -50,25 +45,41 @@ func TestFlagSet(t *testing.T) {
 		{"trailing space rejected", "/tmp ", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cur := "default"
-			f := NewFlag(&cur)
-			err := f.Set(tc.in)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("Set(%q) = nil error, want one", tc.in)
-				}
-				if cur != "default" {
-					t.Errorf("rejected value must not overwrite: cur = %q", cur)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("Set(%q): %v", tc.in, err)
-			}
-			if cur != tc.want {
-				t.Errorf("Set(%q) stored %q, want %q", tc.in, cur, tc.want)
-			}
+			runFlagSetCase(t, tc)
 		})
+	}
+}
+
+// flagSetCase is one row of the TestFlagSet table.
+type flagSetCase struct {
+	name    string
+	in      string
+	want    string
+	wantErr bool
+}
+
+// runFlagSetCase exercises one Set input: rejected values must error and
+// leave the target untouched; accepted values store (the disable word
+// canonicalized).
+func runFlagSetCase(t *testing.T, tc flagSetCase) {
+	t.Helper()
+	cur := "default"
+	f := NewFlag(&cur)
+	err := f.Set(tc.in)
+	if tc.wantErr {
+		if err == nil {
+			t.Fatalf("Set(%q) = nil error, want one", tc.in)
+		}
+		if cur != "default" {
+			t.Errorf("rejected value must not overwrite: cur = %q", cur)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("Set(%q): %v", tc.in, err)
+	}
+	if cur != tc.want {
+		t.Errorf("Set(%q) stored %q, want %q", tc.in, cur, tc.want)
 	}
 }
 
