@@ -12,6 +12,7 @@ import (
 
 	"github.com/banschikovde/fluxview/internal/cachedir"
 	"github.com/banschikovde/fluxview/internal/git"
+	"github.com/banschikovde/fluxview/internal/kubeversion"
 	"github.com/banschikovde/fluxview/internal/kustomize"
 	"github.com/banschikovde/fluxview/internal/validate"
 )
@@ -134,6 +135,15 @@ Examples:
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			applyGitSourceAuthFlags(cmd.Flags(), flags.GitSourceSSHKnownHosts, flags.GitSourceSSHAcceptNew)
+			// The env pin is resolved here — not at flag registration — with
+			// the strict pipeline grammar, exactly like every other command.
+			// The effective value (flag, pin or default) is re-checked
+			// strictly by checkValidateFlags inside runValidate.
+			pin, err := kubeVersionPin(cmd)
+			if err != nil {
+				return NewExitError(err, ExitCodeError)
+			}
+			flags.KubernetesVersion = effectiveKubeVersion(cmd, flags.KubernetesVersion, pin)
 			return runValidate(cmd.Context(), flags)
 		},
 	}
@@ -141,7 +151,7 @@ Examples:
 	cmd.Flags().StringVarP(&flags.Path, "path", "p", "", "Path to the cluster directory in the repository")
 	cmd.Flags().StringVarP(&flags.Namespace, "namespace", "n", "", "Filter output resources by namespace")
 	cmd.Flags().StringVar(&flags.SchemaDir, "schema-dir", "", "Directory with schemas: kubeconform JSON files, CRD YAML manifests and/or a kubernetes-json-schema checkout (default: /schemas/ or ./schemas/)")
-	cmd.Flags().StringVar(&flags.KubernetesVersion, "kubernetes-version", validate.DefaultKubernetesVersion, "Kubernetes version (full X.Y.Z like 1.36.1, or master) for the default schema location")
+	cmd.Flags().StringVar(&flags.KubernetesVersion, "kubernetes-version", kubeversion.Default, "Kubernetes version (full X.Y.Z like 1.36.1, or master) for the default schema location (env: FLUXVIEW_KUBE_VERSION)")
 	cmd.Flags().DurationVar(&flags.SchemaDownloadTimeout, "schema-download-timeout", validate.DefaultSchemaDownloadTimeout, "Per-request timeout for downloading Kubernetes schemas (e.g. 30s, 1m; 0 = no limit)")
 	cmd.Flags().BoolVar(&flags.Strict, "strict", false, "Reject duplicated YAML keys; strict schemas for the default registry also reject unknown fields")
 	cmd.Flags().StringSliceVar(&flags.SkipKinds, "skip-kind", nil, "Kinds to skip (repeatable or comma-separated): Kind (e.g. Deployment, any apiVersion) or apiVersion/Kind (e.g. apps/v1/Deployment)")
@@ -160,6 +170,11 @@ Examples:
 }
 
 func runValidate(ctx context.Context, flags *ValidateFlags) error {
+	// An unset version (direct library callers; the CLI resolves flag and
+	// env in the RunE) uses the shared default.
+	if flags.KubernetesVersion == "" {
+		flags.KubernetesVersion = validate.DefaultKubernetesVersion
+	}
 	if err := checkValidateFlags(flags); err != nil {
 		return err
 	}

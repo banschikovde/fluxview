@@ -34,8 +34,8 @@ import (
 	"github.com/Masterminds/semver/v3"
 	"github.com/banschikovde/fluxview/internal/cachedir"
 	fluxtypes "github.com/banschikovde/fluxview/internal/flux"
+	"github.com/banschikovde/fluxview/internal/kubeversion"
 	kustomizepkg "github.com/banschikovde/fluxview/internal/kustomize"
-	"github.com/banschikovde/fluxview/internal/validate"
 	"github.com/banschikovde/fluxview/internal/yamlutil"
 )
 
@@ -124,7 +124,7 @@ func WithDownloadTimeout(d time.Duration) InflaterOption {
 }
 
 // WithKubernetesVersion overrides the Kubernetes version assumed when
-// rendering charts offline (default: DefaultKubeVersion(); empty keeps the
+// rendering charts offline (default: kubeversion.Default; empty keeps the
 // default). Charts with an upper kubeVersion bound in Chart.yaml (e.g.
 // `kubeVersion: < 1.37.0-0`) check against it — the same knob as
 // `helm template --kube-version`. Kubernetes version syntax applies: "1.36"
@@ -196,36 +196,14 @@ func DefaultIndexTTL() time.Duration {
 	return d
 }
 
-// warnEnvKubeOnce serves DefaultKubeVersion the same way warnEnvTTLOnce
-// serves DefaultIndexTTL.
-var warnEnvKubeOnce sync.Once
-
 // defaultKubeVersion is the Kubernetes version assumed when inflating charts
 // offline, when neither --kubernetes-version nor FLUXVIEW_KUBE_VERSION is
 // set. The Helm SDK's own default moves with the k8s.io/client-go dependency
 // (currently 1.37) and breaks charts with an upper kubeVersion bound (e.g.
 // `kubeVersion: < 1.37.0-0`); this one is a compile-time alias of
-// validate.DefaultKubernetesVersion, so offline rendering and schema
-// validation assume the same cluster version.
-const defaultKubeVersion = validate.DefaultKubernetesVersion
-
-// DefaultKubeVersion returns the Kubernetes version assumed when rendering
-// charts offline: $FLUXVIEW_KUBE_VERSION (k8s version syntax like 1.36.1),
-// else defaultKubeVersion. An unparsable value warns once and falls back to
-// the default.
-func DefaultKubeVersion() string {
-	v := strings.TrimSpace(os.Getenv("FLUXVIEW_KUBE_VERSION"))
-	if v == "" {
-		return defaultKubeVersion
-	}
-	if _, err := common.ParseKubeVersion(v); err != nil {
-		warnEnvKubeOnce.Do(func() {
-			fmt.Fprintf(os.Stderr, "Warning: invalid FLUXVIEW_KUBE_VERSION %q, using %s\n", v, defaultKubeVersion)
-		})
-		return defaultKubeVersion
-	}
-	return v
-}
+// kubeversion.Default, so offline rendering and schema validation assume
+// the same cluster version.
+const defaultKubeVersion = kubeversion.Default
 
 // kubeVersionHint explains the accepted syntax in error messages: helm
 // parses through k8s ParseGeneric, which is looser than a strict X.Y.Z —
@@ -256,7 +234,7 @@ func NewInflater(opts ...InflaterOption) (*Inflater, error) {
 		cacheDir:        DefaultCacheDir(),
 		indexTTL:        DefaultIndexTTL(),
 		downloadTimeout: DefaultDownloadTimeout(),
-		kubeVersion:     DefaultKubeVersion(),
+		kubeVersion:     defaultKubeVersion,
 		registered:      make(map[string]string),
 		ociDigests:      make(map[string]ociDigestEntry),
 		ociTags:         make(map[string]ociTagEntry),
@@ -266,10 +244,9 @@ func NewInflater(opts ...InflaterOption) (*Inflater, error) {
 		opt(in)
 	}
 	// An empty value (a zero-value Inflater, or WithKubernetesVersion(""))
-	// keeps the default — same empty-means-default handling as validate's
-	// --kubernetes-version.
+	// keeps the default.
 	if in.kubeVersion == "" {
-		in.kubeVersion = DefaultKubeVersion()
+		in.kubeVersion = defaultKubeVersion
 	}
 	// A Kubernetes version that is not a valid k8s version fails every chart
 	// with a kubeVersion constraint; reject it here so the flag/env typo

@@ -18,7 +18,6 @@ import (
 	"helm.sh/helm/v4/pkg/helmpath"
 
 	"github.com/banschikovde/fluxview/internal/flux"
-	"github.com/banschikovde/fluxview/internal/validate"
 )
 
 // httpRepoServer serves a minimal Helm repository: index.yaml plus a single
@@ -514,55 +513,11 @@ func TestDefaultDownloadTimeout(t *testing.T) {
 	}
 }
 
-// TestDefaultKubeVersionInvalidEnvWarnsOnce: an unparsable FLUXVIEW_KUBE_VERSION
-// falls back to the default and warns exactly once per process (same contract
-// as the index TTL and download timeout envs).
-func TestDefaultKubeVersionInvalidEnvWarnsOnce(t *testing.T) {
-	t.Setenv("FLUXVIEW_KUBE_VERSION", "bogus")
-	warnEnvKubeOnce = sync.Once{}
-
-	first := captureStderrHelm(func() {
-		if v := DefaultKubeVersion(); v != defaultKubeVersion {
-			t.Errorf("DefaultKubeVersion() = %s, want default %s for invalid env", v, defaultKubeVersion)
-		}
-	})
-	if !strings.Contains(first, `invalid FLUXVIEW_KUBE_VERSION "bogus"`) {
-		t.Errorf("expected invalid-env warning, got:\n%s", first)
-	}
-
-	second := captureStderrHelm(func() {
-		if v := DefaultKubeVersion(); v != defaultKubeVersion {
-			t.Errorf("DefaultKubeVersion() = %s, want default %s for invalid env", v, defaultKubeVersion)
-		}
-	})
-	if second != "" {
-		t.Errorf("warning must not repeat, got:\n%s", second)
-	}
-}
-
-// TestDefaultKubeVersion covers the env resolution paths: unset → the shared
-// default (same version validate's schemas assume), valid version honored.
-// The invalid-value path is covered separately by the warn-once test above.
-func TestDefaultKubeVersion(t *testing.T) {
-	tests := []struct {
-		name string
-		env  string
-		want string
-	}{
-		{name: "unset falls back to the validate-synced default", env: "", want: validate.DefaultKubernetesVersion},
-		{name: "valid version honored", env: "1.30.2", want: "1.30.2"},
-		{name: "v-prefix honored like helm accepts", env: "v1.30.2", want: "v1.30.2"},
-		{name: "short k8s form accepted (helm normalizes 1.36 to 1.36.0)", env: "1.36", want: "1.36"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("FLUXVIEW_KUBE_VERSION", tt.env)
-			if got := DefaultKubeVersion(); got != tt.want {
-				t.Errorf("DefaultKubeVersion() = %s, want %s", got, tt.want)
-			}
-		})
-	}
-}
+// TestDefaultKubeVersionInvalidEnvFallsBack and TestDefaultKubeVersion were
+// removed together with helm.DefaultKubeVersion: the env is no longer read
+// by the helm package at all — FLUXVIEW_KUBE_VERSION is resolved once per
+// command in its RunE (internal/kubeversion) and reaches the Inflater only
+// through the CLI flag.
 
 // TestInflateHelmRelease_DownloadTimeout: a repository slower than the
 // configured per-request timeout fails the inflation fast, while timeout 0

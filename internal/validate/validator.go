@@ -21,6 +21,7 @@ import (
 	kcvalidator "github.com/yannh/kubeconform/pkg/validator"
 
 	"github.com/banschikovde/fluxview/internal/cachedir"
+	"github.com/banschikovde/fluxview/internal/kubeversion"
 )
 
 // DefaultSchemaLocation is kubeconform's "default" location: Kubernetes
@@ -29,9 +30,9 @@ import (
 const DefaultSchemaLocation = "default"
 
 // DefaultKubernetesVersion is the Kubernetes version used to resolve
-// Kubernetes schemas when none is configured explicitly. Kept in sync with
-// the k8s.io/* modules this project builds against.
-const DefaultKubernetesVersion = "1.36.1"
+// Kubernetes schemas when none is configured explicitly — the same
+// pipeline-wide default the Helm commands render against.
+const DefaultKubernetesVersion = kubeversion.Default
 
 // DefaultSchemaCacheDir returns the schema cache directory:
 // $FLUXVIEW_SCHEMA_CACHE_DIR, else <cachedir.DefaultDir base>/schemas.
@@ -112,13 +113,19 @@ func NormalizeKubernetesVersion(version string) string {
 var semverPattern = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
 // ValidateKubernetesVersion rejects versions that are not a full X.Y.Z (or
-// "master") after normalization. A short form like "1.36" does not fail on
-// its own: it makes every default-registry schema URL 404, so all native
-// kinds are silently skipped and validation looks successful while nothing
-// was checked. Failing here surfaces the typo before the build.
+// "master") after normalization. An empty value means "not configured" and
+// stays valid — callers apply their own default. A short form like "1.36"
+// or a bare "v" (normalization strips the prefix and leaves nothing) does
+// not fail loudly on its own: it makes every default-registry schema URL
+// 404, so all native kinds are silently skipped and validation looks
+// successful while nothing was checked. Failing here surfaces the typo
+// before the build.
 func ValidateKubernetesVersion(version string) error {
+	if strings.TrimSpace(version) == "" {
+		return nil
+	}
 	normalized := NormalizeKubernetesVersion(version)
-	if normalized == "" || normalized == "master" || semverPattern.MatchString(normalized) {
+	if normalized == "master" || semverPattern.MatchString(normalized) {
 		return nil
 	}
 	return fmt.Errorf("invalid --kubernetes-version %q: want a full version like 1.36.1 (or master)", version)

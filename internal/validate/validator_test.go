@@ -715,7 +715,7 @@ func TestNormalizeKubernetesVersion(t *testing.T) {
 }
 
 func TestValidateKubernetesVersion(t *testing.T) {
-	valid := []string{"", "1.36.1", "v1.36.1", " v1.34.0\t", "master", "1.19.0"}
+	valid := []string{"", "  ", "1.36.1", "v1.36.1", " v1.34.0\t", "master", "1.19.0"}
 	for _, in := range valid {
 		if err := ValidateKubernetesVersion(in); err != nil {
 			t.Errorf("ValidateKubernetesVersion(%q) = %v, want nil", in, err)
@@ -723,8 +723,10 @@ func TestValidateKubernetesVersion(t *testing.T) {
 	}
 
 	// A short "1.36" 404s every default-registry schema and silently skips
-	// all native kinds — the exact case the check exists for.
-	invalid := []string{"1.36", "v1.36", "1", "latest", "1.x.y", "1.36.1.1", "master-1"}
+	// all native kinds — the exact case the check exists for. A bare "v"
+	// normalizes to nothing and is equally unusable as a schema-version
+	// selector (only a truly unset value is allowed through).
+	invalid := []string{"v", "1.36", "v1.36", "1", "latest", "1.x.y", "1.36.1.1", "master-1"}
 	for _, in := range invalid {
 		if err := ValidateKubernetesVersion(in); err == nil {
 			t.Errorf("ValidateKubernetesVersion(%q) = nil, want an error", in)

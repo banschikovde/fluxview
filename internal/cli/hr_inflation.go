@@ -17,6 +17,7 @@ import (
 	"github.com/banschikovde/fluxview/internal/flux"
 	"github.com/banschikovde/fluxview/internal/gitsource"
 	"github.com/banschikovde/fluxview/internal/helm"
+	"github.com/banschikovde/fluxview/internal/kubeversion"
 	"github.com/banschikovde/fluxview/internal/kustomize"
 	"github.com/cyphar/filepath-securejoin"
 )
@@ -69,12 +70,17 @@ func (o kustomizeCacheOptions) builderOptions() []kustomize.BuilderOption {
 	}
 }
 
+// kubeVersionFlag is the per-command --kubernetes-version flag name,
+// shared by the registration and the ladder helpers below.
+const kubeVersionFlag = "kubernetes-version"
+
 // registerHelmCacheFlags registers the Helm flags shared by the build, diff
-// and inventory commands. Defaults come from helm.DefaultCacheDir()/
-// DefaultIndexTTL()/DefaultDownloadTimeout()/DefaultKubeVersion() so the
-// FLUXVIEW_HELM_CACHE_DIR / FLUXVIEW_HELM_INDEX_TTL /
-// FLUXVIEW_HELM_DOWNLOAD_TIMEOUT / FLUXVIEW_KUBE_VERSION env vars are
-// honored unless overridden by an explicit flag.
+// and inventory commands. Cache defaults come from helm.DefaultCacheDir()/
+// DefaultIndexTTL()/DefaultDownloadTimeout() so the FLUXVIEW_HELM_CACHE_DIR /
+// FLUXVIEW_HELM_INDEX_TTL / FLUXVIEW_HELM_DOWNLOAD_TIMEOUT env vars are
+// honored unless overridden by an explicit flag. The kube version default is
+// static — FLUXVIEW_KUBE_VERSION is resolved at run time by
+// effectiveKubeVersion with the strict pipeline grammar (kubeversion).
 func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL, downloadTimeout *time.Duration, kubeVersion *string) {
 	*cacheDir = helm.DefaultCacheDir() // pre-seed: pflag.Var does not set defaults
 	cmd.Flags().Var(cachedir.NewFlag(cacheDir), "helm-cache-dir",
@@ -83,8 +89,33 @@ func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL, down
 		"How long cached Helm repo indexes and OCI tag resolutions stay fresh; 0 always refreshes (env: FLUXVIEW_HELM_INDEX_TTL)")
 	cmd.Flags().DurationVar(downloadTimeout, "helm-download-timeout", helm.DefaultDownloadTimeout(),
 		"Per-request timeout for downloading Helm repo indexes and chart tarballs; 0 = no limit, for slow networks (env: FLUXVIEW_HELM_DOWNLOAD_TIMEOUT)")
-	cmd.Flags().StringVar(kubeVersion, "kubernetes-version", helm.DefaultKubeVersion(),
+	cmd.Flags().StringVar(kubeVersion, kubeVersionFlag, kubeversion.Default,
 		"Kubernetes version assumed when rendering Helm charts offline (k8s version syntax, \"1.36\" = 1.36.0); charts with an upper kubeVersion bound in Chart.yaml check against it (env: FLUXVIEW_KUBE_VERSION)")
+}
+
+// kubeVersionPin resolves FLUXVIEW_KUBE_VERSION with the strict pipeline
+// grammar — unless the command's --kubernetes-version flag was set
+// explicitly, in which case the env is never consulted. Returns "" when
+// unset.
+func kubeVersionPin(cmd *cobra.Command) (string, error) {
+	if cmd.Flags().Changed(kubeVersionFlag) {
+		return "", nil
+	}
+	return kubeversion.FromEnv()
+}
+
+// effectiveKubeVersion applies the flag > env > default ladder shared by
+// every command: the pipeline pin is resolved once per run with the strict
+// kubeversion grammar, an explicit flag (either grammar) overrides it, and
+// the static default stands when neither is set.
+func effectiveKubeVersion(cmd *cobra.Command, flagValue, pin string) string {
+	if cmd.Flags().Changed(kubeVersionFlag) {
+		return flagValue
+	}
+	if pin != "" {
+		return pin
+	}
+	return flagValue
 }
 
 // registerKustomizeCacheFlags registers the kustomize cache flags shared by

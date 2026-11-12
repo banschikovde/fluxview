@@ -525,7 +525,7 @@ func kubeVersionTestHR(chartDir string) flux.HelmRelease {
 // TestInflateHelmRelease_KubeVersionCappedBelowSDKDefault pins the issue #14
 // scenario: a chart capped below the Helm SDK's own moving default (derived
 // from the client-go dependency, currently 1.37) renders against the
-// DefaultKubeVersion() default without any flag.
+// defaultKubeVersion default without any flag.
 func TestInflateHelmRelease_KubeVersionCappedBelowSDKDefault(t *testing.T) {
 	t.Setenv("FLUXVIEW_KUBE_VERSION", "") // pin the default regardless of the outer environment
 
@@ -560,7 +560,7 @@ func TestInflateHelmRelease_KubeVersionOverride(t *testing.T) {
 		t.Fatalf("NewInflater: %v", err)
 	}
 	if _, err := inflater.InflateHelmRelease(context.Background(), kubeVersionTestHR(chartDir), "", ChartCredentials{}, nil, nil, ""); err == nil {
-		t.Fatalf("chart capped at < 1.29.0-0 must fail against the assumed default %s", DefaultKubeVersion())
+		t.Fatalf("chart capped at < 1.29.0-0 must fail against the assumed default %s", defaultKubeVersion)
 	}
 
 	older, err := NewInflater(WithCacheDir(t.TempDir()), WithKubernetesVersion("1.28.9"))
