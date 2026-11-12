@@ -137,19 +137,13 @@ Examples:
 			applyGitSourceAuthFlags(cmd.Flags(), flags.GitSourceSSHKnownHosts, flags.GitSourceSSHAcceptNew)
 			// The env pin is resolved here — not at flag registration — with
 			// the strict pipeline grammar, exactly like every other command.
+			// The effective value (flag, pin or default) is re-checked
+			// strictly by checkValidateFlags inside runValidate.
 			pin, err := kubeVersionPin(cmd)
 			if err != nil {
 				return NewExitError(err, ExitCodeError)
 			}
 			flags.KubernetesVersion = effectiveKubeVersion(cmd, flags.KubernetesVersion, pin)
-			// The flag carries validate's own strict grammar (full X.Y.Z or
-			// master): a short form would 404 every default-registry schema
-			// and silently skip all native kinds.
-			if cmd.Flags().Changed("kubernetes-version") {
-				if err := validate.ValidateKubernetesVersion(flags.KubernetesVersion); err != nil {
-					return NewExitError(err, ExitCodeError)
-				}
-			}
 			return runValidate(cmd.Context(), flags)
 		},
 	}
