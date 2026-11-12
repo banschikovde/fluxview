@@ -43,6 +43,7 @@ type DiffFlags struct {
 	HelmCacheDir        string
 	HelmIndexTTL        time.Duration
 	HelmDownloadTimeout time.Duration
+	KubernetesVersion   string
 	// KsCache groups the kustomize cache flags (remote resources, build
 	// outputs, external git source clones) — populated by
 	// registerKustomizeCacheFlags.
@@ -89,7 +90,7 @@ Examples:
 	cmd.Flags().IntVar(&flags.Unified, "unified", 3, "Number of context lines in diff output")
 	cmd.Flags().BoolVar(&flags.SkipCRDs, "skip-crds", false, "Skip CustomResourceDefinition resources in diff")
 	cmd.Flags().StringVar(&flags.StripAttrs, "strip-attrs", "", "Comma-separated keys to strip from diff (e.g. helm.sh/chart,status)")
-	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL, &flags.HelmDownloadTimeout)
+	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL, &flags.HelmDownloadTimeout, &flags.KubernetesVersion)
 	registerKustomizeCacheFlags(cmd, &flags.KsCache)
 	registerGitSourceAuthFlags(cmd, &flags.GitSourceSSHKnownHosts, &flags.GitSourceSSHAcceptNew)
 	registerNoGitSourceFetchFlag(cmd, &flags.NoGitSourceFetch)
@@ -205,7 +206,7 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	env := &hrInflationEnv{
 		scans:      scans,
 		strict:     true, // a side that cannot inflate must fail the diff
-		helmCache:  helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout},
+		helmCache:  helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout, kubeVersion: flags.KubernetesVersion},
 		ksCache:    flags.KsCache,
 		gitSources: gitEnv,
 	}

@@ -109,7 +109,7 @@ func bindInventoryFlags(cmd *cobra.Command, flags *InventoryFlags) {
 	cmd.Flags().BoolVar(&flags.AllCRs, "all-crs", false, "Also show custom resources without an extraction rule, with version unknown")
 	cmd.Flags().BoolVar(&flags.SplitUmbrella, "split-umbrella", false, "Split an umbrella HelmRelease into one row per application (grouped by app.kubernetes.io/name in the rendered chart); version of each row is the application's image tag")
 	cmd.Flags().StringVar(&flags.BranchOrig, "branch-orig", "", "Compare against this git revision and add a CHANGE column (+ added, - removed, ~ old → new updated, = unchanged); exit code 1 when versions changed")
-	registerHelmCacheFlags(cmd, &flags.HelmCache.dir, &flags.HelmCache.indexTTL, &flags.HelmCache.downloadTimeout)
+	registerHelmCacheFlags(cmd, &flags.HelmCache.dir, &flags.HelmCache.indexTTL, &flags.HelmCache.downloadTimeout, &flags.HelmCache.kubeVersion)
 	registerKustomizeCacheFlags(cmd, &flags.KsCache)
 	registerGitSourceAuthFlags(cmd, &flags.SSHHosts, &flags.SSHAcceptNew)
 	registerNoGitSourceFetchFlag(cmd, &flags.NoFetch)

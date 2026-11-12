@@ -35,6 +35,7 @@ import (
 	"github.com/banschikovde/fluxview/internal/cachedir"
 	fluxtypes "github.com/banschikovde/fluxview/internal/flux"
 	kustomizepkg "github.com/banschikovde/fluxview/internal/kustomize"
+	"github.com/banschikovde/fluxview/internal/validate"
 	"github.com/banschikovde/fluxview/internal/yamlutil"
 )
 
@@ -56,6 +57,11 @@ type Inflater struct {
 	// tarballs (the Helm SDK's getter default is a fixed 120s, which fails
 	// large downloads on slow links). Zero means no limit.
 	downloadTimeout time.Duration
+	// kubeVersion is the Kubernetes version assumed for offline chart
+	// rendering (Capabilities.KubeVersion; see DefaultKubeVersion). NewInflater
+	// guarantees it parses: charts with an upper kubeVersion bound in
+	// Chart.yaml check against it.
+	kubeVersion string
 	// registered memoizes repoURL -> cache name so that several HelmReleases
 	// sharing one repository validate the cached index only once per process.
 	// InflateHelmRelease calls are sequential (inflateHelmReleasesShared loops
@@ -115,6 +121,17 @@ func WithIndexTTL(ttl time.Duration) InflaterOption {
 // many minutes. OCI digest/tag resolution is not bounded by it.
 func WithDownloadTimeout(d time.Duration) InflaterOption {
 	return func(in *Inflater) { in.downloadTimeout = d }
+}
+
+// WithKubernetesVersion overrides the Kubernetes version assumed when
+// rendering charts offline (default: DefaultKubeVersion(); empty keeps the
+// default). Charts with an upper kubeVersion bound in Chart.yaml (e.g.
+// `kubeVersion: < 1.37.0-0`) check against it — the same knob as
+// `helm template --kube-version`. Kubernetes version syntax applies: "1.36"
+// normalizes to 1.36.0, a "v" prefix and prerelease/build suffixes are
+// accepted; anything unparsable fails NewInflater.
+func WithKubernetesVersion(version string) InflaterOption {
+	return func(in *Inflater) { in.kubeVersion = version }
 }
 
 // ociPrefix marks an OCI chart reference; OCI differs from the classic
@@ -179,6 +196,43 @@ func DefaultIndexTTL() time.Duration {
 	return d
 }
 
+// warnEnvKubeOnce serves DefaultKubeVersion the same way warnEnvTTLOnce
+// serves DefaultIndexTTL.
+var warnEnvKubeOnce sync.Once
+
+// defaultKubeVersion is the Kubernetes version assumed when inflating charts
+// offline, when neither --kubernetes-version nor FLUXVIEW_KUBE_VERSION is
+// set. The Helm SDK's own default moves with the k8s.io/client-go dependency
+// (currently 1.37) and breaks charts with an upper kubeVersion bound (e.g.
+// `kubeVersion: < 1.37.0-0`); this one is a compile-time alias of
+// validate.DefaultKubernetesVersion, so offline rendering and schema
+// validation assume the same cluster version.
+const defaultKubeVersion = validate.DefaultKubernetesVersion
+
+// DefaultKubeVersion returns the Kubernetes version assumed when rendering
+// charts offline: $FLUXVIEW_KUBE_VERSION (k8s version syntax like 1.36.1),
+// else defaultKubeVersion. An unparsable value warns once and falls back to
+// the default.
+func DefaultKubeVersion() string {
+	v := strings.TrimSpace(os.Getenv("FLUXVIEW_KUBE_VERSION"))
+	if v == "" {
+		return defaultKubeVersion
+	}
+	if _, err := common.ParseKubeVersion(v); err != nil {
+		warnEnvKubeOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "Warning: invalid FLUXVIEW_KUBE_VERSION %q, using %s\n", v, defaultKubeVersion)
+		})
+		return defaultKubeVersion
+	}
+	return v
+}
+
+// kubeVersionHint explains the accepted syntax in error messages: helm
+// parses through k8s ParseGeneric, which is looser than a strict X.Y.Z —
+// short forms normalize ("1.36" → 1.36.0) and a "v" prefix or
+// prerelease/build suffixes are accepted.
+const kubeVersionHint = `k8s version syntax: "1.36" means 1.36.0, "v" prefix and prerelease suffixes are accepted`
+
 // NewInflater creates a new Helm Inflater using the Go SDK.
 // No external helm binary is required.
 //
@@ -202,6 +256,7 @@ func NewInflater(opts ...InflaterOption) (*Inflater, error) {
 		cacheDir:        DefaultCacheDir(),
 		indexTTL:        DefaultIndexTTL(),
 		downloadTimeout: DefaultDownloadTimeout(),
+		kubeVersion:     DefaultKubeVersion(),
 		registered:      make(map[string]string),
 		ociDigests:      make(map[string]ociDigestEntry),
 		ociTags:         make(map[string]ociTagEntry),
@@ -209,6 +264,18 @@ func NewInflater(opts ...InflaterOption) (*Inflater, error) {
 	}
 	for _, opt := range opts {
 		opt(in)
+	}
+	// An empty value (a zero-value Inflater, or WithKubernetesVersion(""))
+	// keeps the default — same empty-means-default handling as validate's
+	// --kubernetes-version.
+	if in.kubeVersion == "" {
+		in.kubeVersion = DefaultKubeVersion()
+	}
+	// A Kubernetes version that is not a valid k8s version fails every chart
+	// with a kubeVersion constraint; reject it here so the flag/env typo
+	// surfaces before any chart is downloaded.
+	if _, err := common.ParseKubeVersion(in.kubeVersion); err != nil {
+		return nil, fmt.Errorf("invalid --kubernetes-version %q: %w (%s)", in.kubeVersion, err, kubeVersionHint)
 	}
 	// A negative timeout (e.g. --helm-download-timeout=-5m) behaves like 0 —
 	// no limit — normalized here so the getter setup below stays honest.
@@ -865,6 +932,19 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 
 	install := action.NewInstall(actionConfig)
 	install.DryRunStrategy = action.DryRunClient
+	// Offline rendering assumes the configured Kubernetes version instead of
+	// the SDK's moving default (derived from the client-go dependency):
+	// charts with an upper kubeVersion bound (e.g. `kubeVersion: < 1.37.0-0`)
+	// must stay renderable — the same knob as
+	// `helm template --kube-version`. The install action applies it to the
+	// render capabilities in client-only mode. NewInflater rejects unparsable
+	// values, so this branch only fires for a zero-value Inflater built
+	// programmatically.
+	kv, kverr := common.ParseKubeVersion(in.kubeVersion)
+	if kverr != nil {
+		return nil, fmt.Errorf("invalid --kubernetes-version %q: %w (%s)", in.kubeVersion, kverr, kubeVersionHint)
+	}
+	install.KubeVersion = kv
 	// Include the chart's CRDs unless spec.install.crds is explicitly "Skip".
 	// Matches Flux behavior: default (no field) and Create/CreateReplace include CRDs.
 	install.IncludeCRDs = hr.Spec.Install == nil || hr.Spec.Install.CRDs != "Skip"

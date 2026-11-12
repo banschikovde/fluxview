@@ -21,16 +21,18 @@ import (
 	"github.com/cyphar/filepath-securejoin"
 )
 
-// helmCacheOptions carries Helm cache settings from CLI flags/env into the
+// helmCacheOptions carries Helm settings from CLI flags/env into the
 // Inflater: where the on-disk Helm cache lives, how long repository
-// indexes stay fresh, and how long one HTTP download may take (0 = no
-// limit). The dir value "disabled" disables reuse (per-process
+// indexes stay fresh, how long one HTTP download may take (0 = no
+// limit), and the Kubernetes version assumed for offline chart
+// rendering. The dir value "disabled" disables reuse (per-process
 // temp dir, removed by Inflater.Close) — the same spell as every other
 // fluxview cache. Independent of the kustomize cache.
 type helmCacheOptions struct {
 	dir             string
 	indexTTL        time.Duration
 	downloadTimeout time.Duration
+	kubeVersion     string
 }
 
 func (o helmCacheOptions) inflaterOptions() []helm.InflaterOption {
@@ -38,6 +40,7 @@ func (o helmCacheOptions) inflaterOptions() []helm.InflaterOption {
 		helm.WithCacheDir(o.dir),
 		helm.WithIndexTTL(o.indexTTL),
 		helm.WithDownloadTimeout(o.downloadTimeout),
+		helm.WithKubernetesVersion(o.kubeVersion),
 	}
 }
 
@@ -66,12 +69,13 @@ func (o kustomizeCacheOptions) builderOptions() []kustomize.BuilderOption {
 	}
 }
 
-// registerHelmCacheFlags registers the Helm cache flags shared by the
-// commands. Defaults come from helm.DefaultCacheDir()/DefaultIndexTTL()/
-// DefaultDownloadTimeout() so the FLUXVIEW_HELM_CACHE_DIR /
-// FLUXVIEW_HELM_INDEX_TTL / FLUXVIEW_HELM_DOWNLOAD_TIMEOUT env vars are
+// registerHelmCacheFlags registers the Helm flags shared by the build, diff
+// and inventory commands. Defaults come from helm.DefaultCacheDir()/
+// DefaultIndexTTL()/DefaultDownloadTimeout()/DefaultKubeVersion() so the
+// FLUXVIEW_HELM_CACHE_DIR / FLUXVIEW_HELM_INDEX_TTL /
+// FLUXVIEW_HELM_DOWNLOAD_TIMEOUT / FLUXVIEW_KUBE_VERSION env vars are
 // honored unless overridden by an explicit flag.
-func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL, downloadTimeout *time.Duration) {
+func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL, downloadTimeout *time.Duration, kubeVersion *string) {
 	*cacheDir = helm.DefaultCacheDir() // pre-seed: pflag.Var does not set defaults
 	cmd.Flags().Var(cachedir.NewFlag(cacheDir), "helm-cache-dir",
 		"Helm cache directory for repo indexes and downloaded charts; \"disabled\" disables reuse (per-process temp dir) (env: FLUXVIEW_HELM_CACHE_DIR)")
@@ -79,6 +83,8 @@ func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL, down
 		"How long cached Helm repo indexes and OCI tag resolutions stay fresh; 0 always refreshes (env: FLUXVIEW_HELM_INDEX_TTL)")
 	cmd.Flags().DurationVar(downloadTimeout, "helm-download-timeout", helm.DefaultDownloadTimeout(),
 		"Per-request timeout for downloading Helm repo indexes and chart tarballs; 0 = no limit, for slow networks (env: FLUXVIEW_HELM_DOWNLOAD_TIMEOUT)")
+	cmd.Flags().StringVar(kubeVersion, "kubernetes-version", helm.DefaultKubeVersion(),
+		"Kubernetes version assumed when rendering Helm charts offline (k8s version syntax, \"1.36\" = 1.36.0); charts with an upper kubeVersion bound in Chart.yaml check against it (env: FLUXVIEW_KUBE_VERSION)")
 }
 
 // registerKustomizeCacheFlags registers the kustomize cache flags shared by

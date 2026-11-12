@@ -28,6 +28,7 @@ type BuildFlags struct {
 	HelmCacheDir        string
 	HelmIndexTTL        time.Duration
 	HelmDownloadTimeout time.Duration
+	KubernetesVersion   string
 	// KsCache groups the kustomize cache flags (remote resources, build
 	// outputs, external git source clones) — populated by
 	// registerKustomizeCacheFlags.
@@ -70,7 +71,7 @@ Examples:
 	cmd.Flags().StringVarP(&flags.Namespace, "namespace", "n", "", "Filter output resources by namespace")
 	cmd.Flags().BoolVar(&flags.SkipCRDs, "skip-crds", false, "Skip CustomResourceDefinition resources in output")
 	cmd.Flags().StringVar(&flags.StripAttrs, "strip-attrs", "", "Comma-separated keys to strip from output (e.g. helm.sh/chart,status)")
-	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL, &flags.HelmDownloadTimeout)
+	registerHelmCacheFlags(cmd, &flags.HelmCacheDir, &flags.HelmIndexTTL, &flags.HelmDownloadTimeout, &flags.KubernetesVersion)
 	registerKustomizeCacheFlags(cmd, &flags.KsCache)
 	registerGitSourceAuthFlags(cmd, &flags.GitSourceSSHKnownHosts, &flags.GitSourceSSHAcceptNew)
 	registerNoGitSourceFetchFlag(cmd, &flags.NoGitSourceFetch)
@@ -211,7 +212,7 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	defer gitEnv.Close()
 	output, err := buildHRInflation(ctx, &hrInflationEnv{
 		scans:      newScanCache(),
-		helmCache:  helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout},
+		helmCache:  helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout, kubeVersion: flags.KubernetesVersion},
 		ksCache:    ksCache,
 		gitSources: gitEnv,
 	}, clusterPath, repoRoot, name, flags.Namespace, false)

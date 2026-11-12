@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -480,5 +481,125 @@ func writeTgzChartAt(t *testing.T, tgzPath, topDir string, files map[string]stri
 		if _, err := tw.Write(data); err != nil {
 			t.Fatalf("write %s: %v", name, err)
 		}
+	}
+}
+
+// writeKubeCappedTestChart is a minimal renderable chart whose Chart.yaml
+// declares a kubeVersion constraint — the shape that broke offline inflation
+// before --kubernetes-version existed (issue #14).
+func writeKubeCappedTestChart(t *testing.T, dir, kubeVersion string) {
+	t.Helper()
+	write := func(path, content string) {
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	write(filepath.Join(dir, "Chart.yaml"), fmt.Sprintf(`apiVersion: v2
+name: testchart
+version: 1.0.0
+kubeVersion: %s
+`, kubeVersion))
+	write(filepath.Join(dir, "values.yaml"), "")
+	write(filepath.Join(dir, "templates", "dep.yaml"), `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  replicas: 1
+`)
+}
+
+// kubeVersionTestHR builds a HelmRelease inflating a local directory chart.
+func kubeVersionTestHR(chartDir string) flux.HelmRelease {
+	return flux.HelmRelease{
+		Metadata: flux.ObjectMeta{Name: "app", Namespace: "test"},
+		Spec: flux.HelmReleaseSpec{
+			Chart: flux.HelmReleaseChart{Spec: flux.HelmReleaseChartSpec{Chart: chartDir}},
+		},
+	}
+}
+
+// TestInflateHelmRelease_KubeVersionCappedBelowSDKDefault pins the issue #14
+// scenario: a chart capped below the Helm SDK's own moving default (derived
+// from the client-go dependency, currently 1.37) renders against the
+// DefaultKubeVersion() default without any flag.
+func TestInflateHelmRelease_KubeVersionCappedBelowSDKDefault(t *testing.T) {
+	t.Setenv("FLUXVIEW_KUBE_VERSION", "") // pin the default regardless of the outer environment
+
+	chartDir := filepath.Join(t.TempDir(), "testchart")
+	writeKubeCappedTestChart(t, chartDir, "< 1.37.0-0")
+
+	inflater, err := NewInflater(WithCacheDir(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+
+	out, err := inflater.InflateHelmRelease(context.Background(), kubeVersionTestHR(chartDir), "", ChartCredentials{}, nil, nil, "")
+	if err != nil {
+		t.Fatalf("InflateHelmRelease: %v", err)
+	}
+	if !strings.Contains(string(out), "kind: Deployment") {
+		t.Errorf("expected the chart capped at < 1.37.0-0 to render against the assumed default:\n%s", out)
+	}
+}
+
+// TestInflateHelmRelease_KubeVersionOverride verifies WithKubernetesVersion
+// moves the assumed version both ways: a chart capped below the assumed
+// default fails without an override and renders with one.
+func TestInflateHelmRelease_KubeVersionOverride(t *testing.T) {
+	t.Setenv("FLUXVIEW_KUBE_VERSION", "")
+
+	chartDir := filepath.Join(t.TempDir(), "testchart")
+	writeKubeCappedTestChart(t, chartDir, "< 1.29.0-0")
+
+	inflater, err := NewInflater(WithCacheDir(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewInflater: %v", err)
+	}
+	if _, err := inflater.InflateHelmRelease(context.Background(), kubeVersionTestHR(chartDir), "", ChartCredentials{}, nil, nil, ""); err == nil {
+		t.Fatalf("chart capped at < 1.29.0-0 must fail against the assumed default %s", DefaultKubeVersion())
+	}
+
+	older, err := NewInflater(WithCacheDir(t.TempDir()), WithKubernetesVersion("1.28.9"))
+	if err != nil {
+		t.Fatalf("NewInflater(WithKubernetesVersion): %v", err)
+	}
+	out, err := older.InflateHelmRelease(context.Background(), kubeVersionTestHR(chartDir), "", ChartCredentials{}, nil, nil, "")
+	if err != nil {
+		t.Fatalf("InflateHelmRelease with --kubernetes-version override: %v", err)
+	}
+	if !strings.Contains(string(out), "kind: Deployment") {
+		t.Errorf("expected the chart capped at < 1.29.0-0 to render against 1.28.9:\n%s", out)
+	}
+
+	// Short k8s form normalizes instead of being rejected: "1.36" renders
+	// as 1.36.0.
+	short, err := NewInflater(WithCacheDir(t.TempDir()), WithKubernetesVersion("1.36"))
+	if err != nil {
+		t.Fatalf("NewInflater with short form: %v", err)
+	}
+	capped := filepath.Join(t.TempDir(), "testchart")
+	writeKubeCappedTestChart(t, capped, "< 1.37.0-0")
+	if _, err := short.InflateHelmRelease(context.Background(), kubeVersionTestHR(capped), "", ChartCredentials{}, nil, nil, ""); err != nil {
+		t.Fatalf("short form 1.36 must render as 1.36.0: %v", err)
+	}
+}
+
+// TestNewInflater_KubeVersionInvalid verifies a version that is not a full
+// semver fails at construction — before any chart is downloaded — while an
+// empty override keeps the default (empty-means-default, like validate).
+func TestNewInflater_KubeVersionInvalid(t *testing.T) {
+	if _, err := NewInflater(WithCacheDir(t.TempDir()), WithKubernetesVersion("nonsense")); err == nil {
+		t.Errorf("NewInflater(WithKubernetesVersion(%q)) must fail", "nonsense")
+	}
+	in, err := NewInflater(WithCacheDir(t.TempDir()), WithKubernetesVersion(""))
+	if err != nil {
+		t.Fatalf("empty override must keep the default: %v", err)
+	}
+	if in.kubeVersion != defaultKubeVersion {
+		t.Errorf("kubeVersion = %q, want the default %q for an empty override", in.kubeVersion, defaultKubeVersion)
 	}
 }
