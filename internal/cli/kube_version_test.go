@@ -120,6 +120,14 @@ func kubeVersionWiringValidateEnv(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), `invalid FLUXVIEW_KUBE_VERSION "1.35"`) {
 		t.Errorf("resolveKubeVersion() error = %v, want invalid-env error", err)
 	}
+
+	// Flag set to an unusable value → flag-flavored error; the env is not
+	// even consulted.
+	t.Setenv("FLUXVIEW_KUBE_VERSION", "1.35.7")
+	_, err = resolveKubeVersion(kubeVersionCmd("1.35", true), "1.35")
+	if err == nil || !strings.Contains(err.Error(), `invalid --kubernetes-version "1.35"`) {
+		t.Errorf("resolveKubeVersion() error = %v, want flag-flavored error", err)
+	}
 }
 
 // TestKubeVersionWiring_InflationEndToEnd pins the issue #14 plumbing: the
