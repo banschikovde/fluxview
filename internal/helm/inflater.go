@@ -125,8 +125,8 @@ func WithDownloadTimeout(d time.Duration) InflaterOption {
 
 // WithKubernetesVersion overrides the Kubernetes version assumed when
 // rendering charts offline (default: DefaultKubeVersion(); empty keeps the
-// default). Charts with an upper kubeVersion bound in Chart.yaml (rancher
-// ships `kubeVersion: < 1.37.0-0`) check against it — the same knob as
+// default). Charts with an upper kubeVersion bound in Chart.yaml (e.g.
+// `kubeVersion: < 1.37.0-0`) check against it — the same knob as
 // `helm template --kube-version`. Kubernetes version syntax applies: "1.36"
 // normalizes to 1.36.0, a "v" prefix and prerelease/build suffixes are
 // accepted; anything unparsable fails NewInflater.
@@ -203,10 +203,10 @@ var warnEnvKubeOnce sync.Once
 // defaultKubeVersion is the Kubernetes version assumed when inflating charts
 // offline, when neither --kubernetes-version nor FLUXVIEW_KUBE_VERSION is
 // set. The Helm SDK's own default moves with the k8s.io/client-go dependency
-// (currently 1.37) and breaks charts with an upper kubeVersion bound (every
-// rancher 2.15.x chart ships `kubeVersion: < 1.37.0-0`); this one is a
-// compile-time alias of validate.DefaultKubernetesVersion, so offline
-// rendering and schema validation assume the same cluster version.
+// (currently 1.37) and breaks charts with an upper kubeVersion bound (e.g.
+// `kubeVersion: < 1.37.0-0`); this one is a compile-time alias of
+// validate.DefaultKubernetesVersion, so offline rendering and schema
+// validation assume the same cluster version.
 const defaultKubeVersion = validate.DefaultKubernetesVersion
 
 // DefaultKubeVersion returns the Kubernetes version assumed when rendering
@@ -934,8 +934,8 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 	install.DryRunStrategy = action.DryRunClient
 	// Offline rendering assumes the configured Kubernetes version instead of
 	// the SDK's moving default (derived from the client-go dependency):
-	// charts with an upper kubeVersion bound (rancher ships
-	// `kubeVersion: < 1.37.0-0`) must stay renderable — the same knob as
+	// charts with an upper kubeVersion bound (e.g. `kubeVersion: < 1.37.0-0`)
+	// must stay renderable — the same knob as
 	// `helm template --kube-version`. The install action applies it to the
 	// render capabilities in client-only mode. NewInflater rejects unparsable
 	// values, so this branch only fires for a zero-value Inflater built

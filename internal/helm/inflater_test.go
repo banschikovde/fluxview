@@ -485,8 +485,8 @@ func writeTgzChartAt(t *testing.T, tgzPath, topDir string, files map[string]stri
 }
 
 // writeKubeCappedTestChart is a minimal renderable chart whose Chart.yaml
-// declares a kubeVersion constraint — the rancher 2.15.x shape that broke
-// offline inflation before --kubernetes-version existed (issue #14).
+// declares a kubeVersion constraint — the shape that broke offline inflation
+// before --kubernetes-version existed (issue #14).
 func writeKubeCappedTestChart(t *testing.T, dir, kubeVersion string) {
 	t.Helper()
 	write := func(path, content string) {
