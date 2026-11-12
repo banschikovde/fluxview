@@ -20,58 +20,81 @@ import (
 // flag value's effect on rendering is covered end to end by
 // TestKubeVersionWiring_InflationEndToEnd below.
 func TestKubeVersionFlagWiring(t *testing.T) {
-	t.Run("registered on build, diff and inventory", func(t *testing.T) {
-		for name, cmd := range map[string]*cobra.Command{
-			"build": newBuildCmd(), "diff": newDiffCmd(), "inventory": newInventoryCmd(),
-		} {
-			if cmd.Flags().Lookup("kubernetes-version") == nil {
-				t.Errorf("%s must register --kubernetes-version", name)
-			}
-		}
-	})
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{"registered on build, diff and inventory", kubeVersionWiringRegistered},
+		{"default is validate's version and honors the env", kubeVersionWiringDefaultFromEnv},
+		{"invalid env falls back to the default", kubeVersionWiringInvalidEnvFallback},
+		{"validate shares the same env knob", kubeVersionWiringValidateEnv},
+	} {
+		t.Run(tc.name, tc.run)
+	}
+}
 
-	t.Run("default is validate's version and honors the env", func(t *testing.T) {
-		t.Setenv("FLUXVIEW_KUBE_VERSION", "")
-		def := newBuildCmd().Flags().Lookup("kubernetes-version").DefValue
-		if def != validate.DefaultKubernetesVersion {
-			t.Errorf("build flag default = %s, want validate.DefaultKubernetesVersion (%s) — the two must stay in sync", def, validate.DefaultKubernetesVersion)
+// kubeVersionWiringRegistered: every Helm-inflating command must register
+// the flag.
+func kubeVersionWiringRegistered(t *testing.T) {
+	for name, cmd := range map[string]*cobra.Command{
+		"build": newBuildCmd(), "diff": newDiffCmd(), "inventory": newInventoryCmd(),
+	} {
+		if cmd.Flags().Lookup("kubernetes-version") == nil {
+			t.Errorf("%s must register --kubernetes-version", name)
 		}
+	}
+}
 
-		t.Setenv("FLUXVIEW_KUBE_VERSION", "1.30.2")
-		for name, cmd := range map[string]*cobra.Command{
-			"build": newBuildCmd(), "diff": newDiffCmd(), "inventory": newInventoryCmd(),
-		} {
-			if got := cmd.Flags().Lookup("kubernetes-version").DefValue; got != "1.30.2" {
-				t.Errorf("%s flag default = %s, want the FLUXVIEW_KUBE_VERSION value 1.30.2", name, got)
-			}
-		}
-	})
+// kubeVersionWiringDefaultFromEnv: unset env → the validate-synced default;
+// a set env drives the flag default of all three commands.
+func kubeVersionWiringDefaultFromEnv(t *testing.T) {
+	t.Setenv("FLUXVIEW_KUBE_VERSION", "")
+	def := newBuildCmd().Flags().Lookup("kubernetes-version").DefValue
+	if def != validate.DefaultKubernetesVersion {
+		t.Errorf("build flag default = %s, want validate.DefaultKubernetesVersion (%s) — the two must stay in sync", def, validate.DefaultKubernetesVersion)
+	}
 
-	t.Run("invalid env falls back to the default", func(t *testing.T) {
-		t.Setenv("FLUXVIEW_KUBE_VERSION", "bogus")
-		if got := newDiffCmd().Flags().Lookup("kubernetes-version").DefValue; got != validate.DefaultKubernetesVersion {
-			t.Errorf("diff flag default = %s, want the default %s for an invalid env value", got, validate.DefaultKubernetesVersion)
+	t.Setenv("FLUXVIEW_KUBE_VERSION", "1.30.2")
+	for name, cmd := range map[string]*cobra.Command{
+		"build": newBuildCmd(), "diff": newDiffCmd(), "inventory": newInventoryCmd(),
+	} {
+		if got := cmd.Flags().Lookup("kubernetes-version").DefValue; got != "1.30.2" {
+			t.Errorf("%s flag default = %s, want the FLUXVIEW_KUBE_VERSION value 1.30.2", name, got)
 		}
-	})
+	}
+}
 
-	t.Run("validate shares the same env knob", func(t *testing.T) {
-		t.Setenv("FLUXVIEW_KUBE_VERSION", "")
-		if got := newValidateCmd().Flags().Lookup("kubernetes-version").DefValue; got != validate.DefaultKubernetesVersion {
-			t.Errorf("validate flag default = %s, want the default %s when env unset", got, validate.DefaultKubernetesVersion)
-		}
+// kubeVersionWiringInvalidEnvFallback: an unusable env value falls back to
+// the default at flag registration.
+func kubeVersionWiringInvalidEnvFallback(t *testing.T) {
+	t.Setenv("FLUXVIEW_KUBE_VERSION", "bogus")
+	if got := newDiffCmd().Flags().Lookup("kubernetes-version").DefValue; got != validate.DefaultKubernetesVersion {
+		t.Errorf("diff flag default = %s, want the default %s for an invalid env value", got, validate.DefaultKubernetesVersion)
+	}
+}
 
-		t.Setenv("FLUXVIEW_KUBE_VERSION", "1.35.7")
-		if got := newValidateCmd().Flags().Lookup("kubernetes-version").DefValue; got != "1.35.7" {
-			t.Errorf("validate flag default = %s, want the FLUXVIEW_KUBE_VERSION value 1.35.7", got)
-		}
+// kubeVersionWiringValidateEnv: validate reads the same env with its own
+// strict parsing — a short form ("1.35") is unusable for schema URLs and
+// falls back to the default instead.
+func kubeVersionWiringValidateEnv(t *testing.T) {
+	def := func() string {
+		return newValidateCmd().Flags().Lookup("kubernetes-version").DefValue
+	}
 
-		// validate parses strictly (full X.Y.Z or master): a short form is
-		// unusable for schema URLs — warn + fall back to the default.
-		t.Setenv("FLUXVIEW_KUBE_VERSION", "1.35")
-		if got := newValidateCmd().Flags().Lookup("kubernetes-version").DefValue; got != validate.DefaultKubernetesVersion {
-			t.Errorf("validate flag default = %s, want the default %s for a short-form env value", got, validate.DefaultKubernetesVersion)
-		}
-	})
+	t.Setenv("FLUXVIEW_KUBE_VERSION", "")
+	if got := def(); got != validate.DefaultKubernetesVersion {
+		t.Errorf("validate flag default = %s, want the default %s when env unset", got, validate.DefaultKubernetesVersion)
+	}
+
+	t.Setenv("FLUXVIEW_KUBE_VERSION", "1.35.7")
+	if got := def(); got != "1.35.7" {
+		t.Errorf("validate flag default = %s, want the FLUXVIEW_KUBE_VERSION value 1.35.7", got)
+	}
+
+	t.Setenv("FLUXVIEW_KUBE_VERSION", "1.35")
+	if got := def(); got != validate.DefaultKubernetesVersion {
+		t.Errorf("validate flag default = %s, want the default %s for a short-form env value", got, validate.DefaultKubernetesVersion)
+	}
 }
 
 // TestKubeVersionWiring_InflationEndToEnd pins the issue #14 plumbing: the
