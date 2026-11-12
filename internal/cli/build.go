@@ -63,6 +63,11 @@ Examples:
   fluxview build hr podinfo --path clusters/prod/flux/`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			applyGitSourceAuthFlags(cmd.Flags(), flags.GitSourceSSHKnownHosts, flags.GitSourceSSHAcceptNew)
+			pin, err := kubeVersionPin(cmd)
+			if err != nil {
+				return NewExitError(err, ExitCodeError)
+			}
+			flags.KubernetesVersion = helmKubeVersion(cmd, flags.KubernetesVersion, pin)
 			return runBuild(cmd.Context(), args, flags)
 		},
 	}

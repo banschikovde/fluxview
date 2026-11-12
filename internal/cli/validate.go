@@ -12,6 +12,7 @@ import (
 
 	"github.com/banschikovde/fluxview/internal/cachedir"
 	"github.com/banschikovde/fluxview/internal/git"
+	"github.com/banschikovde/fluxview/internal/kubeversion"
 	"github.com/banschikovde/fluxview/internal/kustomize"
 	"github.com/banschikovde/fluxview/internal/validate"
 )
@@ -109,16 +110,6 @@ func schemaDownloadTimeout(flagValue time.Duration) time.Duration {
 func newValidateCmd() *cobra.Command {
 	flags := &ValidateFlags{}
 
-	// Display-only pre-seed so --help reflects FLUXVIEW_KUBE_VERSION the
-	// same way the Helm commands' help does. Diagnostics stay out of
-	// registration (NewRootCmd constructs every subcommand for any
-	// invocation); the authoritative flag > env > default resolution runs
-	// in the RunE via resolveKubeVersion.
-	kubeVersionDefault := validate.DefaultKubernetesVersion
-	if env := strings.TrimSpace(os.Getenv("FLUXVIEW_KUBE_VERSION")); env != "" {
-		kubeVersionDefault = env
-	}
-
 	cmd := &cobra.Command{
 		Use:   "validate [flags]",
 		Short: "Validate Flux resources against schemas",
@@ -144,15 +135,21 @@ Examples:
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			applyGitSourceAuthFlags(cmd.Flags(), flags.GitSourceSSHKnownHosts, flags.GitSourceSSHAcceptNew)
-			// The env is resolved here — not at flag registration — so a
-			// FLUXVIEW_KUBE_VERSION meant for the Helm commands never
-			// triggers validate-side diagnostics in unrelated commands
-			// (NewRootCmd constructs every subcommand for any invocation).
-			kubeVersion, err := resolveKubeVersion(cmd, flags.KubernetesVersion)
+			// The env pin is resolved here — not at flag registration — with
+			// the strict pipeline grammar, exactly like every other command.
+			pin, err := kubeVersionPin(cmd)
 			if err != nil {
-				return err
+				return NewExitError(err, ExitCodeError)
 			}
-			flags.KubernetesVersion = kubeVersion
+			flags.KubernetesVersion = effectiveKubeVersion(cmd, flags.KubernetesVersion, pin)
+			// The flag carries validate's own strict grammar (full X.Y.Z or
+			// master): a short form would 404 every default-registry schema
+			// and silently skip all native kinds.
+			if cmd.Flags().Changed("kubernetes-version") {
+				if err := validate.ValidateKubernetesVersion(flags.KubernetesVersion); err != nil {
+					return NewExitError(err, ExitCodeError)
+				}
+			}
 			return runValidate(cmd.Context(), flags)
 		},
 	}
@@ -160,7 +157,7 @@ Examples:
 	cmd.Flags().StringVarP(&flags.Path, "path", "p", "", "Path to the cluster directory in the repository")
 	cmd.Flags().StringVarP(&flags.Namespace, "namespace", "n", "", "Filter output resources by namespace")
 	cmd.Flags().StringVar(&flags.SchemaDir, "schema-dir", "", "Directory with schemas: kubeconform JSON files, CRD YAML manifests and/or a kubernetes-json-schema checkout (default: /schemas/ or ./schemas/)")
-	cmd.Flags().StringVar(&flags.KubernetesVersion, "kubernetes-version", kubeVersionDefault, "Kubernetes version (full X.Y.Z like 1.36.1, or master) for the default schema location (env: FLUXVIEW_KUBE_VERSION)")
+	cmd.Flags().StringVar(&flags.KubernetesVersion, "kubernetes-version", kubeversion.Default, "Kubernetes version (full X.Y.Z like 1.36.1, or master) for the default schema location (default: $FLUXVIEW_KUBE_VERSION, else 1.36.1)")
 	cmd.Flags().DurationVar(&flags.SchemaDownloadTimeout, "schema-download-timeout", validate.DefaultSchemaDownloadTimeout, "Per-request timeout for downloading Kubernetes schemas (e.g. 30s, 1m; 0 = no limit)")
 	cmd.Flags().BoolVar(&flags.Strict, "strict", false, "Reject duplicated YAML keys; strict schemas for the default registry also reject unknown fields")
 	cmd.Flags().StringSliceVar(&flags.SkipKinds, "skip-kind", nil, "Kinds to skip (repeatable or comma-separated): Kind (e.g. Deployment, any apiVersion) or apiVersion/Kind (e.g. apps/v1/Deployment)")
@@ -310,33 +307,6 @@ func checkValidateFlags(flags *ValidateFlags) error {
 		return NewExitError(fmt.Errorf("invalid --schema-download-timeout %s: must be 0 (no limit) or a positive duration", flags.SchemaDownloadTimeout), ExitCodeError)
 	}
 	return nil
-}
-
-// resolveKubeVersion applies the flag > env > default ladder for validate's
-// --kubernetes-version. The env is read only when the flag was not set
-// explicitly; the strictness is validate's own (full X.Y.Z, v-prefix or
-// master) — the Helm commands parse the same variable more loosely at
-// registration time, so an env value that renders fine but cannot select
-// schemas fails here with a name-accurate error instead of silently
-// checking against a different version.
-func resolveKubeVersion(cmd *cobra.Command, flagValue string) (string, error) {
-	value, source := flagValue, "flag"
-	if !cmd.Flags().Changed("kubernetes-version") {
-		if env := strings.TrimSpace(os.Getenv("FLUXVIEW_KUBE_VERSION")); env != "" {
-			value, source = env, "env"
-		}
-	}
-	// An empty value (nothing configured anywhere) is the shared default.
-	if value == "" {
-		value = validate.DefaultKubernetesVersion
-	}
-	if err := validate.ValidateKubernetesVersion(value); err != nil {
-		if source == "env" {
-			return "", NewExitError(fmt.Errorf("invalid FLUXVIEW_KUBE_VERSION %q: want a full version like %s (or master)", value, validate.DefaultKubernetesVersion), ExitCodeError)
-		}
-		return "", NewExitError(err, ExitCodeError)
-	}
-	return value, nil
 }
 
 // resolveValidatePaths resolves and sanity-checks the cluster path: it

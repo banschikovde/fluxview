@@ -16,12 +16,12 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"sync"
 
 	kcresource "github.com/yannh/kubeconform/pkg/resource"
 	kcvalidator "github.com/yannh/kubeconform/pkg/validator"
 
 	"github.com/banschikovde/fluxview/internal/cachedir"
+	"github.com/banschikovde/fluxview/internal/kubeversion"
 )
 
 // DefaultSchemaLocation is kubeconform's "default" location: Kubernetes
@@ -30,25 +30,9 @@ import (
 const DefaultSchemaLocation = "default"
 
 // DefaultKubernetesVersion is the Kubernetes version used to resolve
-// Kubernetes schemas when none is configured explicitly. Kept in sync with
-// the k8s.io/* modules this project builds against.
-const DefaultKubernetesVersion = "1.36.1"
-
-// warnEnvKubeOnce keeps the invalid-env warning to a single line per
-// process across every reader of FLUXVIEW_KUBE_VERSION (the Helm-side
-// render resolver and validate's run-time resolution) — a bad value never
-// produces more than one warning, whichever command runs.
-var warnEnvKubeOnce sync.Once
-
-// WarnInvalidKubeVersionEnv prints the process-single warning for an
-// unusable FLUXVIEW_KUBE_VERSION value falling back to fallback. Readers
-// with different strictness call it instead of keeping their own Once, so
-// the "warn once" promise holds regardless of which command ran.
-func WarnInvalidKubeVersionEnv(value, fallback string) {
-	warnEnvKubeOnce.Do(func() {
-		fmt.Fprintf(os.Stderr, "Warning: invalid FLUXVIEW_KUBE_VERSION %q, using %s\n", value, fallback)
-	})
-}
+// Kubernetes schemas when none is configured explicitly — the same
+// pipeline-wide default the Helm commands render against.
+const DefaultKubernetesVersion = kubeversion.Default
 
 // DefaultSchemaCacheDir returns the schema cache directory:
 // $FLUXVIEW_SCHEMA_CACHE_DIR, else <cachedir.DefaultDir base>/schemas.

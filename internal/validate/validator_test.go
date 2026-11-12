@@ -1,32 +1,12 @@
 package validate
 
 import (
-	"bytes"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 )
-
-// captureStderrValidate swaps os.Stderr while f runs and returns everything
-// printed to it — used for the env warn-once assertions. Safe only because
-// these tests do not use t.Parallel(): the swap is process-global. Pipe and
-// copy errors are deliberately ignored — a failed capture fails the
-// assertion on content, not on plumbing.
-func captureStderrValidate(f func()) string {
-	old := os.Stderr
-	r, w, _ := os.Pipe()
-	os.Stderr = w
-	f()
-	w.Close()
-	os.Stderr = old
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
-	return buf.String()
-}
 
 // localLocation builds a kubeconform location template for a local directory
 // with schemas at its root (<kind>-<group>-<version>.json layout).
@@ -756,26 +736,6 @@ func TestValidateKubernetesVersion(t *testing.T) {
 	err := ValidateKubernetesVersion("1.36")
 	if err == nil || !strings.Contains(err.Error(), "1.36.1") || !strings.Contains(err.Error(), "1.36") {
 		t.Errorf("error should show the input and the expected form, got: %v", err)
-	}
-}
-
-// TestWarnInvalidKubeVersionEnv: the shared guard warns exactly once per
-// process, no matter how many readers hit the same unusable value.
-func TestWarnInvalidKubeVersionEnv(t *testing.T) {
-	warnEnvKubeOnce = sync.Once{}
-
-	first := captureStderrValidate(func() {
-		WarnInvalidKubeVersionEnv("bogus", DefaultKubernetesVersion)
-	})
-	if !strings.Contains(first, `invalid FLUXVIEW_KUBE_VERSION "bogus"`) {
-		t.Errorf("expected invalid-env warning, got:\n%s", first)
-	}
-
-	second := captureStderrValidate(func() {
-		WarnInvalidKubeVersionEnv("bogus", DefaultKubernetesVersion)
-	})
-	if second != "" {
-		t.Errorf("warning must not repeat, got:\n%s", second)
 	}
 }
 

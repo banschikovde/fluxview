@@ -34,8 +34,8 @@ import (
 	"github.com/Masterminds/semver/v3"
 	"github.com/banschikovde/fluxview/internal/cachedir"
 	fluxtypes "github.com/banschikovde/fluxview/internal/flux"
+	"github.com/banschikovde/fluxview/internal/kubeversion"
 	kustomizepkg "github.com/banschikovde/fluxview/internal/kustomize"
-	"github.com/banschikovde/fluxview/internal/validate"
 	"github.com/banschikovde/fluxview/internal/yamlutil"
 )
 
@@ -201,28 +201,9 @@ func DefaultIndexTTL() time.Duration {
 // set. The Helm SDK's own default moves with the k8s.io/client-go dependency
 // (currently 1.37) and breaks charts with an upper kubeVersion bound (e.g.
 // `kubeVersion: < 1.37.0-0`); this one is a compile-time alias of
-// validate.DefaultKubernetesVersion, so offline rendering and schema
-// validation assume the same cluster version.
-const defaultKubeVersion = validate.DefaultKubernetesVersion
-
-// DefaultKubeVersion returns the Kubernetes version assumed when rendering
-// charts offline: $FLUXVIEW_KUBE_VERSION (k8s version syntax like 1.36.1),
-// else defaultKubeVersion. The variable is shared with validate, which
-// resolves it at run time with strict X.Y.Z parsing (an unusable value
-// fails validate with exit 2 instead of rendering-side fallback). An
-// unparsable value warns once (via the shared guard) and falls back to the
-// default.
-func DefaultKubeVersion() string {
-	v := strings.TrimSpace(os.Getenv("FLUXVIEW_KUBE_VERSION"))
-	if v == "" {
-		return defaultKubeVersion
-	}
-	if _, err := common.ParseKubeVersion(v); err != nil {
-		validate.WarnInvalidKubeVersionEnv(v, defaultKubeVersion)
-		return defaultKubeVersion
-	}
-	return v
-}
+// kubeversion.Default, so offline rendering and schema validation assume
+// the same cluster version.
+const defaultKubeVersion = kubeversion.Default
 
 // kubeVersionHint explains the accepted syntax in error messages: helm
 // parses through k8s ParseGeneric, which is looser than a strict X.Y.Z —
@@ -253,7 +234,7 @@ func NewInflater(opts ...InflaterOption) (*Inflater, error) {
 		cacheDir:        DefaultCacheDir(),
 		indexTTL:        DefaultIndexTTL(),
 		downloadTimeout: DefaultDownloadTimeout(),
-		kubeVersion:     DefaultKubeVersion(),
+		kubeVersion:     defaultKubeVersion,
 		registered:      make(map[string]string),
 		ociDigests:      make(map[string]ociDigestEntry),
 		ociTags:         make(map[string]ociTagEntry),
@@ -263,10 +244,9 @@ func NewInflater(opts ...InflaterOption) (*Inflater, error) {
 		opt(in)
 	}
 	// An empty value (a zero-value Inflater, or WithKubernetesVersion(""))
-	// keeps the default — same empty-means-default handling as validate's
-	// --kubernetes-version.
+	// keeps the default.
 	if in.kubeVersion == "" {
-		in.kubeVersion = DefaultKubeVersion()
+		in.kubeVersion = defaultKubeVersion
 	}
 	// A Kubernetes version that is not a valid k8s version fails every chart
 	// with a kubeVersion constraint; reject it here so the flag/env typo
