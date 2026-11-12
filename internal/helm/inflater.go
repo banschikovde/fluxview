@@ -124,7 +124,7 @@ func WithDownloadTimeout(d time.Duration) InflaterOption {
 }
 
 // WithKubernetesVersion overrides the Kubernetes version assumed when
-// rendering charts offline (default: DefaultKubeVersion(); empty keeps the
+// rendering charts offline (default: kubeversion.Default; empty keeps the
 // default). Charts with an upper kubeVersion bound in Chart.yaml (e.g.
 // `kubeVersion: < 1.37.0-0`) check against it — the same knob as
 // `helm template --kube-version`. Kubernetes version syntax applies: "1.36"

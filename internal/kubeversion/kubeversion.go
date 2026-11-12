@@ -25,18 +25,19 @@ const EnvVar = "FLUXVIEW_KUBE_VERSION"
 var versionPattern = regexp.MustCompile(`^v?\d+\.\d+\.\d+$`)
 
 // FromEnv returns $FLUXVIEW_KUBE_VERSION or "" when unset. The env grammar
-// is strict for every consumer: a full X.Y.Z with an optional "v" prefix,
-// or "master". A short form ("1.35"), a bare "v" or garbage is an error —
+// is strict for every consumer: a full X.Y.Z with an optional "v" prefix.
+// A short form ("1.35"), a bare "v", "master" or garbage is an error —
 // the loose command-side grammars (helm renders "1.35" as 1.35.0 while
-// validate's schema registry has no such version) would otherwise pin the
-// pipeline to values that mean different things per command.
+// validate's schema registry has no such version, and "master" is a
+// schema-registry concept charts cannot render against) would otherwise
+// pin the pipeline to values that mean different things per command.
 func FromEnv() (string, error) {
 	v := strings.TrimSpace(os.Getenv(EnvVar))
 	if v == "" {
 		return "", nil
 	}
-	if v == "master" || versionPattern.MatchString(v) {
+	if versionPattern.MatchString(v) {
 		return v, nil
 	}
-	return "", fmt.Errorf("invalid %s %q: want a full version like 1.36.1 (or master)", EnvVar, v)
+	return "", fmt.Errorf("invalid %s %q: want a full version like 1.36.1", EnvVar, v)
 }

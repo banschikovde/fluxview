@@ -83,7 +83,7 @@ Examples:
 			if err != nil {
 				return NewExitError(err, ExitCodeError)
 			}
-			flags.KubernetesVersion = helmKubeVersion(cmd, flags.KubernetesVersion, pin)
+			flags.KubernetesVersion = effectiveKubeVersion(cmd, flags.KubernetesVersion, pin)
 			return runDiff(cmd.Context(), args, flags)
 		},
 	}

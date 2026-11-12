@@ -86,7 +86,7 @@ func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL, down
 	cmd.Flags().DurationVar(downloadTimeout, "helm-download-timeout", helm.DefaultDownloadTimeout(),
 		"Per-request timeout for downloading Helm repo indexes and chart tarballs; 0 = no limit, for slow networks (env: FLUXVIEW_HELM_DOWNLOAD_TIMEOUT)")
 	cmd.Flags().StringVar(kubeVersion, "kubernetes-version", kubeversion.Default,
-		"Kubernetes version assumed when rendering Helm charts offline (k8s version syntax, \"1.36\" = 1.36.0); charts with an upper kubeVersion bound in Chart.yaml check against it (default: $FLUXVIEW_KUBE_VERSION, else 1.36.1)")
+		"Kubernetes version assumed when rendering Helm charts offline (k8s version syntax, \"1.36\" = 1.36.0); charts with an upper kubeVersion bound in Chart.yaml check against it (env: FLUXVIEW_KUBE_VERSION)")
 }
 
 // kubeVersionPin resolves FLUXVIEW_KUBE_VERSION with the strict pipeline
@@ -112,17 +112,6 @@ func effectiveKubeVersion(cmd *cobra.Command, flagValue, pin string) string {
 		return pin
 	}
 	return flagValue
-}
-
-// helmKubeVersion is effectiveKubeVersion adapted to chart rendering:
-// "master" is a schema-registry concept charts cannot render against, so
-// the pin maps to the concrete pipeline default.
-func helmKubeVersion(cmd *cobra.Command, flagValue, pin string) string {
-	v := effectiveKubeVersion(cmd, flagValue, pin)
-	if v == "master" {
-		return kubeversion.Default
-	}
-	return v
 }
 
 // registerKustomizeCacheFlags registers the kustomize cache flags shared by
