@@ -1,12 +1,29 @@
 package validate
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
+
+// captureStderrValidate swaps os.Stderr while f runs and returns everything
+// printed to it — used for the env warn-once assertions.
+func captureStderrValidate(f func()) string {
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	f()
+	w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	return buf.String()
+}
 
 // localLocation builds a kubeconform location template for a local directory
 // with schemas at its root (<kind>-<group>-<version>.json layout).
@@ -734,6 +751,56 @@ func TestValidateKubernetesVersion(t *testing.T) {
 	err := ValidateKubernetesVersion("1.36")
 	if err == nil || !strings.Contains(err.Error(), "1.36.1") || !strings.Contains(err.Error(), "1.36") {
 		t.Errorf("error should show the input and the expected form, got: %v", err)
+	}
+}
+
+// TestDefaultKubernetesVersionFromEnv covers the env resolution paths:
+// unset → the shared default, valid forms honored as set (the value flows
+// into the flag default and from there into schema URLs).
+func TestDefaultKubernetesVersionFromEnv(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want string
+	}{
+		{name: "unset falls back to the default", env: "", want: DefaultKubernetesVersion},
+		{name: "full version honored", env: "1.35.7", want: "1.35.7"},
+		{name: "v-prefix honored", env: "v1.35.7", want: "v1.35.7"},
+		{name: "master honored", env: "master", want: "master"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("FLUXVIEW_KUBE_VERSION", tt.env)
+			if got := DefaultKubernetesVersionFromEnv(); got != tt.want {
+				t.Errorf("DefaultKubernetesVersionFromEnv() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDefaultKubernetesVersionFromEnvInvalidWarnsOnce: an unusable
+// FLUXVIEW_KUBE_VERSION falls back to the default and warns exactly once
+// per process (the shared contract of every fluxview env knob).
+func TestDefaultKubernetesVersionFromEnvInvalidWarnsOnce(t *testing.T) {
+	t.Setenv("FLUXVIEW_KUBE_VERSION", "1.36") // a short form 404s every schema
+	warnEnvKubeOnce = sync.Once{}
+
+	first := captureStderrValidate(func() {
+		if got := DefaultKubernetesVersionFromEnv(); got != DefaultKubernetesVersion {
+			t.Errorf("DefaultKubernetesVersionFromEnv() = %q, want default %q for invalid env", got, DefaultKubernetesVersion)
+		}
+	})
+	if !strings.Contains(first, `invalid FLUXVIEW_KUBE_VERSION "1.36"`) {
+		t.Errorf("expected invalid-env warning, got:\n%s", first)
+	}
+
+	second := captureStderrValidate(func() {
+		if got := DefaultKubernetesVersionFromEnv(); got != DefaultKubernetesVersion {
+			t.Errorf("DefaultKubernetesVersionFromEnv() = %q, want default %q for invalid env", got, DefaultKubernetesVersion)
+		}
+	})
+	if second != "" {
+		t.Errorf("warning must not repeat, got:\n%s", second)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 
 	kcresource "github.com/yannh/kubeconform/pkg/resource"
 	kcvalidator "github.com/yannh/kubeconform/pkg/validator"
@@ -32,6 +33,36 @@ const DefaultSchemaLocation = "default"
 // Kubernetes schemas when none is configured explicitly. Kept in sync with
 // the k8s.io/* modules this project builds against.
 const DefaultKubernetesVersion = "1.36.1"
+
+// warnEnvKubeOnce keeps the invalid-env warning to a single line per
+// process — the same contract as the helm-side FLUXVIEW_KUBE_VERSION
+// resolution and every other fluxview env knob.
+var warnEnvKubeOnce sync.Once
+
+// DefaultKubernetesVersionFromEnv returns the Kubernetes version a run
+// should assume: $FLUXVIEW_KUBE_VERSION, else DefaultKubernetesVersion.
+// The variable is shared with the Helm-inflating commands (build, diff,
+// inventory read it for the render capabilities), so one setting pins the
+// whole pipeline to one cluster version; a --kubernetes-version flag still
+// overrides it per command (flag > env > default). Accepts the same forms
+// as --kubernetes-version: a full X.Y.Z, a "v"-prefixed one, or "master".
+// An unusable value warns once and falls back to DefaultKubernetesVersion —
+// the flag value is re-checked strictly by ValidateKubernetesVersion at run
+// time.
+func DefaultKubernetesVersionFromEnv() string {
+	v := strings.TrimSpace(os.Getenv("FLUXVIEW_KUBE_VERSION"))
+	if v == "" {
+		return DefaultKubernetesVersion
+	}
+	normalized := NormalizeKubernetesVersion(v)
+	if normalized == "" || normalized == "master" || semverPattern.MatchString(normalized) {
+		return v
+	}
+	warnEnvKubeOnce.Do(func() {
+		fmt.Fprintf(os.Stderr, "Warning: invalid FLUXVIEW_KUBE_VERSION %q, using %s\n", v, DefaultKubernetesVersion)
+	})
+	return DefaultKubernetesVersion
+}
 
 // DefaultSchemaCacheDir returns the schema cache directory:
 // $FLUXVIEW_SCHEMA_CACHE_DIR, else <cachedir.DefaultDir base>/schemas.

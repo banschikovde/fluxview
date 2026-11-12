@@ -141,7 +141,7 @@ Examples:
 	cmd.Flags().StringVarP(&flags.Path, "path", "p", "", "Path to the cluster directory in the repository")
 	cmd.Flags().StringVarP(&flags.Namespace, "namespace", "n", "", "Filter output resources by namespace")
 	cmd.Flags().StringVar(&flags.SchemaDir, "schema-dir", "", "Directory with schemas: kubeconform JSON files, CRD YAML manifests and/or a kubernetes-json-schema checkout (default: /schemas/ or ./schemas/)")
-	cmd.Flags().StringVar(&flags.KubernetesVersion, "kubernetes-version", validate.DefaultKubernetesVersion, "Kubernetes version (full X.Y.Z like 1.36.1, or master) for the default schema location")
+	cmd.Flags().StringVar(&flags.KubernetesVersion, "kubernetes-version", validate.DefaultKubernetesVersionFromEnv(), "Kubernetes version (full X.Y.Z like 1.36.1, or master) for the default schema location (env: FLUXVIEW_KUBE_VERSION)")
 	cmd.Flags().DurationVar(&flags.SchemaDownloadTimeout, "schema-download-timeout", validate.DefaultSchemaDownloadTimeout, "Per-request timeout for downloading Kubernetes schemas (e.g. 30s, 1m; 0 = no limit)")
 	cmd.Flags().BoolVar(&flags.Strict, "strict", false, "Reject duplicated YAML keys; strict schemas for the default registry also reject unknown fields")
 	cmd.Flags().StringSliceVar(&flags.SkipKinds, "skip-kind", nil, "Kinds to skip (repeatable or comma-separated): Kind (e.g. Deployment, any apiVersion) or apiVersion/Kind (e.g. apps/v1/Deployment)")

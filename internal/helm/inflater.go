@@ -211,8 +211,9 @@ const defaultKubeVersion = validate.DefaultKubernetesVersion
 
 // DefaultKubeVersion returns the Kubernetes version assumed when rendering
 // charts offline: $FLUXVIEW_KUBE_VERSION (k8s version syntax like 1.36.1),
-// else defaultKubeVersion. An unparsable value warns once and falls back to
-// the default.
+// else defaultKubeVersion. The variable is shared with validate, which
+// reads it for the default-registry schemas with strict X.Y.Z parsing. An
+// unparsable value warns once and falls back to the default.
 func DefaultKubeVersion() string {
 	v := strings.TrimSpace(os.Getenv("FLUXVIEW_KUBE_VERSION"))
 	if v == "" {

@@ -14,9 +14,10 @@ import (
 )
 
 // TestKubeVersionFlagWiring verifies the --kubernetes-version flag plumbing
-// of the Helm-inflating commands (build, diff, inventory): registration, an
-// env-driven default and the fallback for an unusable env value. The flag
-// value's effect on rendering is covered end to end by
+// of the Helm-inflating commands (build, diff, inventory) and that validate
+// reads the same FLUXVIEW_KUBE_VERSION env (strictly parsed): registration,
+// an env-driven default and the fallback for an unusable env value. The
+// flag value's effect on rendering is covered end to end by
 // TestKubeVersionWiring_InflationEndToEnd below.
 func TestKubeVersionFlagWiring(t *testing.T) {
 	t.Run("registered on build, diff and inventory", func(t *testing.T) {
@@ -50,6 +51,25 @@ func TestKubeVersionFlagWiring(t *testing.T) {
 		t.Setenv("FLUXVIEW_KUBE_VERSION", "bogus")
 		if got := newDiffCmd().Flags().Lookup("kubernetes-version").DefValue; got != validate.DefaultKubernetesVersion {
 			t.Errorf("diff flag default = %s, want the default %s for an invalid env value", got, validate.DefaultKubernetesVersion)
+		}
+	})
+
+	t.Run("validate shares the same env knob", func(t *testing.T) {
+		t.Setenv("FLUXVIEW_KUBE_VERSION", "")
+		if got := newValidateCmd().Flags().Lookup("kubernetes-version").DefValue; got != validate.DefaultKubernetesVersion {
+			t.Errorf("validate flag default = %s, want the default %s when env unset", got, validate.DefaultKubernetesVersion)
+		}
+
+		t.Setenv("FLUXVIEW_KUBE_VERSION", "1.35.7")
+		if got := newValidateCmd().Flags().Lookup("kubernetes-version").DefValue; got != "1.35.7" {
+			t.Errorf("validate flag default = %s, want the FLUXVIEW_KUBE_VERSION value 1.35.7", got)
+		}
+
+		// validate parses strictly (full X.Y.Z or master): a short form is
+		// unusable for schema URLs — warn + fall back to the default.
+		t.Setenv("FLUXVIEW_KUBE_VERSION", "1.35")
+		if got := newValidateCmd().Flags().Lookup("kubernetes-version").DefValue; got != validate.DefaultKubernetesVersion {
+			t.Errorf("validate flag default = %s, want the default %s for a short-form env value", got, validate.DefaultKubernetesVersion)
 		}
 	})
 }
