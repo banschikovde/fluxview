@@ -18,6 +18,19 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: verify-go-pin
+        run: |
+          # The Docker builder must use exactly the go.mod toolchain: a
+          # floating golang:1.27-alpine tag would build release images with
+          # a different stdlib than the tested binaries.
+          GO_MOD="$(grep -E '^go ' go.mod | awk '{print $2}')"
+          GO_DOCKER="$(grep -E '^ARG GO_VERSION=' Dockerfile | cut -d= -f2)"
+          if [ "$GO_MOD" != "$GO_DOCKER" ]; then
+            echo "::error::Go version drift: go.mod wants $GO_MOD, Dockerfile pins $GO_DOCKER — bump ARG GO_VERSION in the Dockerfile together with go.mod"
+            exit 1
+          fi
+          echo "Go pin OK: $GO_DOCKER"
+
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           # Single source of truth: the go directive in go.mod (pinned to a

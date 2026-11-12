@@ -1,4 +1,8 @@
-FROM golang:1.27-alpine AS builder
+# GO_VERSION must match the `go` directive in go.mod — the CI pin guard
+# (verify-go-pin) fails the build when they drift.
+ARG GO_VERSION=1.27.4
+
+FROM golang:${GO_VERSION}-alpine AS builder
 
 ARG VERSION=dev
 
