@@ -12,7 +12,10 @@ import (
 )
 
 // captureStderrValidate swaps os.Stderr while f runs and returns everything
-// printed to it — used for the env warn-once assertions.
+// printed to it — used for the env warn-once assertions. Safe only because
+// these tests do not use t.Parallel(): the swap is process-global. Pipe and
+// copy errors are deliberately ignored — a failed capture fails the
+// assertion on content, not on plumbing.
 func captureStderrValidate(f func()) string {
 	old := os.Stderr
 	r, w, _ := os.Pipe()
@@ -732,7 +735,7 @@ func TestNormalizeKubernetesVersion(t *testing.T) {
 }
 
 func TestValidateKubernetesVersion(t *testing.T) {
-	valid := []string{"", "1.36.1", "v1.36.1", " v1.34.0\t", "master", "1.19.0"}
+	valid := []string{"", "  ", "1.36.1", "v1.36.1", " v1.34.0\t", "master", "1.19.0"}
 	for _, in := range valid {
 		if err := ValidateKubernetesVersion(in); err != nil {
 			t.Errorf("ValidateKubernetesVersion(%q) = %v, want nil", in, err)
@@ -740,8 +743,10 @@ func TestValidateKubernetesVersion(t *testing.T) {
 	}
 
 	// A short "1.36" 404s every default-registry schema and silently skips
-	// all native kinds — the exact case the check exists for.
-	invalid := []string{"1.36", "v1.36", "1", "latest", "1.x.y", "1.36.1.1", "master-1"}
+	// all native kinds — the exact case the check exists for. A bare "v"
+	// normalizes to nothing and is equally unusable as a schema-version
+	// selector (only a truly unset value is allowed through).
+	invalid := []string{"v", "1.36", "v1.36", "1", "latest", "1.x.y", "1.36.1.1", "master-1"}
 	for _, in := range invalid {
 		if err := ValidateKubernetesVersion(in); err == nil {
 			t.Errorf("ValidateKubernetesVersion(%q) = nil, want an error", in)
@@ -754,50 +759,20 @@ func TestValidateKubernetesVersion(t *testing.T) {
 	}
 }
 
-// TestDefaultKubernetesVersionFromEnv covers the env resolution paths:
-// unset → the shared default, valid forms honored as set (the value flows
-// into the flag default and from there into schema URLs).
-func TestDefaultKubernetesVersionFromEnv(t *testing.T) {
-	tests := []struct {
-		name string
-		env  string
-		want string
-	}{
-		{name: "unset falls back to the default", env: "", want: DefaultKubernetesVersion},
-		{name: "full version honored", env: "1.35.7", want: "1.35.7"},
-		{name: "v-prefix honored", env: "v1.35.7", want: "v1.35.7"},
-		{name: "master honored", env: "master", want: "master"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("FLUXVIEW_KUBE_VERSION", tt.env)
-			if got := DefaultKubernetesVersionFromEnv(); got != tt.want {
-				t.Errorf("DefaultKubernetesVersionFromEnv() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-// TestDefaultKubernetesVersionFromEnvInvalidWarnsOnce: an unusable
-// FLUXVIEW_KUBE_VERSION falls back to the default and warns exactly once
-// per process (the shared contract of every fluxview env knob).
-func TestDefaultKubernetesVersionFromEnvInvalidWarnsOnce(t *testing.T) {
-	t.Setenv("FLUXVIEW_KUBE_VERSION", "1.36") // a short form 404s every schema
+// TestWarnInvalidKubeVersionEnv: the shared guard warns exactly once per
+// process, no matter how many readers hit the same unusable value.
+func TestWarnInvalidKubeVersionEnv(t *testing.T) {
 	warnEnvKubeOnce = sync.Once{}
 
 	first := captureStderrValidate(func() {
-		if got := DefaultKubernetesVersionFromEnv(); got != DefaultKubernetesVersion {
-			t.Errorf("DefaultKubernetesVersionFromEnv() = %q, want default %q for invalid env", got, DefaultKubernetesVersion)
-		}
+		WarnInvalidKubeVersionEnv("bogus", DefaultKubernetesVersion)
 	})
-	if !strings.Contains(first, `invalid FLUXVIEW_KUBE_VERSION "1.36"`) {
+	if !strings.Contains(first, `invalid FLUXVIEW_KUBE_VERSION "bogus"`) {
 		t.Errorf("expected invalid-env warning, got:\n%s", first)
 	}
 
 	second := captureStderrValidate(func() {
-		if got := DefaultKubernetesVersionFromEnv(); got != DefaultKubernetesVersion {
-			t.Errorf("DefaultKubernetesVersionFromEnv() = %q, want default %q for invalid env", got, DefaultKubernetesVersion)
-		}
+		WarnInvalidKubeVersionEnv("bogus", DefaultKubernetesVersion)
 	})
 	if second != "" {
 		t.Errorf("warning must not repeat, got:\n%s", second)

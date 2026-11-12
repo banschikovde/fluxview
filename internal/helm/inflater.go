@@ -196,9 +196,10 @@ func DefaultIndexTTL() time.Duration {
 	return d
 }
 
-// warnEnvKubeOnce serves DefaultKubeVersion the same way warnEnvTTLOnce
-// serves DefaultIndexTTL.
-var warnEnvKubeOnce sync.Once
+// warnEnvKubeOnce served DefaultKubeVersion the same way warnEnvTTLOnce
+// serves DefaultIndexTTL. The Once now lives in validate (it guards every
+// reader of FLUXVIEW_KUBE_VERSION), so a bad value warns at most once per
+// process regardless of which command ran.
 
 // defaultKubeVersion is the Kubernetes version assumed when inflating charts
 // offline, when neither --kubernetes-version nor FLUXVIEW_KUBE_VERSION is
@@ -212,17 +213,17 @@ const defaultKubeVersion = validate.DefaultKubernetesVersion
 // DefaultKubeVersion returns the Kubernetes version assumed when rendering
 // charts offline: $FLUXVIEW_KUBE_VERSION (k8s version syntax like 1.36.1),
 // else defaultKubeVersion. The variable is shared with validate, which
-// reads it for the default-registry schemas with strict X.Y.Z parsing. An
-// unparsable value warns once and falls back to the default.
+// resolves it at run time with strict X.Y.Z parsing (an unusable value
+// fails validate with exit 2 instead of rendering-side fallback). An
+// unparsable value warns once (via the shared guard) and falls back to the
+// default.
 func DefaultKubeVersion() string {
 	v := strings.TrimSpace(os.Getenv("FLUXVIEW_KUBE_VERSION"))
 	if v == "" {
 		return defaultKubeVersion
 	}
 	if _, err := common.ParseKubeVersion(v); err != nil {
-		warnEnvKubeOnce.Do(func() {
-			fmt.Fprintf(os.Stderr, "Warning: invalid FLUXVIEW_KUBE_VERSION %q, using %s\n", v, defaultKubeVersion)
-		})
+		validate.WarnInvalidKubeVersionEnv(v, defaultKubeVersion)
 		return defaultKubeVersion
 	}
 	return v

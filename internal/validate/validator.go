@@ -35,33 +35,19 @@ const DefaultSchemaLocation = "default"
 const DefaultKubernetesVersion = "1.36.1"
 
 // warnEnvKubeOnce keeps the invalid-env warning to a single line per
-// process — the same contract as the helm-side FLUXVIEW_KUBE_VERSION
-// resolution and every other fluxview env knob.
+// process across every reader of FLUXVIEW_KUBE_VERSION (the Helm-side
+// render resolver and validate's run-time resolution) — a bad value never
+// produces more than one warning, whichever command runs.
 var warnEnvKubeOnce sync.Once
 
-// DefaultKubernetesVersionFromEnv returns the Kubernetes version a run
-// should assume: $FLUXVIEW_KUBE_VERSION, else DefaultKubernetesVersion.
-// The variable is shared with the Helm-inflating commands (build, diff,
-// inventory read it for the render capabilities), so one setting pins the
-// whole pipeline to one cluster version; a --kubernetes-version flag still
-// overrides it per command (flag > env > default). Accepts the same forms
-// as --kubernetes-version: a full X.Y.Z, a "v"-prefixed one, or "master".
-// An unusable value warns once and falls back to DefaultKubernetesVersion —
-// the flag value is re-checked strictly by ValidateKubernetesVersion at run
-// time.
-func DefaultKubernetesVersionFromEnv() string {
-	v := strings.TrimSpace(os.Getenv("FLUXVIEW_KUBE_VERSION"))
-	if v == "" {
-		return DefaultKubernetesVersion
-	}
-	normalized := NormalizeKubernetesVersion(v)
-	if normalized == "" || normalized == "master" || semverPattern.MatchString(normalized) {
-		return v
-	}
+// WarnInvalidKubeVersionEnv prints the process-single warning for an
+// unusable FLUXVIEW_KUBE_VERSION value falling back to fallback. Readers
+// with different strictness call it instead of keeping their own Once, so
+// the "warn once" promise holds regardless of which command ran.
+func WarnInvalidKubeVersionEnv(value, fallback string) {
 	warnEnvKubeOnce.Do(func() {
-		fmt.Fprintf(os.Stderr, "Warning: invalid FLUXVIEW_KUBE_VERSION %q, using %s\n", v, DefaultKubernetesVersion)
+		fmt.Fprintf(os.Stderr, "Warning: invalid FLUXVIEW_KUBE_VERSION %q, using %s\n", value, fallback)
 	})
-	return DefaultKubernetesVersion
 }
 
 // DefaultSchemaCacheDir returns the schema cache directory:
@@ -143,13 +129,19 @@ func NormalizeKubernetesVersion(version string) string {
 var semverPattern = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
 // ValidateKubernetesVersion rejects versions that are not a full X.Y.Z (or
-// "master") after normalization. A short form like "1.36" does not fail on
-// its own: it makes every default-registry schema URL 404, so all native
-// kinds are silently skipped and validation looks successful while nothing
-// was checked. Failing here surfaces the typo before the build.
+// "master") after normalization. An empty value means "not configured" and
+// stays valid — callers apply their own default. A short form like "1.36"
+// or a bare "v" (normalization strips the prefix and leaves nothing) does
+// not fail loudly on its own: it makes every default-registry schema URL
+// 404, so all native kinds are silently skipped and validation looks
+// successful while nothing was checked. Failing here surfaces the typo
+// before the build.
 func ValidateKubernetesVersion(version string) error {
+	if strings.TrimSpace(version) == "" {
+		return nil
+	}
 	normalized := NormalizeKubernetesVersion(version)
-	if normalized == "" || normalized == "master" || semverPattern.MatchString(normalized) {
+	if normalized == "master" || semverPattern.MatchString(normalized) {
 		return nil
 	}
 	return fmt.Errorf("invalid --kubernetes-version %q: want a full version like 1.36.1 (or master)", version)

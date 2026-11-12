@@ -134,6 +134,15 @@ Examples:
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			applyGitSourceAuthFlags(cmd.Flags(), flags.GitSourceSSHKnownHosts, flags.GitSourceSSHAcceptNew)
+			// The env is resolved here — not at flag registration — so a
+			// FLUXVIEW_KUBE_VERSION meant for the Helm commands never
+			// triggers validate-side diagnostics in unrelated commands
+			// (NewRootCmd constructs every subcommand for any invocation).
+			kubeVersion, err := resolveKubeVersion(cmd, flags.KubernetesVersion)
+			if err != nil {
+				return err
+			}
+			flags.KubernetesVersion = kubeVersion
 			return runValidate(cmd.Context(), flags)
 		},
 	}
@@ -141,7 +150,7 @@ Examples:
 	cmd.Flags().StringVarP(&flags.Path, "path", "p", "", "Path to the cluster directory in the repository")
 	cmd.Flags().StringVarP(&flags.Namespace, "namespace", "n", "", "Filter output resources by namespace")
 	cmd.Flags().StringVar(&flags.SchemaDir, "schema-dir", "", "Directory with schemas: kubeconform JSON files, CRD YAML manifests and/or a kubernetes-json-schema checkout (default: /schemas/ or ./schemas/)")
-	cmd.Flags().StringVar(&flags.KubernetesVersion, "kubernetes-version", validate.DefaultKubernetesVersionFromEnv(), "Kubernetes version (full X.Y.Z like 1.36.1, or master) for the default schema location (env: FLUXVIEW_KUBE_VERSION)")
+	cmd.Flags().StringVar(&flags.KubernetesVersion, "kubernetes-version", validate.DefaultKubernetesVersion, "Kubernetes version (full X.Y.Z like 1.36.1, or master) for the default schema location (env: FLUXVIEW_KUBE_VERSION)")
 	cmd.Flags().DurationVar(&flags.SchemaDownloadTimeout, "schema-download-timeout", validate.DefaultSchemaDownloadTimeout, "Per-request timeout for downloading Kubernetes schemas (e.g. 30s, 1m; 0 = no limit)")
 	cmd.Flags().BoolVar(&flags.Strict, "strict", false, "Reject duplicated YAML keys; strict schemas for the default registry also reject unknown fields")
 	cmd.Flags().StringSliceVar(&flags.SkipKinds, "skip-kind", nil, "Kinds to skip (repeatable or comma-separated): Kind (e.g. Deployment, any apiVersion) or apiVersion/Kind (e.g. apps/v1/Deployment)")
@@ -160,6 +169,11 @@ Examples:
 }
 
 func runValidate(ctx context.Context, flags *ValidateFlags) error {
+	// An unset version (direct library callers; the CLI resolves flag and
+	// env in the RunE) uses the shared default.
+	if flags.KubernetesVersion == "" {
+		flags.KubernetesVersion = validate.DefaultKubernetesVersion
+	}
 	if err := checkValidateFlags(flags); err != nil {
 		return err
 	}
@@ -286,6 +300,33 @@ func checkValidateFlags(flags *ValidateFlags) error {
 		return NewExitError(fmt.Errorf("invalid --schema-download-timeout %s: must be 0 (no limit) or a positive duration", flags.SchemaDownloadTimeout), ExitCodeError)
 	}
 	return nil
+}
+
+// resolveKubeVersion applies the flag > env > default ladder for validate's
+// --kubernetes-version. The env is read only when the flag was not set
+// explicitly; the strictness is validate's own (full X.Y.Z, v-prefix or
+// master) — the Helm commands parse the same variable more loosely at
+// registration time, so an env value that renders fine but cannot select
+// schemas fails here with a name-accurate error instead of silently
+// checking against a different version.
+func resolveKubeVersion(cmd *cobra.Command, flagValue string) (string, error) {
+	value, source := flagValue, "flag"
+	if !cmd.Flags().Changed("kubernetes-version") {
+		if env := strings.TrimSpace(os.Getenv("FLUXVIEW_KUBE_VERSION")); env != "" {
+			value, source = env, "env"
+		}
+	}
+	// An empty value (nothing configured anywhere) is the shared default.
+	if value == "" {
+		value = validate.DefaultKubernetesVersion
+	}
+	if err := validate.ValidateKubernetesVersion(value); err != nil {
+		if source == "env" {
+			return "", NewExitError(fmt.Errorf("invalid FLUXVIEW_KUBE_VERSION %q: want a full version like %s (or master)", value, validate.DefaultKubernetesVersion), ExitCodeError)
+		}
+		return "", NewExitError(err, ExitCodeError)
+	}
+	return value, nil
 }
 
 // resolveValidatePaths resolves and sanity-checks the cluster path: it

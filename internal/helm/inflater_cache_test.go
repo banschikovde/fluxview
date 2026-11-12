@@ -514,29 +514,15 @@ func TestDefaultDownloadTimeout(t *testing.T) {
 	}
 }
 
-// TestDefaultKubeVersionInvalidEnvWarnsOnce: an unparsable FLUXVIEW_KUBE_VERSION
-// falls back to the default and warns exactly once per process (same contract
-// as the index TTL and download timeout envs).
-func TestDefaultKubeVersionInvalidEnvWarnsOnce(t *testing.T) {
+// TestDefaultKubeVersionInvalidEnvFallsBack: an unparsable FLUXVIEW_KUBE_VERSION
+// falls back to the default. The warn-once semantics of the shared guard
+// live in the validate package (it owns the Once); here only the fallback
+// contract is pinned.
+func TestDefaultKubeVersionInvalidEnvFallsBack(t *testing.T) {
 	t.Setenv("FLUXVIEW_KUBE_VERSION", "bogus")
-	warnEnvKubeOnce = sync.Once{}
 
-	first := captureStderrHelm(func() {
-		if v := DefaultKubeVersion(); v != defaultKubeVersion {
-			t.Errorf("DefaultKubeVersion() = %s, want default %s for invalid env", v, defaultKubeVersion)
-		}
-	})
-	if !strings.Contains(first, `invalid FLUXVIEW_KUBE_VERSION "bogus"`) {
-		t.Errorf("expected invalid-env warning, got:\n%s", first)
-	}
-
-	second := captureStderrHelm(func() {
-		if v := DefaultKubeVersion(); v != defaultKubeVersion {
-			t.Errorf("DefaultKubeVersion() = %s, want default %s for invalid env", v, defaultKubeVersion)
-		}
-	})
-	if second != "" {
-		t.Errorf("warning must not repeat, got:\n%s", second)
+	if v := DefaultKubeVersion(); v != defaultKubeVersion {
+		t.Errorf("DefaultKubeVersion() = %s, want default %s for invalid env", v, defaultKubeVersion)
 	}
 }
 
