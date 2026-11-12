@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -28,6 +29,7 @@ func TestKubeVersionFlagWiring(t *testing.T) {
 		{"registered on build, diff and inventory", kubeVersionWiringRegistered},
 		{"default is validate's version and honors the env", kubeVersionWiringDefaultFromEnv},
 		{"invalid env falls back to the default", kubeVersionWiringInvalidEnvFallback},
+		{"validate help mirrors the env silently", kubeVersionWiringValidateHelpDefault},
 		{"validate shares the same env knob", kubeVersionWiringValidateEnv},
 	} {
 		t.Run(tc.name, tc.run)
@@ -71,6 +73,16 @@ func kubeVersionWiringInvalidEnvFallback(t *testing.T) {
 	t.Setenv("FLUXVIEW_KUBE_VERSION", "bogus")
 	if got := newDiffCmd().Flags().Lookup("kubernetes-version").DefValue; got != validate.DefaultKubernetesVersion {
 		t.Errorf("diff flag default = %s, want the default %s for an invalid env value", got, validate.DefaultKubernetesVersion)
+	}
+}
+
+// kubeVersionWiringValidateHelpDefault: the flag default mirrors the env
+// silently (display parity with the Helm commands' help) — diagnostics stay
+// out of registration.
+func kubeVersionWiringValidateHelpDefault(t *testing.T) {
+	t.Setenv("FLUXVIEW_KUBE_VERSION", "1.35.7")
+	if got := newValidateCmd().Flags().Lookup("kubernetes-version").DefValue; got != "1.35.7" {
+		t.Errorf("validate flag default = %s, want the FLUXVIEW_KUBE_VERSION value 1.35.7", got)
 	}
 }
 
@@ -128,6 +140,48 @@ func kubeVersionWiringValidateEnv(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), `invalid --kubernetes-version "1.35"`) {
 		t.Errorf("resolveKubeVersion() error = %v, want flag-flavored error", err)
 	}
+}
+
+// TestValidateCommand_EnvWiring executes the real validate command and
+// proves the RunE wires resolveKubeVersion in: an unusable env fails the
+// command before anything else runs, while an explicit flag keeps the env
+// out entirely. The path argument is intentionally missing — with the flag
+// override the first failure is the missing path, not the env.
+func TestValidateCommand_EnvWiring(t *testing.T) {
+	missingPath := filepath.Join(t.TempDir(), "missing")
+
+	t.Run("unusable env fails the command", func(t *testing.T) {
+		t.Setenv("FLUXVIEW_KUBE_VERSION", "1.35")
+		cmd := newValidateCmd()
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		cmd.SetArgs([]string{"--path", missingPath})
+		err := cmd.Execute()
+		if err == nil || !strings.Contains(err.Error(), `invalid FLUXVIEW_KUBE_VERSION "1.35"`) {
+			t.Errorf("Execute() error = %v, want invalid-env error from the RunE", err)
+		}
+	})
+
+	t.Run("explicit flag keeps the env out", func(t *testing.T) {
+		t.Setenv("FLUXVIEW_KUBE_VERSION", "1.35")
+		cmd := newValidateCmd()
+		if err := cmd.Flags().Set("kubernetes-version", "1.36.1"); err != nil {
+			t.Fatalf("set flag: %v", err)
+		}
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		cmd.SetArgs([]string{"--path", missingPath})
+		err := cmd.Execute()
+		if err == nil {
+			t.Fatal("missing path must fail the run")
+		}
+		if strings.Contains(err.Error(), "FLUXVIEW_KUBE_VERSION") {
+			t.Errorf("the env must not be consulted when the flag is set, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "does not exist") {
+			t.Errorf("expected the missing-path failure past kube-version resolution, got: %v", err)
+		}
+	})
 }
 
 // TestKubeVersionWiring_InflationEndToEnd pins the issue #14 plumbing: the

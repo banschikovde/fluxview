@@ -196,11 +196,6 @@ func DefaultIndexTTL() time.Duration {
 	return d
 }
 
-// warnEnvKubeOnce served DefaultKubeVersion the same way warnEnvTTLOnce
-// serves DefaultIndexTTL. The Once now lives in validate (it guards every
-// reader of FLUXVIEW_KUBE_VERSION), so a bad value warns at most once per
-// process regardless of which command ran.
-
 // defaultKubeVersion is the Kubernetes version assumed when inflating charts
 // offline, when neither --kubernetes-version nor FLUXVIEW_KUBE_VERSION is
 // set. The Helm SDK's own default moves with the k8s.io/client-go dependency
