@@ -127,8 +127,9 @@ func WithDownloadTimeout(d time.Duration) InflaterOption {
 // rendering charts offline (default: DefaultKubeVersion(); empty keeps the
 // default). Charts with an upper kubeVersion bound in Chart.yaml (rancher
 // ships `kubeVersion: < 1.37.0-0`) check against it — the same knob as
-// `helm template --kube-version`. Must be a full version like 1.36.1;
-// anything unparsable fails NewInflater.
+// `helm template --kube-version`. Kubernetes version syntax applies: "1.36"
+// normalizes to 1.36.0, a "v" prefix and prerelease/build suffixes are
+// accepted; anything unparsable fails NewInflater.
 func WithKubernetesVersion(version string) InflaterOption {
 	return func(in *Inflater) { in.kubeVersion = version }
 }
@@ -209,9 +210,9 @@ var warnEnvKubeOnce sync.Once
 const defaultKubeVersion = validate.DefaultKubernetesVersion
 
 // DefaultKubeVersion returns the Kubernetes version assumed when rendering
-// charts offline: $FLUXVIEW_KUBE_VERSION (full X.Y.Z like 1.36.1), else
-// defaultKubeVersion. An unparsable value warns once and falls back to the
-// default.
+// charts offline: $FLUXVIEW_KUBE_VERSION (k8s version syntax like 1.36.1),
+// else defaultKubeVersion. An unparsable value warns once and falls back to
+// the default.
 func DefaultKubeVersion() string {
 	v := strings.TrimSpace(os.Getenv("FLUXVIEW_KUBE_VERSION"))
 	if v == "" {
@@ -225,6 +226,12 @@ func DefaultKubeVersion() string {
 	}
 	return v
 }
+
+// kubeVersionHint explains the accepted syntax in error messages: helm
+// parses through k8s ParseGeneric, which is looser than a strict X.Y.Z —
+// short forms normalize ("1.36" → 1.36.0) and a "v" prefix or
+// prerelease/build suffixes are accepted.
+const kubeVersionHint = `k8s version syntax: "1.36" means 1.36.0, "v" prefix and prerelease suffixes are accepted`
 
 // NewInflater creates a new Helm Inflater using the Go SDK.
 // No external helm binary is required.
@@ -264,11 +271,11 @@ func NewInflater(opts ...InflaterOption) (*Inflater, error) {
 	if in.kubeVersion == "" {
 		in.kubeVersion = DefaultKubeVersion()
 	}
-	// A Kubernetes version that is not a full semver fails every chart with
-	// a kubeVersion constraint; reject it here so the flag/env typo surfaces
-	// before any chart is downloaded.
+	// A Kubernetes version that is not a valid k8s version fails every chart
+	// with a kubeVersion constraint; reject it here so the flag/env typo
+	// surfaces before any chart is downloaded.
 	if _, err := common.ParseKubeVersion(in.kubeVersion); err != nil {
-		return nil, fmt.Errorf("invalid --kubernetes-version %q: %w (want a full version like %s)", in.kubeVersion, err, defaultKubeVersion)
+		return nil, fmt.Errorf("invalid --kubernetes-version %q: %w (%s)", in.kubeVersion, err, kubeVersionHint)
 	}
 	// A negative timeout (e.g. --helm-download-timeout=-5m) behaves like 0 —
 	// no limit — normalized here so the getter setup below stays honest.
@@ -935,7 +942,7 @@ func (in *Inflater) InflateHelmRelease(ctx context.Context, hr fluxtypes.HelmRel
 	// programmatically.
 	kv, kverr := common.ParseKubeVersion(in.kubeVersion)
 	if kverr != nil {
-		return nil, fmt.Errorf("invalid --kubernetes-version %q: %w (want a full version like %s)", in.kubeVersion, kverr, defaultKubeVersion)
+		return nil, fmt.Errorf("invalid --kubernetes-version %q: %w (%s)", in.kubeVersion, kverr, kubeVersionHint)
 	}
 	install.KubeVersion = kv
 	// Include the chart's CRDs unless spec.install.crds is explicitly "Skip".

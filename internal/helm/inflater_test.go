@@ -574,6 +574,18 @@ func TestInflateHelmRelease_KubeVersionOverride(t *testing.T) {
 	if !strings.Contains(string(out), "kind: Deployment") {
 		t.Errorf("expected the chart capped at < 1.29.0-0 to render against 1.28.9:\n%s", out)
 	}
+
+	// Short k8s form normalizes instead of being rejected: "1.36" renders
+	// as 1.36.0.
+	short, err := NewInflater(WithCacheDir(t.TempDir()), WithKubernetesVersion("1.36"))
+	if err != nil {
+		t.Fatalf("NewInflater with short form: %v", err)
+	}
+	capped := filepath.Join(t.TempDir(), "testchart")
+	writeKubeCappedTestChart(t, capped, "< 1.37.0-0")
+	if _, err := short.InflateHelmRelease(context.Background(), kubeVersionTestHR(capped), "", ChartCredentials{}, nil, nil, ""); err != nil {
+		t.Fatalf("short form 1.36 must render as 1.36.0: %v", err)
+	}
 }
 
 // TestNewInflater_KubeVersionInvalid verifies a version that is not a full

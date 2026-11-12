@@ -552,6 +552,7 @@ func TestDefaultKubeVersion(t *testing.T) {
 		{name: "unset falls back to the validate-synced default", env: "", want: validate.DefaultKubernetesVersion},
 		{name: "valid version honored", env: "1.30.2", want: "1.30.2"},
 		{name: "v-prefix honored like helm accepts", env: "v1.30.2", want: "v1.30.2"},
+		{name: "short k8s form accepted (helm normalizes 1.36 to 1.36.0)", env: "1.36", want: "1.36"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

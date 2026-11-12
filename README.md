@@ -176,7 +176,7 @@ Each section carries its own columns (CHART only in helm, KIND and PARENT in cr)
 | `--strip-attrs` | build, diff | Comma-separated keys to strip (e.g. `helm.sh/chart,status`) |
 | `--no-git-source-fetch` | build, diff, validate, inventory | Do not clone external GitRepository sources (no network at all): such Kustomizations warn-and-skip everywhere; validate names them in a warning and validates the rest — for slow or offline networks (default: `false`, env: `FLUXVIEW_NO_GIT_SOURCE_FETCH`) |
 | `--schema-dir` | validate | Directory with schemas: kubeconform JSON files, CRD YAML manifests and/or a kubernetes-json-schema checkout (default: `/schemas/` or `./schemas/`) |
-| `--kubernetes-version` | build, diff, inventory, validate | validate: schema version for the default registry (full `X.Y.Z` like `1.36.1`, or `master`). build/diff/inventory: Kubernetes version assumed when rendering Helm charts offline (full `X.Y.Z` only) — charts with an upper `kubeVersion` bound in Chart.yaml (e.g. rancher's `< 1.37.0-0`) check against it, the default stays in sync with validate's schema version instead of the Helm SDK's moving "latest" (env: `FLUXVIEW_KUBE_VERSION`, helm commands only) |
+| `--kubernetes-version` | build, diff, inventory, validate | validate: schema version for the default registry (full `X.Y.Z` like `1.36.1`, or `master`). build/diff/inventory: Kubernetes version assumed when rendering Helm charts offline (k8s version syntax — `1.36` normalizes to `1.36.0`, a `v` prefix and prerelease suffixes are accepted) — charts with an upper `kubeVersion` bound in Chart.yaml (e.g. rancher's `< 1.37.0-0`) check against it, the default stays in sync with validate's schema version instead of the Helm SDK's moving "latest" (env: `FLUXVIEW_KUBE_VERSION`, helm commands only) |
 | `--schema-download-timeout` | validate | Per-request timeout for downloading Kubernetes schemas (e.g. `30s`, `1m`; `0` = no limit, Ctrl-C still interrupts; default: `30s`) |
 | `--strict` | validate | Reject duplicated YAML keys; strict default-registry schemas also reject unknown fields |
 | `--skip-kind` | validate | Kinds to skip (repeatable or comma-separated): `Deployment` (any apiVersion) or `apps/v1/Deployment` |
@@ -190,6 +190,8 @@ Each section carries its own columns (CHART only in helm, KIND and PARENT in cr)
 | `--no-headers` | inventory | Flat data rows only (with the SOURCE column), no section titles, headers or summary — for scripts |
 
 Cache flags (`--helm-*`, `--remote-*`, `--kustomize-build-*`, `--git-source-*`, `--schema-*`, `--crd-schema-*`) share one pattern: `--<name>-cache-dir` (`disabled` disables — all of them at once via `FLUXVIEW_CACHE_HOME=disabled`; empty, whitespace-padded and retired `off`/`none` values are rejected at parse time) and `--<name>-cache-ttl` where applicable (`0` always bypasses). On slow networks, `--helm-download-timeout` and `--remote-cache-timeout` (`0` = no limit) let downloads wait as long as the link needs instead of being cut off after `2m`/`30s`, and `--no-git-source-fetch` (env `FLUXVIEW_NO_GIT_SOURCE_FETCH`) skips cloning external GitRepository sources altogether — see [docs/caching.md](docs/caching.md).
+
+Note on `--kubernetes-version`: the render version (build/diff/inventory) and validate's schema version share the same *default* (`1.36.1`) but are configured independently — `FLUXVIEW_KUBE_VERSION` reaches only the Helm commands; validate reads no env for it. Pin both explicitly (flag or env) when they must stay in lockstep.
 
 ## Exit codes
 
