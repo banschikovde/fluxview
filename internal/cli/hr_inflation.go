@@ -70,6 +70,10 @@ func (o kustomizeCacheOptions) builderOptions() []kustomize.BuilderOption {
 	}
 }
 
+// kubeVersionFlag is the per-command --kubernetes-version flag name,
+// shared by the registration and the ladder helpers below.
+const kubeVersionFlag = "kubernetes-version"
+
 // registerHelmCacheFlags registers the Helm flags shared by the build, diff
 // and inventory commands. Cache defaults come from helm.DefaultCacheDir()/
 // DefaultIndexTTL()/DefaultDownloadTimeout() so the FLUXVIEW_HELM_CACHE_DIR /
@@ -85,7 +89,7 @@ func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL, down
 		"How long cached Helm repo indexes and OCI tag resolutions stay fresh; 0 always refreshes (env: FLUXVIEW_HELM_INDEX_TTL)")
 	cmd.Flags().DurationVar(downloadTimeout, "helm-download-timeout", helm.DefaultDownloadTimeout(),
 		"Per-request timeout for downloading Helm repo indexes and chart tarballs; 0 = no limit, for slow networks (env: FLUXVIEW_HELM_DOWNLOAD_TIMEOUT)")
-	cmd.Flags().StringVar(kubeVersion, "kubernetes-version", kubeversion.Default,
+	cmd.Flags().StringVar(kubeVersion, kubeVersionFlag, kubeversion.Default,
 		"Kubernetes version assumed when rendering Helm charts offline (k8s version syntax, \"1.36\" = 1.36.0); charts with an upper kubeVersion bound in Chart.yaml check against it (env: FLUXVIEW_KUBE_VERSION)")
 }
 
@@ -94,7 +98,7 @@ func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL, down
 // explicitly, in which case the env is never consulted. Returns "" when
 // unset.
 func kubeVersionPin(cmd *cobra.Command) (string, error) {
-	if cmd.Flags().Changed("kubernetes-version") {
+	if cmd.Flags().Changed(kubeVersionFlag) {
 		return "", nil
 	}
 	return kubeversion.FromEnv()
@@ -105,7 +109,7 @@ func kubeVersionPin(cmd *cobra.Command) (string, error) {
 // kubeversion grammar, an explicit flag (either grammar) overrides it, and
 // the static default stands when neither is set.
 func effectiveKubeVersion(cmd *cobra.Command, flagValue, pin string) string {
-	if cmd.Flags().Changed("kubernetes-version") {
+	if cmd.Flags().Changed(kubeVersionFlag) {
 		return flagValue
 	}
 	if pin != "" {
