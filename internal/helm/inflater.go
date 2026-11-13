@@ -259,9 +259,11 @@ func NewInflater(opts ...InflaterOption) (*Inflater, error) {
 	for _, opt := range opts {
 		opt(in)
 	}
-	// An empty value (a zero-value Inflater, or WithKubernetesVersion(""))
-	// keeps the default.
-	if in.kubeVersion == "" {
+	// An empty or whitespace-only value — a zero-value Inflater, or
+	// WithKubernetesVersion("") / a flag of only spaces — keeps the default.
+	// Trimmed here to match ValidateFlagValue, which already accepts
+	// whitespace-only values as unset.
+	if strings.TrimSpace(in.kubeVersion) == "" {
 		in.kubeVersion = defaultKubeVersion
 	}
 	// A Kubernetes version that is not a valid k8s version fails every chart

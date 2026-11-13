@@ -589,17 +589,20 @@ func TestInflateHelmRelease_KubeVersionOverride(t *testing.T) {
 }
 
 // TestNewInflater_KubeVersionInvalid verifies a version that is not a full
-// semver fails at construction — before any chart is downloaded — while an
-// empty override keeps the default (empty-means-default, like validate).
+// semver fails at construction — before any chart is downloaded — while
+// empty and whitespace-only overrides keep the default (trimmed the same
+// way ValidateFlagValue trims).
 func TestNewInflater_KubeVersionInvalid(t *testing.T) {
 	if _, err := NewInflater(WithCacheDir(t.TempDir()), WithKubernetesVersion("nonsense")); err == nil {
 		t.Errorf("NewInflater(WithKubernetesVersion(%q)) must fail", "nonsense")
 	}
-	in, err := NewInflater(WithCacheDir(t.TempDir()), WithKubernetesVersion(""))
-	if err != nil {
-		t.Fatalf("empty override must keep the default: %v", err)
-	}
-	if in.kubeVersion != defaultKubeVersion {
-		t.Errorf("kubeVersion = %q, want the default %q for an empty override", in.kubeVersion, defaultKubeVersion)
+	for _, empty := range []string{"", "   ", "\t"} {
+		in, err := NewInflater(WithCacheDir(t.TempDir()), WithKubernetesVersion(empty))
+		if err != nil {
+			t.Fatalf("NewInflater(WithKubernetesVersion(%q)): %v", empty, err)
+		}
+		if in.kubeVersion != defaultKubeVersion {
+			t.Errorf("kubeVersion = %q, want the default %q for a whitespace-only override %q", in.kubeVersion, defaultKubeVersion, empty)
+		}
 	}
 }
