@@ -84,6 +84,11 @@ Examples:
 				return NewExitError(err, ExitCodeError)
 			}
 			flags.KubernetesVersion = effectiveKubeVersion(cmd, flags.KubernetesVersion, pin)
+			// Fail on an unusable flag value up front — diff ks never
+			// creates a Helm renderer that would report it later.
+			if err := helm.ValidateFlagValue(flags.KubernetesVersion); err != nil {
+				return NewExitError(err, ExitCodeError)
+			}
 			return runDiff(cmd.Context(), args, flags)
 		},
 	}

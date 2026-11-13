@@ -211,6 +211,18 @@ const defaultKubeVersion = kubeversion.Default
 // prerelease/build suffixes are accepted.
 const kubeVersionHint = `k8s version syntax: "1.36" means 1.36.0, "v" prefix and prerelease suffixes are accepted`
 
+// ValidateFlagValue checks a --kubernetes-version flag value against the
+// helm-side grammar (k8s version syntax: "1.36" = 1.36.0, a "v" prefix and
+// prerelease suffixes; no "master"). NewInflater applies the same check, so
+// a command that validates early fails with the exact error the renderer
+// would produce later.
+func ValidateFlagValue(version string) error {
+	if _, err := common.ParseKubeVersion(version); err != nil {
+		return fmt.Errorf("invalid --kubernetes-version %q: %w (%s)", version, err, kubeVersionHint)
+	}
+	return nil
+}
+
 // NewInflater creates a new Helm Inflater using the Go SDK.
 // No external helm binary is required.
 //
@@ -251,8 +263,8 @@ func NewInflater(opts ...InflaterOption) (*Inflater, error) {
 	// A Kubernetes version that is not a valid k8s version fails every chart
 	// with a kubeVersion constraint; reject it here so the flag/env typo
 	// surfaces before any chart is downloaded.
-	if _, err := common.ParseKubeVersion(in.kubeVersion); err != nil {
-		return nil, fmt.Errorf("invalid --kubernetes-version %q: %w (%s)", in.kubeVersion, err, kubeVersionHint)
+	if err := ValidateFlagValue(in.kubeVersion); err != nil {
+		return nil, err
 	}
 	// A negative timeout (e.g. --helm-download-timeout=-5m) behaves like 0 —
 	// no limit — normalized here so the getter setup below stays honest.

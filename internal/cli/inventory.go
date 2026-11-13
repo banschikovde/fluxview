@@ -69,6 +69,9 @@ Examples:
 				return NewExitError(err, ExitCodeError)
 			}
 			flags.HelmCache.kubeVersion = effectiveKubeVersion(cmd, flags.HelmCache.kubeVersion, pin)
+			if err := helm.ValidateFlagValue(flags.HelmCache.kubeVersion); err != nil {
+				return NewExitError(err, ExitCodeError)
+			}
 			return runInventory(cmd.Context(), flags)
 		},
 	}
@@ -86,6 +89,9 @@ Examples:
 				return NewExitError(err, ExitCodeError)
 			}
 			flags.HelmCache.kubeVersion = effectiveKubeVersion(cmd, flags.HelmCache.kubeVersion, pin)
+			if err := helm.ValidateFlagValue(flags.HelmCache.kubeVersion); err != nil {
+				return NewExitError(err, ExitCodeError)
+			}
 			flags.Source = inventory.SourceHelm
 			return runInventory(cmd.Context(), flags)
 		},
@@ -103,6 +109,9 @@ Examples:
 				return NewExitError(err, ExitCodeError)
 			}
 			flags.HelmCache.kubeVersion = effectiveKubeVersion(cmd, flags.HelmCache.kubeVersion, pin)
+			if err := helm.ValidateFlagValue(flags.HelmCache.kubeVersion); err != nil {
+				return NewExitError(err, ExitCodeError)
+			}
 			flags.Source = inventory.SourceCR
 			return runInventory(cmd.Context(), flags)
 		},

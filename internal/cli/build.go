@@ -16,6 +16,7 @@ import (
 
 	"github.com/banschikovde/fluxview/internal/flux"
 	"github.com/banschikovde/fluxview/internal/git"
+	"github.com/banschikovde/fluxview/internal/helm"
 	"github.com/banschikovde/fluxview/internal/kustomize"
 )
 
@@ -68,6 +69,12 @@ Examples:
 				return NewExitError(err, ExitCodeError)
 			}
 			flags.KubernetesVersion = effectiveKubeVersion(cmd, flags.KubernetesVersion, pin)
+			// Fail on an unusable flag value up front: the renderer that
+			// would report it later is only created when the path actually
+			// holds HelmReleases, and build ks never creates one at all.
+			if err := helm.ValidateFlagValue(flags.KubernetesVersion); err != nil {
+				return NewExitError(err, ExitCodeError)
+			}
 			return runBuild(cmd.Context(), args, flags)
 		},
 	}

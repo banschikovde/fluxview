@@ -227,6 +227,48 @@ func TestBuildFlagsKubeVersionMaster(t *testing.T) {
 	}
 }
 
+// TestKubeVersionFlagRejectedWithoutHelmReleases: the flag is checked at
+// the start of the command, not when the Helm renderer is created — build
+// ks never creates one and would otherwise silently ignore the flag (and
+// diff ks would only fail after the path checks).
+func TestKubeVersionFlagRejectedWithoutHelmReleases(t *testing.T) {
+	t.Setenv(kubeversion.EnvVar, "") // flag is explicit; the env stays out either way
+	missingPath := filepath.Join(t.TempDir(), "missing")
+
+	t.Run("build ks fails up front", func(t *testing.T) {
+		cmd := newBuildCmd()
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		cmd.SetArgs([]string{"ks", "--path", missingPath, "--kubernetes-version", "master"})
+		err := cmd.Execute()
+		if err == nil || !strings.Contains(err.Error(), `invalid --kubernetes-version "master"`) {
+			t.Errorf("Execute() error = %v, want the invalid flag error before anything else runs", err)
+		}
+	})
+
+	t.Run("diff ks fails up front", func(t *testing.T) {
+		cmd := newDiffCmd()
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		cmd.SetArgs([]string{"ks", "--path", missingPath, "--kubernetes-version", "master"})
+		err := cmd.Execute()
+		if err == nil || !strings.Contains(err.Error(), `invalid --kubernetes-version "master"`) {
+			t.Errorf("Execute() error = %v, want the invalid flag error before anything else runs", err)
+		}
+	})
+
+	t.Run("inventory crs fails up front", func(t *testing.T) {
+		cmd := newInventoryCmd()
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		cmd.SetArgs([]string{"crs", "--path", missingPath, "--kubernetes-version", "master"})
+		err := cmd.Execute()
+		if err == nil || !strings.Contains(err.Error(), `invalid --kubernetes-version "master"`) {
+			t.Errorf("Execute() error = %v, want the invalid flag error before anything else runs", err)
+		}
+	})
+}
+
 // TestKubeVersionWiring_InflationEndToEnd pins the issue #14 plumbing: the
 // flag value carried in helmCacheOptions reaches the render capabilities —
 // a chart capped below the assumed default fails, the same chart renders
