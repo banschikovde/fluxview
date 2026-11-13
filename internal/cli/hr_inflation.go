@@ -104,6 +104,23 @@ func kubeVersionPin(cmd *cobra.Command) (string, error) {
 	return kubeversion.FromEnv()
 }
 
+// resolveHelmKubeVersion resolves the render-side kube version for the
+// Helm-inflating commands: the flag > env > default ladder plus the
+// up-front flag grammar check (helm.ValidateFlagValue). The renderer that
+// would otherwise report an unusable flag is only created when the path
+// holds HelmReleases — and build/diff ks never create one.
+func resolveHelmKubeVersion(cmd *cobra.Command, flagValue string) (string, error) {
+	pin, err := kubeVersionPin(cmd)
+	if err != nil {
+		return "", err
+	}
+	value := effectiveKubeVersion(cmd, flagValue, pin)
+	if err := helm.ValidateFlagValue(value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
 // effectiveKubeVersion applies the flag > env > default ladder shared by
 // every command: the pipeline pin is resolved once per run with the strict
 // kubeversion grammar, an explicit flag (either grammar) overrides it, and

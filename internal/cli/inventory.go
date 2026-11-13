@@ -64,14 +64,11 @@ Examples:
   fluxview inventory --path clusters/prod/flux/ --branch-orig master -o markdown`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			applyGitSourceAuthFlags(cmd.Flags(), flags.SSHHosts, flags.SSHAcceptNew)
-			pin, err := kubeVersionPin(cmd)
+			kubeVersion, err := resolveHelmKubeVersion(cmd, flags.HelmCache.kubeVersion)
 			if err != nil {
 				return NewExitError(err, ExitCodeError)
 			}
-			flags.HelmCache.kubeVersion = effectiveKubeVersion(cmd, flags.HelmCache.kubeVersion, pin)
-			if err := helm.ValidateFlagValue(flags.HelmCache.kubeVersion); err != nil {
-				return NewExitError(err, ExitCodeError)
-			}
+			flags.HelmCache.kubeVersion = kubeVersion
 			return runInventory(cmd.Context(), flags)
 		},
 	}
@@ -84,14 +81,11 @@ Examples:
 		Short: "Inventory Helm releases only (same as --source helm)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			applyGitSourceAuthFlags(cmd.Flags(), flags.SSHHosts, flags.SSHAcceptNew)
-			pin, err := kubeVersionPin(cmd)
+			kubeVersion, err := resolveHelmKubeVersion(cmd, flags.HelmCache.kubeVersion)
 			if err != nil {
 				return NewExitError(err, ExitCodeError)
 			}
-			flags.HelmCache.kubeVersion = effectiveKubeVersion(cmd, flags.HelmCache.kubeVersion, pin)
-			if err := helm.ValidateFlagValue(flags.HelmCache.kubeVersion); err != nil {
-				return NewExitError(err, ExitCodeError)
-			}
+			flags.HelmCache.kubeVersion = kubeVersion
 			flags.Source = inventory.SourceHelm
 			return runInventory(cmd.Context(), flags)
 		},
@@ -104,14 +98,11 @@ Examples:
 		Short: "Inventory operator custom resources only (same as --source cr)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			applyGitSourceAuthFlags(cmd.Flags(), flags.SSHHosts, flags.SSHAcceptNew)
-			pin, err := kubeVersionPin(cmd)
+			kubeVersion, err := resolveHelmKubeVersion(cmd, flags.HelmCache.kubeVersion)
 			if err != nil {
 				return NewExitError(err, ExitCodeError)
 			}
-			flags.HelmCache.kubeVersion = effectiveKubeVersion(cmd, flags.HelmCache.kubeVersion, pin)
-			if err := helm.ValidateFlagValue(flags.HelmCache.kubeVersion); err != nil {
-				return NewExitError(err, ExitCodeError)
-			}
+			flags.HelmCache.kubeVersion = kubeVersion
 			flags.Source = inventory.SourceCR
 			return runInventory(cmd.Context(), flags)
 		},

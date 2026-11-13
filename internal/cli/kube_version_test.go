@@ -227,6 +227,22 @@ func TestBuildFlagsKubeVersionMaster(t *testing.T) {
 	}
 }
 
+// TestBuildFlagsKubeVersionEmptyKeepsDefault: an empty flag value (a CI
+// script passing an unset "$KUBE_VERSION") means "not configured" — the
+// pipeline default stands, same as validate's empty-flag handling.
+func TestBuildFlagsKubeVersionEmptyKeepsDefault(t *testing.T) {
+	t.Setenv(kubeversion.EnvVar, "") // flag is explicit; the env stays out either way
+	cmd := newBuildCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"hr", "--path", kubeVersionClusterFixture(t), "--kubernetes-version", ""})
+	// The fixture chart is capped at < 1.37.0-0: rendering it under the
+	// default 1.36.1 must succeed end to end — no version error anywhere.
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("empty flag value must keep the default and render, got: %v", err)
+	}
+}
+
 // TestKubeVersionFlagRejectedWithoutHelmReleases: the flag is checked at
 // the start of the command, not when the Helm renderer is created — build
 // ks never creates one and would otherwise silently ignore the flag (and

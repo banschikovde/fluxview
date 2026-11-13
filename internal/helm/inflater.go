@@ -213,10 +213,14 @@ const kubeVersionHint = `k8s version syntax: "1.36" means 1.36.0, "v" prefix and
 
 // ValidateFlagValue checks a --kubernetes-version flag value against the
 // helm-side grammar (k8s version syntax: "1.36" = 1.36.0, a "v" prefix and
-// prerelease suffixes; no "master"). NewInflater applies the same check, so
-// a command that validates early fails with the exact error the renderer
-// would produce later.
+// prerelease suffixes; no "master"). An empty value passes: it means "not
+// configured" and keeps the default, the same contract as NewInflater and
+// validate. NewInflater applies this check, so a command that validates
+// early fails with the exact error the renderer would produce later.
 func ValidateFlagValue(version string) error {
+	if strings.TrimSpace(version) == "" {
+		return nil
+	}
 	if _, err := common.ParseKubeVersion(version); err != nil {
 		return fmt.Errorf("invalid --kubernetes-version %q: %w (%s)", version, err, kubeVersionHint)
 	}
