@@ -13,8 +13,12 @@ import (
 )
 
 // Default is the Kubernetes version assumed when neither FLUXVIEW_KUBE_VERSION
-// nor a command-specific flag is set. Kept in sync with the k8s.io/* modules
-// this project builds against.
+// nor a command-specific flag is set. It is deliberately BELOW the version of
+// the k8s.io/* modules this project builds against: those modules (client-go
+// v0.37) are also what the Helm SDK derives its own moving "latest" 1.37
+// from — exactly what broke charts pinned with an upper kubeVersion bound
+// (`kubeVersion: < 1.37.0-0`, issue #14). When raising this default,
+// re-check such charts first.
 const Default = "1.36.1"
 
 // EnvVar is the pipeline-wide Kubernetes version pin.
