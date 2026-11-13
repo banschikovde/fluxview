@@ -191,7 +191,24 @@ Each section carries its own columns (CHART only in helm, KIND and PARENT in cr)
 
 Cache flags (`--helm-*`, `--remote-*`, `--kustomize-build-*`, `--git-source-*`, `--schema-*`, `--crd-schema-*`) share one pattern: `--<name>-cache-dir` (`disabled` disables — all of them at once via `FLUXVIEW_CACHE_HOME=disabled`; empty, whitespace-padded and retired `off`/`none` values are rejected at parse time) and `--<name>-cache-ttl` where applicable (`0` always bypasses). On slow networks, `--helm-download-timeout` and `--remote-cache-timeout` (`0` = no limit) let downloads wait as long as the link needs instead of being cut off after `2m`/`30s`, and `--no-git-source-fetch` (env `FLUXVIEW_NO_GIT_SOURCE_FETCH`) skips cloning external GitRepository sources altogether — see [docs/caching.md](docs/caching.md).
 
-Note on `--kubernetes-version`: `FLUXVIEW_KUBE_VERSION` pins the whole pipeline with one strict grammar — a full `X.Y.Z` with an optional `v` prefix — validated identically in every command: an unusable value (a short form like `1.35`, `master`, garbage) fails with exit 2, naming the variable. Each command then applies the pin in its own form: the Helm-inflating commands render against it, validate selects the default-registry schemas. A flag overrides the env per command with its own grammar: the Helm commands accept k8s version syntax (`1.36` = `1.36.0`, `v` prefix, prerelease suffixes), validate requires a full `X.Y.Z` or `master` — a short form would silently check nothing.
+Note on `--kubernetes-version`: `FLUXVIEW_KUBE_VERSION` (env) and the flag pin the Kubernetes version for the whole pipeline with priority **flag > env > default** — when a flag is set on a command, the env is not even read there.
+
+The env grammar is strict and identical everywhere: a full `X.Y.Z` with an optional `v` prefix (`1.35.7`, `v1.35.7`). A short form (`1.35`), a bare `v`, `master` or garbage fails with exit 2, naming the variable — every command validates the pin the same way before doing anything else.
+
+The flag grammar is per-command:
+
+- the Helm commands (build/diff/inventory) accept k8s version syntax — `1.36` = `1.36.0`, `v` prefix, prerelease suffixes, no `master` (charts render against concrete versions);
+- validate requires a full `X.Y.Z` or `master` (a short form would 404 every default-registry schema and silently check nothing).
+
+What each command ends up with:
+
+| Configured | build / diff / inventory (render) | validate (schemas) |
+|---|---|---|
+| nothing set | `1.36.1` | `1.36.1` |
+| `FLUXVIEW_KUBE_VERSION=1.35.7` | `1.35.7` | `1.35.7` |
+| `FLUXVIEW_KUBE_VERSION=1.35` or `master` | error (exit 2) | error (exit 2) |
+| `--kubernetes-version master` | error (exit 2) | moving `master` schema registry |
+| `--kubernetes-version 1.35` (helm only) | renders as `1.35.0` | error (exit 2) |
 
 ## Exit codes
 

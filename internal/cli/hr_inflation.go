@@ -90,7 +90,7 @@ func registerHelmCacheFlags(cmd *cobra.Command, cacheDir *string, indexTTL, down
 	cmd.Flags().DurationVar(downloadTimeout, "helm-download-timeout", helm.DefaultDownloadTimeout(),
 		"Per-request timeout for downloading Helm repo indexes and chart tarballs; 0 = no limit, for slow networks (env: FLUXVIEW_HELM_DOWNLOAD_TIMEOUT)")
 	cmd.Flags().StringVar(kubeVersion, kubeVersionFlag, kubeversion.Default,
-		"Kubernetes version assumed when rendering Helm charts offline (k8s version syntax, \"1.36\" = 1.36.0); charts with an upper kubeVersion bound in Chart.yaml check against it (env: FLUXVIEW_KUBE_VERSION)")
+		"Kubernetes version assumed when rendering Helm charts offline (k8s version syntax, \"1.36\" = 1.36.0; no \"master\" — charts render against concrete versions); charts with an upper kubeVersion bound in Chart.yaml check against it (env: FLUXVIEW_KUBE_VERSION)")
 }
 
 // kubeVersionPin resolves FLUXVIEW_KUBE_VERSION with the strict pipeline
