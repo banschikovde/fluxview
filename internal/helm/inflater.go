@@ -58,9 +58,9 @@ type Inflater struct {
 	// large downloads on slow links). Zero means no limit.
 	downloadTimeout time.Duration
 	// kubeVersion is the Kubernetes version assumed for offline chart
-	// rendering (Capabilities.KubeVersion; see DefaultKubeVersion). NewInflater
-	// guarantees it parses: charts with an upper kubeVersion bound in
-	// Chart.yaml check against it.
+	// rendering (Capabilities.KubeVersion; the pipeline default is
+	// kubeversion.Default). NewInflater guarantees it parses: charts with an
+	// upper kubeVersion bound in Chart.yaml check against it.
 	kubeVersion string
 	// registered memoizes repoURL -> cache name so that several HelmReleases
 	// sharing one repository validate the cached index only once per process.
