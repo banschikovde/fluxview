@@ -79,11 +79,11 @@ Examples:
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			applyGitSourceAuthFlags(cmd.Flags(), flags.GitSourceSSHKnownHosts, flags.GitSourceSSHAcceptNew)
-			pin, err := kubeVersionPin(cmd)
+			kubeVersion, err := resolveHelmKubeVersion(cmd, flags.KubernetesVersion)
 			if err != nil {
 				return NewExitError(err, ExitCodeError)
 			}
-			flags.KubernetesVersion = effectiveKubeVersion(cmd, flags.KubernetesVersion, pin)
+			flags.KubernetesVersion = kubeVersion
 			return runDiff(cmd.Context(), args, flags)
 		},
 	}
