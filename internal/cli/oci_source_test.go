@@ -711,27 +711,55 @@ spec:
 	}
 }
 
+// runDiffCountWarnings runs a diff over the fixture tree and counts
+// stderr lines containing marker.
+func runDiffCountWarnings(t *testing.T, resource, clusterDir, repoRoot, branch, marker string) (int, string, error) {
+	t.Helper()
+	var runErr error
+	var stderr string
+	_ = captureStdout(func() {
+		stderr = captureStderr(func() {
+			runErr = runDiff(context.Background(), []string{resource}, &DiffFlags{
+				Path:       clusterDir,
+				BranchOrig: branch,
+				Color:      "never",
+				KsCache: kustomizeCacheOptions{
+					gitSourceDir: filepath.Join(repoRoot, ".cache-test-git"),
+					gitSourceTtl: time.Hour,
+					ociSourceDir: filepath.Join(repoRoot, ".cache-test-oci"),
+					ociSourceTtl: time.Hour,
+				},
+			})
+		})
+	})
+	n := 0
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.Contains(line, marker) {
+			n++
+		}
+	}
+	return n, stderr, runErr
+}
+
 // TestDiff_ComparisonSideDoesNotRepeatWarnings: the revision-comparison
 // build re-derives the same missing paths and OCI fetch failures the
 // current side already reported — each warning prints exactly once per
 // diff, and a typo that exists only in the comparison revision prints
 // zero times (the diff itself is the report).
 func TestDiff_ComparisonSideDoesNotRepeatWarnings(t *testing.T) {
-	countWarning := func(stderr, marker string) int {
-		n := 0
-		for _, line := range strings.Split(stderr, "\n") {
-			if strings.Contains(line, marker) {
-				n++
-			}
-		}
-		return n
-	}
+	t.Run("local typo in both revisions", testDiffLocalTypoBothSides)
+	t.Run("unreachable OCI registry", testDiffOCIFetchWarningOnce)
+	t.Run("typo only in the comparison revision", testDiffTypoOnlyInComparison)
+	t.Run("typo only in the current revision", testDiffTypoOnlyInCurrent)
+}
 
-	t.Run("local typo in both revisions", func(t *testing.T) {
-		for _, resource := range []string{"ks", "hr"} {
-			t.Run(resource, func(t *testing.T) {
-				f := newOCIFleetFixture(t)
-				writeHelper(t, f.clusterDir, "typo.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+// testDiffLocalTypoBothSides: a local missing path present in both
+// revisions warns once per diff (ks and hr).
+func testDiffLocalTypoBothSides(t *testing.T) {
+	for _, resource := range []string{"ks", "hr"} {
+		t.Run(resource, func(t *testing.T) {
+			f := newOCIFleetFixture(t)
+			writeHelper(t, f.clusterDir, "typo.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
   name: typo-app
@@ -743,77 +771,47 @@ spec:
     kind: GitRepository
     name: flux-system
 `)
-				gitRun(t, f.repoRoot, "add", "-A")
-				gitRun(t, f.repoRoot, "-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "-q", "-m", "fixture")
-				commit := strings.TrimSpace(gitOutput(t, f.repoRoot, "rev-parse", "HEAD"))
+			gitRun(t, f.repoRoot, "add", "-A")
+			gitRun(t, f.repoRoot, "-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "-q", "-m", "fixture")
+			commit := strings.TrimSpace(gitOutput(t, f.repoRoot, "rev-parse", "HEAD"))
 
-				var runErr error
-				var stderr string
-				_ = captureStdout(func() {
-					stderr = captureStderr(func() {
-						runErr = runDiff(context.Background(), []string{resource}, &DiffFlags{
-							Path:       f.clusterDir,
-							BranchOrig: commit,
-							Color:      "never",
-							KsCache: kustomizeCacheOptions{
-								gitSourceDir: filepath.Join(f.repoRoot, ".cache-test-git"),
-								gitSourceTtl: time.Hour,
-								ociSourceDir: filepath.Join(f.repoRoot, ".cache-test-oci"),
-								ociSourceTtl: time.Hour,
-							},
-						})
-					})
-				})
-				if runErr != nil && !strings.Contains(runErr.Error(), "differences found") {
-					t.Fatalf("diff %s must stay lenient, got: %v\nstderr:\n%s", resource, runErr, stderr)
-				}
-				if got := countWarning(stderr, "path ./does-not-exist not found locally"); got != 1 {
-					t.Errorf("diff %s: the missing-path warning must print exactly once, got %d:\n%s", resource, got, stderr)
-				}
-			})
-		}
-	})
+			got, stderr, runErr := runDiffCountWarnings(t, resource, f.clusterDir, f.repoRoot, commit, "path ./does-not-exist not found locally")
+			if runErr != nil && !strings.Contains(runErr.Error(), "differences found") {
+				t.Fatalf("diff %s must stay lenient, got: %v\nstderr:\n%s", resource, runErr, stderr)
+			}
+			if got != 1 {
+				t.Errorf("diff %s: the missing-path warning must print exactly once, got %d:\n%s", resource, got, stderr)
+			}
+		})
+	}
+}
 
-	t.Run("unreachable OCI registry", func(t *testing.T) {
-		for _, resource := range []string{"ks", "hr"} {
-			t.Run(resource, func(t *testing.T) {
-				f := newOCIFleetFixture(t)
-				f.writeKS(t, "oci://127.0.0.1:1/u/envoy", "    tag: v1.10.0\n", "")
-				gitRun(t, f.repoRoot, "add", "-A")
-				gitRun(t, f.repoRoot, "-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "-q", "-m", "fixture")
-				commit := strings.TrimSpace(gitOutput(t, f.repoRoot, "rev-parse", "HEAD"))
+// testDiffOCIFetchWarningOnce: an unreachable OCI registry warns once per
+// diff (ks and hr).
+func testDiffOCIFetchWarningOnce(t *testing.T) {
+	for _, resource := range []string{"ks", "hr"} {
+		t.Run(resource, func(t *testing.T) {
+			f := newOCIFleetFixture(t)
+			f.writeKS(t, "oci://127.0.0.1:1/u/envoy", "    tag: v1.10.0\n", "")
+			gitRun(t, f.repoRoot, "add", "-A")
+			gitRun(t, f.repoRoot, "-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "-q", "-m", "fixture")
+			commit := strings.TrimSpace(gitOutput(t, f.repoRoot, "rev-parse", "HEAD"))
 
-				var runErr error
-				var stderr string
-				_ = captureStdout(func() {
-					stderr = captureStderr(func() {
-						runErr = runDiff(context.Background(), []string{resource}, &DiffFlags{
-							Path:       f.clusterDir,
-							BranchOrig: commit,
-							Color:      "never",
-							KsCache: kustomizeCacheOptions{
-								gitSourceDir: filepath.Join(f.repoRoot, ".cache-test-git"),
-								gitSourceTtl: time.Hour,
-								ociSourceDir: filepath.Join(f.repoRoot, ".cache-test-oci"),
-								ociSourceTtl: time.Hour,
-							},
-						})
-					})
-				})
-				if runErr != nil && !strings.Contains(runErr.Error(), "differences found") {
-					t.Fatalf("diff %s must stay lenient, got: %v\nstderr:\n%s", resource, runErr, stderr)
-				}
-				if got := countWarning(stderr, "fetching OCIRepository envoy-gateway-system/envoy-gateway for envoy-gateway-system/envoy-gateway-crds failed"); got != 1 {
-					t.Errorf("diff %s: the OCI fetch warning must print exactly once, got %d:\n%s", resource, got, stderr)
-				}
-			})
-		}
-	})
+			got, stderr, runErr := runDiffCountWarnings(t, resource, f.clusterDir, f.repoRoot, commit,
+				"fetching OCIRepository envoy-gateway-system/envoy-gateway for envoy-gateway-system/envoy-gateway-crds failed")
+			if runErr != nil && !strings.Contains(runErr.Error(), "differences found") {
+				t.Fatalf("diff %s must stay lenient, got: %v\nstderr:\n%s", resource, runErr, stderr)
+			}
+			if got != 1 {
+				t.Errorf("diff %s: the OCI fetch warning must print exactly once, got %d:\n%s", resource, got, stderr)
+			}
+		})
+	}
+}
 
-	t.Run("typo only in the comparison revision", func(t *testing.T) {
-		f := newOCIFleetFixture(t)
-		ksManifest := func(path string) string {
-			return `apiVersion: kustomize.toolkit.fluxcd.io/v1
+// localKSManifest builds the fixture KS manifest with the given path.
+func localKSManifest(path string) string {
+	return `apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
   name: root-app
@@ -825,90 +823,53 @@ spec:
     kind: GitRepository
     name: flux-system
 `
-		}
-		writeHelper(t, f.clusterDir, "root-app.yaml", ksManifest("./absent"))
-		gitRun(t, f.repoRoot, "add", "-A")
-		gitRun(t, f.repoRoot, "-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "-q", "-m", "typo")
-		broken := strings.TrimSpace(gitOutput(t, f.repoRoot, "rev-parse", "HEAD"))
+}
 
-		writeHelper(t, f.clusterDir, "root-app.yaml", ksManifest("./apps"))
-		writeHelper(t, filepath.Join(f.repoRoot, "apps"), "kustomization.yaml", "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources: []\n")
-		gitRun(t, f.repoRoot, "add", "-A")
-		gitRun(t, f.repoRoot, "-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "-q", "-m", "fix")
+// commitTree commits the whole fixture tree with the given message and
+// returns the commit.
+func commitTree(t *testing.T, repoRoot, message string) string {
+	t.Helper()
+	gitRun(t, repoRoot, "add", "-A")
+	gitRun(t, repoRoot, "-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "-q", "-m", message)
+	return strings.TrimSpace(gitOutput(t, repoRoot, "rev-parse", "HEAD"))
+}
 
-		var runErr error
-		var stderr string
-		_ = captureStdout(func() {
-			stderr = captureStderr(func() {
-				runErr = runDiff(context.Background(), []string{"ks"}, &DiffFlags{
-					Path:       f.clusterDir,
-					BranchOrig: broken,
-					Color:      "never",
-					KsCache: kustomizeCacheOptions{
-						gitSourceDir: filepath.Join(f.repoRoot, ".cache-test-git"),
-						gitSourceTtl: time.Hour,
-						ociSourceDir: filepath.Join(f.repoRoot, ".cache-test-oci"),
-						ociSourceTtl: time.Hour,
-					},
-				})
-			})
-		})
-		if runErr != nil && !strings.Contains(runErr.Error(), "differences found") {
-			t.Fatalf("diff must stay lenient, got: %v\nstderr:\n%s", runErr, stderr)
-		}
-		if got := countWarning(stderr, "not found locally"); got != 0 {
-			t.Errorf("a typo that exists only in the comparison revision must not warn (the diff is the report), got %d:\n%s", got, stderr)
-		}
-	})
+// testDiffTypoOnlyInComparison: a typo that exists only in the comparison
+// revision warns zero times — the diff output is the report.
+func testDiffTypoOnlyInComparison(t *testing.T) {
+	f := newOCIFleetFixture(t)
+	writeHelper(t, f.clusterDir, "root-app.yaml", localKSManifest("./absent"))
+	broken := commitTree(t, f.repoRoot, "typo")
 
-	t.Run("typo only in the current revision", func(t *testing.T) {
-		f := newOCIFleetFixture(t)
-		ksManifest := func(path string) string {
-			return `apiVersion: kustomize.toolkit.fluxcd.io/v1
-kind: Kustomization
-metadata:
-  name: root-app
-  namespace: flux-system
-spec:
-  interval: 24h
-  path: ` + path + `
-  sourceRef:
-    kind: GitRepository
-    name: flux-system
-`
-		}
-		writeHelper(t, f.clusterDir, "root-app.yaml", ksManifest("./apps"))
-		writeHelper(t, filepath.Join(f.repoRoot, "apps"), "kustomization.yaml", "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources: []\n")
-		gitRun(t, f.repoRoot, "add", "-A")
-		gitRun(t, f.repoRoot, "-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "-q", "-m", "ok")
-		okRev := strings.TrimSpace(gitOutput(t, f.repoRoot, "rev-parse", "HEAD"))
+	writeHelper(t, f.clusterDir, "root-app.yaml", localKSManifest("./apps"))
+	writeHelper(t, filepath.Join(f.repoRoot, "apps"), "kustomization.yaml", "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources: []\n")
+	commitTree(t, f.repoRoot, "fix")
 
-		writeHelper(t, f.clusterDir, "root-app.yaml", ksManifest("./absent"))
-		gitRun(t, f.repoRoot, "add", "-A")
-		gitRun(t, f.repoRoot, "-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "-q", "-m", "typo")
+	got, stderr, runErr := runDiffCountWarnings(t, "ks", f.clusterDir, f.repoRoot, broken, "not found locally")
+	if runErr != nil && !strings.Contains(runErr.Error(), "differences found") {
+		t.Fatalf("diff must stay lenient, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+	if got != 0 {
+		t.Errorf("a typo that exists only in the comparison revision must not warn (the diff is the report), got %d:\n%s", got, stderr)
+	}
+}
 
-		var runErr error
-		var stderr string
-		_ = captureStdout(func() {
-			stderr = captureStderr(func() {
-				runErr = runDiff(context.Background(), []string{"ks"}, &DiffFlags{
-					Path:       f.clusterDir,
-					BranchOrig: okRev,
-					Color:      "never",
-					KsCache: kustomizeCacheOptions{
-						gitSourceDir: filepath.Join(f.repoRoot, ".cache-test-git"),
-						gitSourceTtl: time.Hour,
-						ociSourceDir: filepath.Join(f.repoRoot, ".cache-test-oci"),
-						ociSourceTtl: time.Hour,
-					},
-				})
-			})
-		})
-		if runErr != nil && !strings.Contains(runErr.Error(), "differences found") {
-			t.Fatalf("diff must stay lenient, got: %v\nstderr:\n%s", runErr, stderr)
-		}
-		if got := countWarning(stderr, "path ./absent not found locally"); got != 1 {
-			t.Errorf("a current-side typo must warn exactly once, got %d:\n%s", got, stderr)
-		}
-	})
+// testDiffTypoOnlyInCurrent: a typo that exists only in the current
+// revision warns exactly once.
+func testDiffTypoOnlyInCurrent(t *testing.T) {
+	f := newOCIFleetFixture(t)
+	writeHelper(t, f.clusterDir, "root-app.yaml", localKSManifest("./apps"))
+	writeHelper(t, filepath.Join(f.repoRoot, "apps"), "kustomization.yaml", "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources: []\n")
+	okRev := commitTree(t, f.repoRoot, "ok")
+
+	writeHelper(t, f.clusterDir, "root-app.yaml", localKSManifest("./absent"))
+	commitTree(t, f.repoRoot, "typo")
+
+	got, stderr, runErr := runDiffCountWarnings(t, "ks", f.clusterDir, f.repoRoot, okRev, "path ./absent not found locally")
+	if runErr != nil && !strings.Contains(runErr.Error(), "differences found") {
+		t.Fatalf("diff must stay lenient, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+	if got != 1 {
+		t.Errorf("a current-side typo must warn exactly once, got %d:\n%s", got, stderr)
+	}
 }
