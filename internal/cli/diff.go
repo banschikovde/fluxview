@@ -608,7 +608,12 @@ func resolveKSSource(ctx context.Context, env *ksBuildEnv, ks flux.Kustomization
 // be checked out, and a local miss says nothing about the manifest —
 // those are recorded as unchecked (warn), exactly like an unfetched
 // external GitRepository.
-func warnMissingKSSource(ks flux.Kustomization, externalSource string, report *buildReport) {
+// stderr follows the same quiet contract as the other diagnostics: quiet
+// stages (hr pipeline discovery, diff comparison side) get no per-KS
+// warning — their output is HelmReleases / the other diff side. The
+// report recording is never suppressed: validate's gate and the "left
+// unchecked" summary must stay complete wherever the build ran.
+func warnMissingKSSource(ks flux.Kustomization, externalSource string, report *buildReport, quiet bool) {
 	if ks.Spec.Path == "" {
 		return
 	}
@@ -616,12 +621,16 @@ func warnMissingKSSource(ks flux.Kustomization, externalSource string, report *b
 	kind := ks.Spec.SourceRef.Kind
 	switch {
 	case externalSource != "":
-		fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found in external source %s, skipping its resources\n",
-			ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, externalSource)
+		if !quiet {
+			fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found in external source %s, skipping its resources\n",
+				ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, externalSource)
+		}
 		recordMissingKSPath(report, key, ks.Spec.Path)
 	case kind == flux.KindOCIRepository || kind == flux.KindBucket:
-		fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally (source kind %s is not fetched externally), skipping its resources\n",
-			ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, kind)
+		if !quiet {
+			fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally (source kind %s is not fetched externally), skipping its resources\n",
+				ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, kind)
+		}
 		// err carries only the cause — no path: the grouping in
 		// warnUncheckedKustomizations must fold every Kustomization of one
 		// source into a single entry, and the per-KS warning above already
@@ -634,8 +643,10 @@ func warnMissingKSSource(ks flux.Kustomization, externalSource string, report *b
 			})
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally, skipping its resources\n",
-			ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path)
+		if !quiet {
+			fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally, skipping its resources\n",
+				ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path)
+		}
 		recordMissingKSPath(report, key, ks.Spec.Path)
 	}
 }
@@ -665,7 +676,7 @@ func buildOneKustomization(ctx context.Context, env *ksBuildEnv, ks flux.Kustomi
 	res := resolveKSSource(ctx, env, ks, key, knownRepos)
 	if res.sourcePath == "" {
 		if !res.fetchFailed {
-			warnMissingKSSource(ks, res.externalSource, env.report)
+			warnMissingKSSource(ks, res.externalSource, env.report, env.quiet)
 		}
 		return string(ksYAML), nil, nil
 	}
