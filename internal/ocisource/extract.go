@@ -63,6 +63,12 @@ func extractTarGz(r io.Reader, layerDesc ocispec.Descriptor, dst string) error {
 		if err != nil {
 			return fmt.Errorf("reading archive: %w", err)
 		}
+		// Caps are checked BEFORE the entry is written: one file
+		// declaring tens of gigabytes must fail the fetch without ever
+		// landing on disk.
+		if err := budget.check(hdr); err != nil {
+			return err
+		}
 		written, isFile, err := extractEntry(root, tr, hdr)
 		if err != nil {
 			return err
@@ -111,20 +117,32 @@ type extractBudget struct {
 	files int
 }
 
-// commit accounts one written entry against the caps, failing once a cap
-// is exceeded.
+// check verifies an entry against the caps before anything is written.
+// Only regular files count; a negative declared size is rejected here so
+// it never reaches the writer.
+func (b *extractBudget) check(hdr *tar.Header) error {
+	if hdr.Typeflag != tar.TypeReg {
+		return nil
+	}
+	if hdr.Size < 0 {
+		return fmt.Errorf("entry %q declares a negative size", hdr.Name)
+	}
+	if b.files+1 > maxExtractFiles {
+		return fmt.Errorf("archive holds more than %d files", maxExtractFiles)
+	}
+	if b.total+hdr.Size > maxExtractBytes {
+		return fmt.Errorf("archive expands beyond %d bytes", int64(maxExtractBytes))
+	}
+	return nil
+}
+
+// commit accounts one written entry against the caps.
 func (b *extractBudget) commit(written int64, isFile bool) error {
 	if !isFile {
 		return nil
 	}
 	b.files++
-	if b.files > maxExtractFiles {
-		return fmt.Errorf("archive holds more than %d files", maxExtractFiles)
-	}
 	b.total += written
-	if b.total > maxExtractBytes {
-		return fmt.Errorf("archive expands beyond %d bytes", int64(maxExtractBytes))
-	}
 	return nil
 }
 
@@ -166,9 +184,6 @@ func extractEntry(root *os.Root, tr *tar.Reader, hdr *tar.Header) (written int64
 
 // writeEntryFile writes one regular file entry under root.
 func writeEntryFile(root *os.Root, tr *tar.Reader, hdr *tar.Header, name string) (int64, error) {
-	if hdr.Size < 0 {
-		return 0, fmt.Errorf("entry %q declares a negative size", hdr.Name)
-	}
 	if err := root.MkdirAll(path.Dir(name), 0o755); err != nil {
 		return 0, fmt.Errorf("creating directory for %q: %w", hdr.Name, err)
 	}

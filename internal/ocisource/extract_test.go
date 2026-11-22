@@ -149,14 +149,24 @@ func TestExtractTarGz_BudgetCaps(t *testing.T) {
 	}
 }
 
-func TestWriteEntryFile_NegativeSizeFails(t *testing.T) {
-	root, err := os.OpenRoot(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
+func TestBudgetCheckRejectsBeforeWriting(t *testing.T) {
+	var b extractBudget
+	// A negative declared size never reaches the writer.
+	if err := b.check(&tar.Header{Name: "f", Size: -1, Typeflag: tar.TypeReg}); err == nil ||
+		!strings.Contains(err.Error(), "negative size") {
+		t.Fatalf("a negative declared size must fail: %v", err)
 	}
-	defer root.Close()
-	if _, err := writeEntryFile(root, &tar.Reader{}, &tar.Header{Name: "f", Size: -1, Typeflag: tar.TypeReg}, "f"); err == nil {
-		t.Fatal("a negative declared size must fail")
+	// A file larger than the whole budget fails before it is created.
+	origBytes := maxExtractBytes
+	t.Cleanup(func() { maxExtractBytes = origBytes })
+	maxExtractBytes = 10
+	err := b.check(&tar.Header{Name: "big", Size: 11, Typeflag: tar.TypeReg})
+	if err == nil || !strings.Contains(err.Error(), "expands beyond") {
+		t.Fatalf("an over-budget entry must fail before writing: %v", err)
+	}
+	// Non-file entries cost nothing.
+	if err := b.check(&tar.Header{Name: "d", Typeflag: tar.TypeDir}); err != nil {
+		t.Fatalf("directories must pass the check: %v", err)
 	}
 }
 
