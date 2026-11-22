@@ -35,10 +35,15 @@ func dockerConfigFor(t *testing.T, reg *ocisourcetest.Registry) {
 	t.Setenv("DOCKER_CONFIG", dir)
 }
 
-// noDockerConfigFor points DOCKER_CONFIG at an empty directory — anonymous
-// pulls only.
+// noDockerConfigFor pins anonymous pulls: a configured-but-empty config
+// (NewRegistry already isolated the stores — a missing config would make
+// oras detect the machine's native credential store).
 func noDockerConfigFor(t *testing.T) {
-	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"auths": {"fluxview-test.invalid": {}}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_CONFIG", dir)
 }
 
 // ociRepo builds a flux.OCIRepository for the test registry.
@@ -220,14 +225,12 @@ func TestEnsure_Auth_UnauthorizedHintsDockerConfig(t *testing.T) {
 	noDockerConfigFor(t)
 	reg.PushArtifact(t, "u/private", "v1", ocisourcetest.DefaultLayerMediaType, map[string]string{"cm.yaml": "kind: ConfigMap\n"})
 
-	// 127.0.0.1, not localhost: the credential store's native fallback
-	// (macOS keychain) may hold a "localhost" entry written by other
-	// tools' test logins — the anonymous expectations below must not
-	// depend on the machine's keychain.
-	url := strings.Replace(reg.URL, "localhost", "127.0.0.1", 1)
+	// The registry runs under isolated credential stores (NewRegistry), so
+	// anonymous means anonymous — no native keychain can leak credentials
+	// in, whatever entries the machine happens to hold.
 	f := NewFetcher(t.TempDir(), time.Hour)
 	defer f.Close()
-	_, err := f.Ensure(context.Background(), ociRepo("oci://"+url+"/u/private", &flux.OCIRepositoryRef{Tag: "v1"}))
+	_, err := f.Ensure(context.Background(), ociRepo("oci://"+reg.URL+"/u/private", &flux.OCIRepositoryRef{Tag: "v1"}))
 	if err == nil {
 		t.Fatal("anonymous pull against an htpasswd registry must fail")
 	}
@@ -617,12 +620,8 @@ func TestEnsure_Auth_SecretRefNamedInHint(t *testing.T) {
 	noDockerConfigFor(t)
 	reg.PushArtifact(t, "u/private", "v1", ocisourcetest.DefaultLayerMediaType, map[string]string{"cm.yaml": "kind: ConfigMap\n"})
 
-	// 127.0.0.1, not localhost: the credential store's native fallback
-	// (macOS keychain) may hold a "localhost" entry written by other
-	// tools' test logins — the anonymous expectations must not depend on
-	// the machine's keychain.
-	url := strings.Replace(reg.URL, "localhost", "127.0.0.1", 1)
-	repo := ociRepo("oci://"+url+"/u/private", &flux.OCIRepositoryRef{Tag: "v1"})
+	// Isolated stores (NewRegistry): anonymous stays anonymous here too.
+	repo := ociRepo("oci://"+reg.URL+"/u/private", &flux.OCIRepositoryRef{Tag: "v1"})
 	repo.Spec.SecretRef = &flux.LocalObjectReference{Name: "regcred"}
 
 	f := NewFetcher(t.TempDir(), time.Hour)

@@ -11,6 +11,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/opencontainers/go-digest"
@@ -39,9 +41,38 @@ type Registry struct {
 	Password string
 }
 
-// NewRegistry starts the local registry.
+// dummyConfiguredCredentialStore is a docker/registry config that counts
+// as "configured" (a dummy auths entry) while holding no credentials.
+const dummyConfiguredCredentialStore = `{"auths": {"fluxview-test.invalid": {}}}` + "\n"
+
+// IsolateCredentialStores points DOCKER_CONFIG and HELM_CONFIG_HOME at
+// per-test directories holding configured-but-empty credential configs.
+// oras (and Helm on top of it) only fall back to the platform's native
+// credential store — the macOS keychain, the Linux helper binaries —
+// when the config carries no authentication at all; a configured config
+// pins every read and write to these temp files. Tests neither depend on
+// the machine's keychain nor write into it (Helm's repotest login used
+// to leave real entries there).
+func IsolateCredentialStores(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	for _, sub := range []string{"docker", "helm/registry"} {
+		d := filepath.Join(dir, sub)
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("isolating credential stores: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "config.json"), []byte(dummyConfiguredCredentialStore), 0o600); err != nil {
+			t.Fatalf("isolating credential stores: %v", err)
+		}
+	}
+	t.Setenv("DOCKER_CONFIG", filepath.Join(dir, "docker"))
+	t.Setenv("HELM_CONFIG_HOME", filepath.Join(dir, "helm"))
+}
+
+// NewRegistry starts the local registry under isolated credential stores.
 func NewRegistry(t *testing.T) *Registry {
 	t.Helper()
+	IsolateCredentialStores(t)
 	srv, err := repotest.NewOCIServer(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("starting test OCI registry: %v", err)
