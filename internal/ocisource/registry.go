@@ -178,23 +178,28 @@ func verifyWhileReading(r io.Reader, desc ocispec.Descriptor) ([]byte, error) {
 }
 
 // explainAuthStatus decorates registry authentication failures with the
-// remedy: where fluxview reads credentials from and why spec.secretRef
-// cannot work. Other errors pass through unchanged.
-func explainAuthStatus(err error) error {
+// remedy: where fluxview reads credentials from and what happens to
+// spec.secretRef (named when the manifest sets one). Other errors pass
+// through unchanged.
+func explainAuthStatus(err error, secretRef *flux.LocalObjectReference) error {
+	if !isAuthFailure(err) {
+		return err
+	}
+	secret := "a spec.secretRef Secret is only available in-cluster"
+	if secretRef != nil && secretRef.Name != "" {
+		secret = fmt.Sprintf("spec.secretRef %q is ignored outside the cluster; provide the same credentials via the Docker config", secretRef.Name)
+	}
+	return fmt.Errorf("%v; the registry requires credentials — fluxview reads them from the Docker config ($DOCKER_CONFIG or ~/.docker/config.json); %s", err, secret)
+}
+
+// isAuthFailure reports whether err is a registry authentication refusal:
+// a typed 401/403 response, or a Basic challenge that failed client-side
+// for lack of credentials.
+func isAuthFailure(err error) bool {
 	var respErr *errcode.ErrorResponse
 	if errors.As(err, &respErr) &&
 		(respErr.StatusCode == http.StatusUnauthorized || respErr.StatusCode == http.StatusForbidden) {
-		return hintDockerConfig(err)
+		return true
 	}
-	// The challenge may fail client-side — no credentials for a Basic
-	// challenge — before any typed registry response exists.
-	if errors.Is(err, auth.ErrBasicCredentialNotFound) {
-		return hintDockerConfig(err)
-	}
-	return err
-}
-
-// hintDockerConfig appends the credential-source remedy to err.
-func hintDockerConfig(err error) error {
-	return fmt.Errorf("%v; the registry requires credentials — fluxview reads them from the Docker config ($DOCKER_CONFIG or ~/.docker/config.json), a spec.secretRef Secret is only available in-cluster", err)
+	return errors.Is(err, auth.ErrBasicCredentialNotFound)
 }

@@ -698,7 +698,7 @@ func resolveFromOCIArtifact(ctx context.Context, env *ksBuildEnv, ks flux.Kustom
 // warning is printed in every mode. The report recording is never
 // suppressed: validate's gate and the "left unchecked" summary must stay
 // complete wherever the build ran.
-func warnMissingKSSource(ks flux.Kustomization, externalSource string, report *buildReport, quiet bool) {
+func warnMissingKSSource(ks flux.Kustomization, externalSource string, report *buildReport, quiet bool, ociFetchOn bool) {
 	if ks.Spec.Path == "" {
 		return
 	}
@@ -710,9 +710,15 @@ func warnMissingKSSource(ks flux.Kustomization, externalSource string, report *b
 			ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, externalSource)
 		recordMissingKSPath(report, key, ks.Spec.Path)
 	case kind == flux.KindOCIRepository || kind == flux.KindBucket:
+		// With fetching on, a missing OCIRepository manifest is its own
+		// cause — "not fetched" would blame the switch that is not set.
+		cause := "source kind " + kind + " is not fetched"
+		if kind == flux.KindOCIRepository && ociFetchOn {
+			cause = describeSource(ks) + " not found in the repository"
+		}
 		if !quiet {
-			fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally (source kind %s is not fetched), skipping its resources\n",
-				ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, kind)
+			fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally (%s), skipping its resources\n",
+				ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, cause)
 		}
 		// err carries only the cause — no path: the grouping in
 		// warnUncheckedKustomizations must fold every Kustomization of one
@@ -722,7 +728,7 @@ func warnMissingKSSource(ks flux.Kustomization, externalSource string, report *b
 			report.fetchErrors = append(report.fetchErrors, fetchError{
 				ks:     key,
 				source: describeSource(ks),
-				err:    "source kind " + kind + " content not fetched",
+				err:    cause,
 			})
 		}
 	default:
@@ -757,7 +763,8 @@ func buildOneKustomization(ctx context.Context, env *ksBuildEnv, ks flux.Kustomi
 	res := resolveKSSource(ctx, env, ks, key, known)
 	if res.sourcePath == "" {
 		if !res.fetchFailed {
-			warnMissingKSSource(ks, res.externalSource, env.report, env.quiet)
+			ociFetchOn := env.sources != nil && env.sources.oci.fetchEnabled()
+			warnMissingKSSource(ks, res.externalSource, env.report, env.quiet, ociFetchOn)
 		}
 		return string(ksYAML), nil, nil
 	}

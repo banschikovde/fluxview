@@ -604,3 +604,41 @@ func TestEnsure_TimeoutFailsPromptly(t *testing.T) {
 		}
 	}
 }
+
+func TestEnsure_Auth_SecretRefNamedInHint(t *testing.T) {
+	reg := ocisourcetest.NewRegistry(t)
+	noDockerConfigFor(t)
+	reg.PushArtifact(t, "u/private", "v1", ocisourcetest.DefaultLayerMediaType, map[string]string{"cm.yaml": "kind: ConfigMap\n"})
+
+	repo := ociRepo("oci://"+reg.URL+"/u/private", &flux.OCIRepositoryRef{Tag: "v1"})
+	repo.Spec.SecretRef = &flux.LocalObjectReference{Name: "regcred"}
+
+	f := NewFetcher(t.TempDir(), time.Hour)
+	defer f.Close()
+	_, err := f.Ensure(context.Background(), repo)
+	if err == nil {
+		t.Fatal("anonymous pull against an htpasswd registry must fail")
+	}
+	for _, want := range []string{"spec.secretRef \"regcred\" is ignored outside the cluster", "Docker config"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error must mention %q, got: %v", want, err)
+		}
+	}
+}
+
+func TestPickSemverTag_ErrorCapsTagList(t *testing.T) {
+	tags := make([]string, 30)
+	for i := range tags {
+		tags[i] = fmt.Sprintf("1.0.%d", i)
+	}
+	_, err := pickSemverTag(tags, ">=99.0.0")
+	if err == nil {
+		t.Fatal("expected no-match error")
+	}
+	if !strings.Contains(err.Error(), "… and 10 more") {
+		t.Errorf("the tag list must cap at 20 with a remainder, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "1.0.29,") {
+		t.Errorf("tags past the cap must not be listed, got: %v", err)
+	}
+}

@@ -39,7 +39,19 @@ func pickSemverTag(tags []string, constraint string) (string, error) {
 		}
 	}
 	if best == nil {
-		return "", fmt.Errorf("no tag matches constraint %q (available: %s)", constraint, strings.Join(tags, ", "))
+		return "", fmt.Errorf("no tag matches constraint %q (available: %s)", constraint, renderTags(tags))
 	}
 	return bestTag, nil
+}
+
+// maxTagsInError caps the tag list in the no-match error; longer lists
+// collapse to the first 20 and a count.
+const maxTagsInError = 20
+
+// renderTags renders up to maxTagsInError tags plus an "and N more" tail.
+func renderTags(tags []string) string {
+	if len(tags) <= maxTagsInError {
+		return strings.Join(tags, ", ")
+	}
+	return strings.Join(tags[:maxTagsInError], ", ") + fmt.Sprintf(", … and %d more", len(tags)-maxTagsInError)
 }

@@ -654,3 +654,59 @@ spec:
 		t.Errorf("a successful empty-path fetch must leave no warnings, got:\n%s", stderr)
 	}
 }
+
+// TestOCI_MissingRepositoryObject_DistinctCause: with fetching on, a
+// Kustomization whose OCIRepository manifest is nowhere in the repository
+// reports "not found in the repository"; with the kill switch the cause
+// stays "not fetched". Both leave the KS unchecked by validate.
+func TestOCI_MissingRepositoryObject_DistinctCause(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		noFetch   bool
+		wantCause string
+	}{
+		{name: "fetch on names the missing object", noFetch: false, wantCause: "OCIRepository envoy-gateway-system/envoy-gateway not found in the repository"},
+		{name: "kill switch keeps the not-fetched cause", noFetch: true, wantCause: "source kind OCIRepository is not fetched"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newOCIFleetFixture(t)
+			// No OCIRepository manifest anywhere: only the KS.
+			writeHelper(t, f.clusterDir, "orphan.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: envoy-gateway-crds
+  namespace: envoy-gateway-system
+spec:
+  interval: 24h
+  path: ./gateway-helm/charts/crds/crds
+  sourceRef:
+    kind: OCIRepository
+    name: envoy-gateway
+`)
+			flags := &ValidateFlags{
+				Path:                  f.clusterDir,
+				disableDefaultSchemas: true,
+				NoOCISourceFetch:      tc.noFetch,
+				KsCache: kustomizeCacheOptions{
+					ociSourceDir: filepath.Join(f.repoRoot, ".cache-test-oci"),
+					ociSourceTtl: time.Hour,
+					gitSourceDir: filepath.Join(f.repoRoot, ".cache-test-git"),
+					gitSourceTtl: time.Hour,
+				},
+			}
+			var runErr error
+			stderr := captureStderr(func() {
+				runErr = runValidate(context.Background(), flags)
+			})
+			if runErr != nil {
+				t.Fatalf("validate must stay lenient, got: %v\nstderr:\n%s", runErr, stderr)
+			}
+			if !strings.Contains(stderr, tc.wantCause) {
+				t.Errorf("the cause must be %q, got:\n%s", tc.wantCause, stderr)
+			}
+			if !strings.Contains(stderr, "left unchecked") || !strings.Contains(stderr, "envoy-gateway-system/envoy-gateway-crds") {
+				t.Errorf("the gate summary must still name the unchecked Kustomization, got:\n%s", stderr)
+			}
+		})
+	}
+}

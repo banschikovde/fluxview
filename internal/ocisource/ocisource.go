@@ -80,12 +80,13 @@ func DefaultNoFetch() bool {
 	return sourcecache.NoFetchFromEnv(EnvNoFetch)
 }
 
-// Fetcher downloads OCIRepository artifacts into the OCI source cache.
-// A nil *Fetcher (or a disabled cache directory) still fetches — every
-// artifact lands in a private temp directory with no reuse — because the
-// Kustomization pipeline must not silently skip external content. Those
-// temp directories accumulate in one per-Fetcher directory removed by
-// Close.
+// Fetcher downloads OCIRepository artifacts into the OCI source cache. A
+// disabled cache directory still fetches — every artifact lands in a
+// private temp directory with no reuse — because the Kustomization
+// pipeline must not silently skip external content. Those temp
+// directories accumulate in one per-Fetcher directory removed by Close.
+// Always construct via NewFetcher; a nil *Fetcher is not a valid Fetcher
+// (the shared registry client lives on it).
 type Fetcher struct {
 	// dir is the cache directory; empty means "no reuse" (temp dirs).
 	dir string
@@ -165,9 +166,10 @@ func (f *Fetcher) offTempDir() (string, error) {
 // Ensure returns a local directory holding the extracted artifact content
 // requested by repo (spec.ref resolved per Flux priority: digest > semver
 // > tag > the literal latest tag), fetching it into the cache when needed.
-// The directory is immutable for a given (url, digest) pair; callers may
-// read from it freely but must not modify it. A nil Fetcher fetches to a
-// private temp directory with no reuse (removed by Close).
+// The directory is immutable for a given (url, digest, selected layer)
+// triple; callers may read from it freely but must not modify it. Without
+// a usable cache directory every fetch lands in a private temp directory
+// (removed by Close).
 func (f *Fetcher) Ensure(ctx context.Context, repo flux.OCIRepository) (string, error) {
 	url := strings.TrimSpace(repo.Spec.URL)
 	if url == "" {
@@ -287,7 +289,7 @@ func (f *Fetcher) resolveFloating(ctx context.Context, base string, repo flux.OC
 	case ref != nil && ref.Semver != "":
 		tags, err := listTags(ctx, reg)
 		if err != nil {
-			return "", explainAuthStatus(fmt.Errorf("listing tags of %s: %w", ociPrefix+base, err))
+			return "", explainAuthStatus(fmt.Errorf("listing tags of %s: %w", ociPrefix+base, err), repo.Spec.SecretRef)
 		}
 		tag, err := pickSemverTag(tags, ref.Semver)
 		if err != nil {
@@ -295,13 +297,13 @@ func (f *Fetcher) resolveFloating(ctx context.Context, base string, repo flux.OC
 		}
 		desc, err := reg.Resolve(ctx, tag)
 		if err != nil {
-			return "", explainAuthStatus(fmt.Errorf("resolving %s:%s: %w", ociPrefix+base, tag, err))
+			return "", explainAuthStatus(fmt.Errorf("resolving %s:%s: %w", ociPrefix+base, tag, err), repo.Spec.SecretRef)
 		}
 		return desc.Digest.String(), nil
 	case ref != nil && ref.Tag != "":
 		desc, err := reg.Resolve(ctx, ref.Tag)
 		if err != nil {
-			return "", explainAuthStatus(fmt.Errorf("resolving %s:%s: %w", ociPrefix+base, ref.Tag, err))
+			return "", explainAuthStatus(fmt.Errorf("resolving %s:%s: %w", ociPrefix+base, ref.Tag, err), repo.Spec.SecretRef)
 		}
 		return desc.Digest.String(), nil
 	default:
@@ -309,7 +311,7 @@ func (f *Fetcher) resolveFloating(ctx context.Context, base string, repo flux.OC
 		// source-controller (name.DefaultTag).
 		desc, err := reg.Resolve(ctx, "latest")
 		if err != nil {
-			return "", explainAuthStatus(fmt.Errorf("resolving %s:latest: %w", ociPrefix+base, err))
+			return "", explainAuthStatus(fmt.Errorf("resolving %s:latest: %w", ociPrefix+base, err), repo.Spec.SecretRef)
 		}
 		return desc.Digest.String(), nil
 	}
@@ -376,7 +378,7 @@ func (f *Fetcher) fetchInto(ctx context.Context, base, resolved string, repo flu
 
 	manifest, err := fetchManifest(ctx, reg, digest)
 	if err != nil {
-		return explainAuthStatus(fmt.Errorf("fetching manifest of %s@%s: %w", ociPrefix+base, digest, err))
+		return explainAuthStatus(fmt.Errorf("fetching manifest of %s@%s: %w", ociPrefix+base, digest, err), repo.Spec.SecretRef)
 	}
 	layerDesc, err := selectLayer(manifest, repo.Spec.LayerSelector)
 	if err != nil {
@@ -384,7 +386,7 @@ func (f *Fetcher) fetchInto(ctx context.Context, base, resolved string, repo flu
 	}
 	blob, err := reg.Fetch(ctx, layerDesc)
 	if err != nil {
-		return explainAuthStatus(fmt.Errorf("downloading layer of %s@%s: %w", ociPrefix+base, digest, err))
+		return explainAuthStatus(fmt.Errorf("downloading layer of %s@%s: %w", ociPrefix+base, digest, err), repo.Spec.SecretRef)
 	}
 	defer blob.Close()
 
@@ -408,8 +410,8 @@ func cacheKey(url, refSpec string) string {
 	return sourcecache.Key(url, refSpec)
 }
 
-// dataKey extends the resolved digest with the selected layer media type:
-// the extracted directory differs per selected layer of the same artifact.
+// dataKey keys one extracted directory: the resolved manifest digest
+// plus the selected layer media type.
 func dataKey(url, resolved string, sel *flux.OCILayerSelector) string {
 	mediaType := ""
 	if sel != nil {
