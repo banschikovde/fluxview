@@ -40,15 +40,37 @@ type jsonValidationSummary struct {
 	Errors  int `json:"errors"`
 }
 
+// jsonUncheckedKustomization is one Kustomization whose source content
+// could not be obtained — its resources never reached the checked set.
+type jsonUncheckedKustomization struct {
+	Kustomization string `json:"kustomization"`
+	Source        string `json:"source"`
+	Cause         string `json:"cause"`
+}
+
 type jsonValidationReport struct {
 	Resources []jsonValidationResource `json:"resources"`
-	Summary   jsonValidationSummary    `json:"summary"`
+	// Unchecked lists the Kustomizations left unchecked (unfetched
+	// sources), in the stderr summary's group order; absent when the run
+	// checked everything. The summary counts stay about resources.
+	Unchecked []jsonUncheckedKustomization `json:"unchecked,omitempty"`
+	Summary   jsonValidationSummary        `json:"summary"`
 }
 
 // writeValidationJSON writes the full validation report — every resource
-// with its status — as indented JSON.
-func writeValidationJSON(w io.Writer, results []validate.Result) error {
+// with its status, and the Kustomizations left unchecked — as indented
+// JSON.
+func writeValidationJSON(w io.Writer, results []validate.Result, unchecked []uncheckedGroup) error {
 	report := jsonValidationReport{Resources: []jsonValidationResource{}}
+	for _, g := range unchecked {
+		for _, ks := range g.kustomizations {
+			report.Unchecked = append(report.Unchecked, jsonUncheckedKustomization{
+				Kustomization: ks,
+				Source:        g.source,
+				Cause:         g.cause,
+			})
+		}
+	}
 	for _, r := range results {
 		res := jsonValidationResource{
 			Kind:      r.Kind,
@@ -124,8 +146,10 @@ type junitReport struct {
 
 // writeValidationJUnit writes the validation report in JUnit XML: one
 // testcase per resource, failed validation as <failure>, validation
-// errors as <error>, schema-less resources as <skipped>.
-func writeValidationJUnit(w io.Writer, results []validate.Result) error {
+// errors as <error>, schema-less resources as <skipped>, and one skipped
+// testcase per unchecked Kustomization — a partial check must show the
+// gap on the CI timeline, not read as green.
+func writeValidationJUnit(w io.Writer, results []validate.Result, unchecked []uncheckedGroup) error {
 	suite := junitSuite{Name: "fluxview validate"}
 	for _, r := range results {
 		tc := junitCase{Classname: r.Kind, Name: r.Label()}
@@ -148,7 +172,19 @@ func writeValidationJUnit(w io.Writer, results []validate.Result) error {
 		}
 		suite.Cases = append(suite.Cases, tc)
 	}
-	suite.Tests = len(results)
+	uncheckedCases := 0
+	for _, g := range unchecked {
+		for _, ks := range g.kustomizations {
+			suite.Cases = append(suite.Cases, junitCase{
+				Classname: "Kustomization",
+				Name:      "Kustomization " + ks,
+				Skipped:   &junitSkipped{Message: "source not fetched: " + g.source + ": " + g.cause},
+			})
+			suite.Skipped++
+			uncheckedCases++
+		}
+	}
+	suite.Tests = len(results) + uncheckedCases
 
 	report := junitReport{
 		Name:     "fluxview validate",

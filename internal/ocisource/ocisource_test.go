@@ -220,9 +220,14 @@ func TestEnsure_Auth_UnauthorizedHintsDockerConfig(t *testing.T) {
 	noDockerConfigFor(t)
 	reg.PushArtifact(t, "u/private", "v1", ocisourcetest.DefaultLayerMediaType, map[string]string{"cm.yaml": "kind: ConfigMap\n"})
 
+	// 127.0.0.1, not localhost: the credential store's native fallback
+	// (macOS keychain) may hold a "localhost" entry written by other
+	// tools' test logins — the anonymous expectations below must not
+	// depend on the machine's keychain.
+	url := strings.Replace(reg.URL, "localhost", "127.0.0.1", 1)
 	f := NewFetcher(t.TempDir(), time.Hour)
 	defer f.Close()
-	_, err := f.Ensure(context.Background(), ociRepo("oci://"+reg.URL+"/u/private", &flux.OCIRepositoryRef{Tag: "v1"}))
+	_, err := f.Ensure(context.Background(), ociRepo("oci://"+url+"/u/private", &flux.OCIRepositoryRef{Tag: "v1"}))
 	if err == nil {
 		t.Fatal("anonymous pull against an htpasswd registry must fail")
 	}
@@ -610,7 +615,8 @@ func TestEnsure_Auth_SecretRefNamedInHint(t *testing.T) {
 	noDockerConfigFor(t)
 	reg.PushArtifact(t, "u/private", "v1", ocisourcetest.DefaultLayerMediaType, map[string]string{"cm.yaml": "kind: ConfigMap\n"})
 
-	repo := ociRepo("oci://"+reg.URL+"/u/private", &flux.OCIRepositoryRef{Tag: "v1"})
+	url := strings.Replace(reg.URL, "localhost", "127.0.0.1", 1) // see the unauthorized test
+	repo := ociRepo("oci://"+url+"/u/private", &flux.OCIRepositoryRef{Tag: "v1"})
 	repo.Spec.SecretRef = &flux.LocalObjectReference{Name: "regcred"}
 
 	f := NewFetcher(t.TempDir(), time.Hour)
