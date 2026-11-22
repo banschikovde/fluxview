@@ -21,7 +21,7 @@ The repository mount can be read-only (`:ro`): git worktrees for `diff` are writ
 
 ## Keeping caches between runs
 
-The image runs as a fixed non-root user (65532:65532); the caches (Helm charts, kustomize remote resources, build outputs) default to `/home/fluxview/.cache/fluxview/` inside the container and disappear with it — mount or point them elsewhere to keep them between runs:
+The image runs as a fixed non-root user (65532:65532); the caches (Helm charts, kustomize remote resources, build outputs, git clones and OCI artifacts) default to `/home/fluxview/.cache/fluxview/` inside the container and disappear with it — mount or point them elsewhere to keep them between runs:
 
 ```bash
 docker run --rm -v $(pwd):/repo -v fluxview-cache:/home/fluxview/.cache/fluxview \
