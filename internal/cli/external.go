@@ -28,7 +28,7 @@ type gitSourceEnv struct {
 	// sources are still identified (their paths must not resolve against the
 	// local repository), but ensure fails fast instead of cloning. The KS then
 	// follows the ordinary fetch-failure path: warn + skip in build/diff,
-	// gate failure in validate.
+	// warn and leave unchecked in validate.
 	noFetch bool
 }
 
@@ -132,5 +132,5 @@ func describeSource(ks flux.Kustomization) string {
 // run.
 func registerNoGitSourceFetchFlag(cmd *cobra.Command, noFetch *bool) {
 	cmd.Flags().BoolVar(noFetch, "no-git-source-fetch", gitsource.DefaultNoFetch(),
-		"Do not clone external GitRepository sources (no network at all): Kustomizations pointing at them are skipped with a warning, validate fails — for slow or offline networks (env: "+gitsource.EnvNoFetch+")")
+		"Do not clone external GitRepository sources (no network at all): Kustomizations pointing at them are skipped with a warning and left unchecked by validate — for slow or offline networks (env: "+gitsource.EnvNoFetch+")")
 }

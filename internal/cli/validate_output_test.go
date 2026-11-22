@@ -245,6 +245,96 @@ spec:
 	}
 }
 
+// TestRunValidate_OutputJSON_UncheckedOCISource: a Kustomization sourced
+// from an OCIRepository whose path lives inside the artifact keeps the
+// machine-readable run green (exit 0, parseable report) — the unchecked
+// Kustomization is stderr-only today; an "unchecked" report field is a
+// possible follow-up.
+func TestRunValidate_OutputJSON_UncheckedOCISource(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+
+	clusterDir := filepath.Join(repoRoot, "cluster")
+	writeHelper(t, clusterDir, "oci-ks.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: envoy-crds
+  namespace: flux-system
+spec:
+  interval: 24h
+  path: ./gateway-helm/charts/crds/crds
+  prune: false
+  sourceRef:
+    kind: OCIRepository
+    name: envoy-crds
+`)
+	writeHelper(t, clusterDir, "app.yaml", `apiVersion: test.example.com/v1
+kind: Widget
+metadata:
+  name: app-widget
+spec:
+  size: large
+  color: red
+`)
+
+	// A local schema source: without one the validator reports no results
+	// at all, and an empty report could not prove the local tree was
+	// actually checked.
+	schemaDir := filepath.Join(repoRoot, "schemas")
+	if err := os.MkdirAll(schemaDir, 0755); err != nil {
+		t.Fatalf("mkdir schema dir: %v", err)
+	}
+	writeHelper(t, schemaDir, "widget-test-v1.json", `{
+	"type": "object",
+	"properties": {
+		"spec": {"type": "object", "required": ["color"], "properties": {
+			"size": {"type": "string"},
+			"color": {"type": "string"}
+		}}
+	}
+}`)
+
+	var runErr error
+	var stderr string
+	stdout := captureStdout(func() {
+		stderr = captureStderr(func() {
+			runErr = runValidate(context.Background(), &ValidateFlags{
+				Path:                  clusterDir,
+				SchemaDir:             schemaDir,
+				Output:                "json",
+				disableDefaultSchemas: true,
+			})
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("json output must stay green with an unchecked OCI source, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+	var report jsonValidationReport
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("stdout is not a json report: %v\n%s", err, stdout)
+	}
+	if report.Summary.Invalid != 0 {
+		t.Errorf("summary = %+v, want invalid=0\n%s", report.Summary, stdout)
+	}
+	// The local tree must actually be in the report — a green summary on
+	// an empty resource list would also "pass" the check above.
+	var widgetSeen bool
+	for _, r := range report.Resources {
+		if r.Kind == "Widget" && r.Name == "app-widget" {
+			widgetSeen = true
+			if r.Status != string(validate.StatusValid) {
+				t.Errorf("app-widget status = %s, want %s\n%s", r.Status, validate.StatusValid, stdout)
+			}
+		}
+	}
+	if !widgetSeen {
+		t.Errorf("the local Widget app-widget must be in the report, got:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "left unchecked") {
+		t.Errorf("the unchecked Kustomization must be named in stderr, got:\n%s", stderr)
+	}
+}
+
 func TestRunValidate_UnknownOutputFormat(t *testing.T) {
 	err := runValidate(context.Background(), &ValidateFlags{Output: "yaml"})
 	exitErr, ok := err.(*DiffExitError)

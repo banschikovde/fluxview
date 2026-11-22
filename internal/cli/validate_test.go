@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/banschikovde/fluxview/internal/flux"
 	"github.com/banschikovde/fluxview/internal/validate"
 )
 
@@ -379,6 +380,171 @@ spec:
 	}
 	if strings.Contains(stderr, "not found locally") {
 		t.Errorf("suspended KS must not warn about its path, got:\n%s", stderr)
+	}
+}
+
+// TestRunValidate_UnfetchedSourceMissingPath_WarnsAndPasses pins the fix
+// for issue #21: a Kustomization sourced from OCIRepository (or Bucket) —
+// kinds fluxview never fetches — warn-and-skips when its spec.path is
+// absent from the checkout instead of failing the gate. The path lives
+// inside the artifact and Flux reconciles it in-cluster, so the same
+// best-effort contract as an unfetched external GitRepository applies; a
+// local GitRepository source keeps failing the gate (test above).
+func TestRunValidate_UnfetchedSourceMissingPath_WarnsAndPasses(t *testing.T) {
+	for _, kind := range []string{flux.KindOCIRepository, flux.KindBucket} {
+		t.Run(kind, func(t *testing.T) {
+			repoRoot := t.TempDir()
+			gitInit(t, repoRoot)
+
+			clusterDir := filepath.Join(repoRoot, "cluster")
+			writeHelper(t, clusterDir, "ks.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: envoy-crds
+  namespace: flux-system
+spec:
+  interval: 24h
+  path: ./gateway-helm/charts/crds/crds
+  prune: false
+  sourceRef:
+    kind: `+kind+`
+    name: envoy-crds
+`)
+
+			var runErr error
+			stderr := captureStderr(func() {
+				runErr = runValidate(context.Background(), &ValidateFlags{
+					Path:                  clusterDir,
+					disableDefaultSchemas: true,
+				})
+			})
+			if runErr != nil {
+				t.Fatalf("a %s-sourced Kustomization with a path outside the checkout must not fail the gate, got: %v\nstderr:\n%s", kind, runErr, stderr)
+			}
+			if !strings.Contains(stderr, "path ./gateway-helm/charts/crds/crds not found locally (source kind "+kind+" is not fetched externally)") {
+				t.Errorf("expected the per-KS skip warning, got:\n%s", stderr)
+			}
+			if !strings.Contains(stderr, "left unchecked") || !strings.Contains(stderr, "flux-system/envoy-crds") {
+				t.Errorf("the gate summary must name the unchecked Kustomization, got:\n%s", stderr)
+			}
+		})
+	}
+}
+
+// TestRunValidate_UncheckedOCISource_GroupsByCause: several
+// Kustomizations of one never-fetched OCIRepository (here with different
+// paths) share a single cause — the gate summary must fold them into one
+// entry, stating the source once, not one entry per Kustomization.
+func TestRunValidate_UncheckedOCISource_GroupsByCause(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+
+	clusterDir := filepath.Join(repoRoot, "cluster")
+	for _, ks := range []struct{ file, name, path string }{
+		{"envoy-crds.yaml", "envoy-crds", "./gateway-helm/charts/crds/crds"},
+		{"envoy-extra.yaml", "envoy-extra", "./gateway-helm/charts/crds/extra"},
+	} {
+		writeHelper(t, clusterDir, ks.file, `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: `+ks.name+`
+  namespace: flux-system
+spec:
+  interval: 24h
+  path: `+ks.path+`
+  sourceRef:
+    kind: OCIRepository
+    name: envoy
+`)
+	}
+
+	var runErr error
+	stderr := captureStderr(func() {
+		runErr = runValidate(context.Background(), &ValidateFlags{
+			Path:                  clusterDir,
+			disableDefaultSchemas: true,
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("never-fetched OCI sources must not fail the gate, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+
+	var gateLine string
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.Contains(line, "left unchecked") {
+			gateLine = line
+			break
+		}
+	}
+	if gateLine == "" {
+		t.Fatalf("gate summary not found in stderr:\n%s", stderr)
+	}
+	// "flux-system/envoy:" (the source, colon-terminated) must appear
+	// exactly once; the bare prefix also matches both Kustomization names,
+	// hence the colon.
+	if got := strings.Count(gateLine, "flux-system/envoy:"); got != 1 {
+		t.Errorf("the shared cause must be stated exactly once in the gate summary, got %d times: %s", got, gateLine)
+	}
+	for _, name := range []string{"flux-system/envoy-crds", "flux-system/envoy-extra"} {
+		if !strings.Contains(gateLine, name) {
+			t.Errorf("gate summary must name %s, got: %s", name, gateLine)
+		}
+	}
+}
+
+// TestRunValidate_OCISourceLocalPathBuilds: an OCIRepository-sourced
+// Kustomization whose spec.path exists in the checkout builds like any
+// local path — the intended case for a flux push artifact of this very
+// repository (a foreign artifact's same-name directory is different
+// content that cannot be told apart locally; see README).
+func TestRunValidate_OCISourceLocalPathBuilds(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+
+	clusterDir := filepath.Join(repoRoot, "cluster")
+	writeHelper(t, clusterDir, "ks.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: artifact-content
+  namespace: flux-system
+spec:
+  interval: 5m
+  path: ./artifact
+  prune: true
+  sourceRef:
+    kind: OCIRepository
+    name: fleet-artifact
+`)
+
+	artifactDir := filepath.Join(repoRoot, "artifact")
+	writeHelper(t, artifactDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cm.yaml
+`)
+	writeHelper(t, artifactDir, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: artifact-cm
+data:
+  key: value
+`)
+
+	var runErr error
+	stderr := captureStderr(func() {
+		runErr = runValidate(context.Background(), &ValidateFlags{
+			Path:                  clusterDir,
+			disableDefaultSchemas: true,
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("an OCI-sourced Kustomization with a local path must build and validate normally, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+	if !strings.Contains(stderr, "Building flux-system/artifact-content") {
+		t.Errorf("the local path must build like any local Kustomization, got:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "not found locally") || strings.Contains(stderr, "left unchecked") {
+		t.Errorf("no skip warnings expected when the path exists locally, got:\n%s", stderr)
 	}
 }
 
