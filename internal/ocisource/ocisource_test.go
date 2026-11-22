@@ -642,3 +642,36 @@ func TestPickSemverTag_ErrorCapsTagList(t *testing.T) {
 		t.Errorf("tags past the cap must not be listed, got: %v", err)
 	}
 }
+
+func TestFetchSynced_TimeoutRenewsPerAttempt(t *testing.T) {
+	// A registry that accepts the connection and never answers: every
+	// fetch attempt dies on its own timeout. The timeout scope is created
+	// inside the attempt, so a retry after a failed winner starts with the
+	// full budget — two attempts must both fail on the deadline, not the
+	// second on the first one's residue.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	f := NewFetcher(t.TempDir(), time.Hour, WithTimeout(150*time.Millisecond))
+	defer f.Close()
+	repo := ociRepo("oci://"+host+"/u/hang", &flux.OCIRepositoryRef{Digest: "sha256:" + strings.Repeat("ab", 32)})
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		start := time.Now()
+		base := host + "/u/hang"
+		err := f.fetchSynced(context.Background(), base, base, "digest:sha256:"+strings.Repeat("ab", 32), repo, filepath.Join(f.dir, "data", fmt.Sprintf("attempt-%d", attempt)))
+		elapsed := time.Since(start)
+		if err == nil {
+			t.Fatalf("attempt %d: a hung registry must fail", attempt)
+		}
+		if elapsed < 100*time.Millisecond {
+			t.Fatalf("attempt %d: failed too fast (%s) — the timeout did not govern it", attempt, elapsed)
+		}
+		if elapsed > 3*time.Second {
+			t.Fatalf("attempt %d: the timeout must fire promptly, took %s", attempt, elapsed)
+		}
+	}
+}

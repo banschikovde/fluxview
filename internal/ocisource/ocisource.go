@@ -136,8 +136,11 @@ func NewFetcher(cacheDir string, ttl time.Duration, opts ...FetcherOption) *Fetc
 // FetcherOption configures a Fetcher beyond its directory and TTL.
 type FetcherOption func(*Fetcher)
 
-// WithTimeout caps the network part of one artifact fetch (reference
-// resolution + manifest + layer); zero or negative disables the limit.
+// WithTimeout caps each network phase of an artifact fetch — the
+// reference resolution and every fetch attempt (manifest + layer) each
+// get the full budget, so waiting for a concurrent fetch of the same
+// digest never eats into an attempt's own time. Zero or negative
+// disables the limit.
 func WithTimeout(d time.Duration) FetcherOption {
 	return func(f *Fetcher) {
 		if d < 0 {
@@ -192,20 +195,19 @@ func (f *Fetcher) Ensure(ctx context.Context, repo flux.OCIRepository) (string, 
 
 	refSpec := repo.Spec.Ref.RefString()
 
-	// One timeout scope covers this fetch's own network work — reference
-	// resolution, manifest and layer alike (see WithTimeout). It does not
-	// apply to waiting for another in-flight fetch of the same digest:
-	// fetchSynced waits on the raw ctx.
-	netCtx, cancelNet := f.timeoutCtx(ctx)
-	defer cancelNet()
-
-	resolved, resolvedFresh, err := f.resolveRef(netCtx, url, base, repo)
+	// Each network phase gets its own timeout scope (see WithTimeout):
+	// the reference resolution here, and every fetch attempt below — a
+	// retry after a failed concurrent fetch starts with the full budget,
+	// not the residue of the wait.
+	resolveCtx, cancelResolve := f.timeoutCtx(ctx)
+	defer cancelResolve()
+	resolved, resolvedFresh, err := f.resolveRef(resolveCtx, url, base, repo)
 	if err != nil {
 		return "", f.explainTimeout(err)
 	}
 
 	if f == nil || f.dir == "" {
-		dir, err := f.ensureUncached(netCtx, url, base, resolved, repo)
+		dir, err := f.ensureUncached(ctx, url, base, resolved, repo)
 		return dir, f.explainTimeout(err)
 	}
 
@@ -219,7 +221,7 @@ func (f *Fetcher) Ensure(ctx context.Context, repo flux.OCIRepository) (string, 
 		return dir, nil
 	}
 
-	if err := f.fetchSynced(ctx, netCtx, url, base, resolved, repo, dir); err != nil {
+	if err := f.fetchSynced(ctx, url, base, resolved, repo, dir); err != nil {
 		return "", f.explainTimeout(err)
 	}
 	f.rememberPointer(url, refSpec, resolved, resolvedFresh)
@@ -321,7 +323,8 @@ func (f *Fetcher) resolveFloating(ctx context.Context, base string, repo flux.OC
 
 // ensureUncached fetches the artifact once into a private temp directory —
 // the no-cache path, where every Ensure gets its own copy (removed by
-// Close).
+// Close). The fetch runs under its own timeout scope, symmetric to the
+// cached path's per-attempt scope.
 func (f *Fetcher) ensureUncached(ctx context.Context, url, base, resolved string, repo flux.OCIRepository) (string, error) {
 	var parent string
 	if f != nil {
@@ -334,7 +337,9 @@ func (f *Fetcher) ensureUncached(ctx context.Context, url, base, resolved string
 	if err != nil {
 		return "", fmt.Errorf("preparing OCI source fetch: %w", err)
 	}
-	if err := f.fetchInto(ctx, base, resolved, repo, dst); err != nil {
+	netCtx, cancel := f.timeoutCtx(ctx)
+	defer cancel()
+	if err := f.fetchInto(netCtx, base, resolved, repo, dst); err != nil {
 		os.RemoveAll(dst)
 		return "", err
 	}
@@ -344,12 +349,17 @@ func (f *Fetcher) ensureUncached(ctx context.Context, url, base, resolved string
 // fetchSynced fetches the artifact into dir, deduplicating concurrent
 // fetches of the same directory within this process (the
 // content-addressed directory is the dedup key). ctx governs the wait for
-// another in-flight fetch; netCtx (this caller's own timeout scope)
-// governs the network work itself.
-func (f *Fetcher) fetchSynced(ctx, netCtx context.Context, url, base, resolved string, repo flux.OCIRepository, dir string) error {
+// another in-flight fetch; each attempt — the first fetch and a retry
+// after a failed winner alike — creates its own timeout scope, so the
+// wait never eats into the attempt's budget.
+func (f *Fetcher) fetchSynced(ctx context.Context, url, base, resolved string, repo flux.OCIRepository, dir string) error {
 	return f.dedup.Do(ctx, dir,
 		func() bool { return sourcecache.SeedValid(dir, seedFileName) },
-		func() error { return f.fetchAtomic(netCtx, base, resolved, repo, dir) })
+		func() error {
+			netCtx, cancel := f.timeoutCtx(ctx)
+			defer cancel()
+			return f.fetchAtomic(netCtx, base, resolved, repo, dir)
+		})
 }
 
 // fetchAtomic extracts the artifact into a temp directory and publishes it
