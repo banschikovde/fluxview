@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -35,7 +36,9 @@ type authClientBundle struct {
 }
 
 // authClient returns the shared registry client, building it on first use:
-// an oras auth.Client over the default http.Client, with the token cache
+// an oras auth.Client over a dedicated transport (connection-establishing
+// phases capped — a hung registry must not stall a fetch beyond them; the
+// overall per-artifact limit is the Fetcher timeout), with the token cache
 // enabled and credentials read from the Docker config ($DOCKER_CONFIG or
 // ~/.docker/config.json, including credential helpers). An unreadable
 // Docker config degrades to anonymous access — a broken config file must
@@ -53,7 +56,13 @@ func (f *Fetcher) authClient() *auth.Client {
 			credFunc = credentials.Credential(store)
 		}
 		c := &auth.Client{
-			Client:     http.DefaultClient,
+			Client: &http.Client{
+				Transport: &http.Transport{
+					Proxy:                 http.ProxyFromEnvironment,
+					TLSHandshakeTimeout:   30 * time.Second,
+					ResponseHeaderTimeout: 30 * time.Second,
+				},
+			},
 			Credential: credFunc,
 			Cache:      auth.NewCache(),
 		}

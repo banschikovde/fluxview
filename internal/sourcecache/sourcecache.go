@@ -222,10 +222,15 @@ var (
 )
 
 // TTLFromEnv reads a source-cache TTL env (Go duration) with the shared
-// convention: unset → 10 minutes; invalid → one warning line naming the
-// env, then the default; zero is returned as-is (always re-resolve).
+// convention below; default 10 minutes.
 func TTLFromEnv(envName string) time.Duration {
-	const def = 10 * time.Minute
+	return DurationFromEnv(envName, 10*time.Minute)
+}
+
+// DurationFromEnv reads a duration env (Go duration) with the shared
+// convention: unset → def; invalid → one warning line naming the env,
+// then the default; every valid value (including zero) passes through.
+func DurationFromEnv(envName string, def time.Duration) time.Duration {
 	v := os.Getenv(envName)
 	if v == "" {
 		return def

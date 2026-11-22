@@ -41,7 +41,8 @@ func newOCISourceEnv(ksCache kustomizeCacheOptions, noFetch bool) *ociSourceEnv 
 		local:   parseLocalOCISources(os.Getenv(EnvLocalOCISources)),
 	}
 	if !noFetch {
-		e.fetcher = ocisource.NewFetcher(ksCache.ociSourceDir, ksCache.ociSourceTtl)
+		e.fetcher = ocisource.NewFetcher(ksCache.ociSourceDir, ksCache.ociSourceTtl,
+			ocisource.WithTimeout(ksCache.ociSourceTimeout))
 	}
 	return e
 }

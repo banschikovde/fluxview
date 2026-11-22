@@ -65,6 +65,9 @@ type kustomizeCacheOptions struct {
 	gitSourceTtl  time.Duration
 	ociSourceDir  string
 	ociSourceTtl  time.Duration
+	// ociSourceTimeout caps one artifact fetch (resolve + manifest +
+	// layer); registered next to the oci-source cache flags.
+	ociSourceTimeout time.Duration
 }
 
 func (o kustomizeCacheOptions) builderOptions() []kustomize.BuilderOption {
@@ -164,6 +167,8 @@ func registerKustomizeCacheFlags(cmd *cobra.Command, opts *kustomizeCacheOptions
 		gitSourceTtl:  gitsource.DefaultTTL(),
 		ociSourceDir:  ocisource.DefaultCacheDir(),
 		ociSourceTtl:  ocisource.DefaultTTL(),
+
+		ociSourceTimeout: ocisource.DefaultTimeout(),
 	}
 	cmd.Flags().Var(cachedir.NewFlag(&opts.remoteDir), "remote-cache-dir",
 		"Cache directory for remote resources referenced by kustomizations; \"disabled\" disables (env: FLUXVIEW_REMOTE_CACHE_DIR)")
@@ -183,6 +188,8 @@ func registerKustomizeCacheFlags(cmd *cobra.Command, opts *kustomizeCacheOptions
 		"Cache directory for fetched OCIRepository artifacts; \"disabled\" disables reuse (env: FLUXVIEW_OCI_SOURCE_CACHE_DIR)")
 	cmd.Flags().DurationVar(&opts.ociSourceTtl, "oci-source-cache-ttl", ocisource.DefaultTTL(),
 		"How long floating OCI artifact resolutions (tag/semver/latest to digest) stay fresh; digest-pinned artifacts never expire; 0 always re-resolves (env: FLUXVIEW_OCI_SOURCE_CACHE_TTL)")
+	cmd.Flags().DurationVar(&opts.ociSourceTimeout, "oci-source-timeout", ocisource.DefaultTimeout(),
+		"Time limit for fetching one OCIRepository artifact (reference resolution + manifest + layer); a hung registry fails instead of stalling the run; 0 = no limit (env: FLUXVIEW_OCI_SOURCE_TIMEOUT)")
 }
 
 // registerGitSourceAuthFlags registers the external git source auth flags

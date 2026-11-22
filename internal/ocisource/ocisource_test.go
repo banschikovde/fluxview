@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -575,4 +576,31 @@ func tarGzWithLyingHeader(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return buf.Bytes()
+}
+
+func TestEnsure_TimeoutFailsPromptly(t *testing.T) {
+	// A registry that accepts the connection and never answers.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	f := NewFetcher(t.TempDir(), time.Hour, WithTimeout(200*time.Millisecond))
+	defer f.Close()
+
+	start := time.Now()
+	_, err := f.Ensure(context.Background(), ociRepo("oci://"+host+"/u/hang", &flux.OCIRepositoryRef{Tag: "v1"}))
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("a hung registry must fail the fetch")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("the timeout must fire promptly, took %s", elapsed)
+	}
+	for _, want := range []string{EnvTimeout, "--oci-source-timeout"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the timeout error must mention %q, got: %v", want, err)
+		}
+	}
 }

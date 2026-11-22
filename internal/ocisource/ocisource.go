@@ -20,6 +20,7 @@ package ocisource
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,6 +56,18 @@ func DefaultTTL() time.Duration {
 	return sourcecache.TTLFromEnv("FLUXVIEW_OCI_SOURCE_CACHE_TTL")
 }
 
+// DefaultTimeout returns the time limit for fetching one artifact
+// (reference resolution + manifest + layer over the network): env
+// FLUXVIEW_OCI_SOURCE_TIMEOUT (Go duration), else 5 minutes. Zero means
+// no limit, for dead-slow links. Invalid values warn once and fall back
+// to the default.
+func DefaultTimeout() time.Duration {
+	return sourcecache.DurationFromEnv(EnvTimeout, 5*time.Minute)
+}
+
+// EnvTimeout caps one artifact fetch (resolve + manifest + layer).
+const EnvTimeout = "FLUXVIEW_OCI_SOURCE_TIMEOUT"
+
 // EnvNoFetch turns OCI artifact fetching off for the run: no registry
 // requests at all — Kustomizations pointing at an OCIRepository are
 // resolved locally (the pre-1.9 behavior). The escape hatch for offline
@@ -80,6 +93,11 @@ type Fetcher struct {
 	// Zero always re-resolves. Digest-pinned refs ignore it.
 	ttl time.Duration
 
+	// timeout caps the network part of one artifact fetch; zero means no
+	// limit. It never applies to waiting for another in-flight fetch of
+	// the same digest.
+	timeout time.Duration
+
 	// temp is the base directory for cache-disabled fetches, created
 	// lazily and removed by Close.
 	temp sourcecache.TempBase
@@ -97,7 +115,7 @@ type Fetcher struct {
 // NewFetcher creates a Fetcher over the given cache directory and TTL.
 // A dir of "disabled" (or empty) disables artifact reuse.
 // A negative ttl is normalized to zero (always re-resolve floating refs).
-func NewFetcher(cacheDir string, ttl time.Duration) *Fetcher {
+func NewFetcher(cacheDir string, ttl time.Duration, opts ...FetcherOption) *Fetcher {
 	f := &Fetcher{
 		dedup: sourcecache.NewDedup(),
 	}
@@ -108,7 +126,24 @@ func NewFetcher(cacheDir string, ttl time.Duration) *Fetcher {
 		ttl = 0
 	}
 	f.ttl = ttl
+	for _, opt := range opts {
+		opt(f)
+	}
 	return f
+}
+
+// FetcherOption configures a Fetcher beyond its directory and TTL.
+type FetcherOption func(*Fetcher)
+
+// WithTimeout caps the network part of one artifact fetch (reference
+// resolution + manifest + layer); zero or negative disables the limit.
+func WithTimeout(d time.Duration) FetcherOption {
+	return func(f *Fetcher) {
+		if d < 0 {
+			d = 0
+		}
+		f.timeout = d
+	}
 }
 
 // Close removes the temporary artifact directories made while the cache
@@ -155,30 +190,56 @@ func (f *Fetcher) Ensure(ctx context.Context, repo flux.OCIRepository) (string, 
 
 	refSpec := repo.Spec.Ref.RefString()
 
-	resolved, resolvedFresh, err := f.resolveRef(ctx, url, base, repo)
+	// One timeout scope covers this fetch's own network work — reference
+	// resolution, manifest and layer alike (see WithTimeout). It does not
+	// apply to waiting for another in-flight fetch of the same digest:
+	// fetchSynced waits on the raw ctx.
+	netCtx, cancelNet := f.timeoutCtx(ctx)
+	defer cancelNet()
+
+	resolved, resolvedFresh, err := f.resolveRef(netCtx, url, base, repo)
 	if err != nil {
-		return "", err
+		return "", f.explainTimeout(err)
+	}
+
+	if f == nil || f.dir == "" {
+		dir, err := f.ensureUncached(netCtx, url, base, resolved, repo)
+		return dir, f.explainTimeout(err)
 	}
 
 	// The data key includes the layer selector's mediaType: two
 	// OCIRepositories may share one artifact but extract different layers.
 	// operation is excluded — extract and copy select identically (the
 	// kustomize pipeline always untars).
-	if f == nil || f.dir == "" {
-		return f.ensureUncached(ctx, url, base, resolved, repo)
-	}
-
 	dir := filepath.Join(f.dir, "data", dataKey(url, resolved, repo.Spec.LayerSelector))
 	if sourcecache.SeedValid(dir, seedFileName) {
 		f.rememberPointer(url, refSpec, resolved, resolvedFresh)
 		return dir, nil
 	}
 
-	if err := f.fetchSynced(ctx, url, base, resolved, repo, dir); err != nil {
-		return "", err
+	if err := f.fetchSynced(ctx, netCtx, url, base, resolved, repo, dir); err != nil {
+		return "", f.explainTimeout(err)
 	}
 	f.rememberPointer(url, refSpec, resolved, resolvedFresh)
 	return dir, nil
+}
+
+// timeoutCtx applies the fetch timeout to ctx; without a configured
+// timeout (zero) it passes ctx through.
+func (f *Fetcher) timeoutCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	if f == nil || f.timeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, f.timeout)
+}
+
+// explainTimeout names the timeout knobs when a fetch died on its
+// deadline, so a hung registry reads as configuration, not a mystery.
+func (f *Fetcher) explainTimeout(err error) error {
+	if err == nil || f == nil || f.timeout <= 0 || !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("%v (exceeded the artifact fetch timeout; raise it via --oci-source-timeout or %s, or set 0 to disable the limit)", err, EnvTimeout)
 }
 
 // validateBase rejects tag or digest inside the repository URL — Flux
@@ -278,11 +339,13 @@ func (f *Fetcher) ensureUncached(ctx context.Context, url, base, resolved string
 
 // fetchSynced fetches the artifact into dir, deduplicating concurrent
 // fetches of the same directory within this process (the
-// content-addressed directory is the dedup key).
-func (f *Fetcher) fetchSynced(ctx context.Context, url, base, resolved string, repo flux.OCIRepository, dir string) error {
+// content-addressed directory is the dedup key). ctx governs the wait for
+// another in-flight fetch; netCtx (this caller's own timeout scope)
+// governs the network work itself.
+func (f *Fetcher) fetchSynced(ctx, netCtx context.Context, url, base, resolved string, repo flux.OCIRepository, dir string) error {
 	return f.dedup.Do(ctx, dir,
 		func() bool { return sourcecache.SeedValid(dir, seedFileName) },
-		func() error { return f.fetchAtomic(ctx, base, resolved, repo, dir) })
+		func() error { return f.fetchAtomic(netCtx, base, resolved, repo, dir) })
 }
 
 // fetchAtomic extracts the artifact into a temp directory and publishes it

@@ -22,6 +22,7 @@ fluxview keeps seven independent on-disk caches, one per kind of expensive work:
 | `--oci-source-cache-dir` | build, diff, validate, inventory | Cache directory for extracted OCIRepository artifacts; `disabled` disables reuse (per-run temp fetches) (default: `$FLUXVIEW_OCI_SOURCE_CACHE_DIR`, else `~/.cache/fluxview/oci-sources`) |
 | `--oci-source-cache-ttl` | build, diff, validate, inventory | How long floating OCI artifact resolutions (tag/semver/latest → digest) stay fresh; digest-pinned artifacts never expire (default: `10m`, env: `FLUXVIEW_OCI_SOURCE_CACHE_TTL`) |
 | `--no-oci-source-fetch` | build, diff, validate, inventory | Do not fetch OCIRepository artifacts — no network at all; their Kustomizations resolve `spec.path` locally, a locally absent path warn-and-skips (default: `false`, env: `FLUXVIEW_NO_OCI_SOURCE_FETCH`) |
+| `--oci-source-timeout` | build, diff, validate, inventory | Time limit for fetching one OCIRepository artifact (resolution + manifest + layer); a hung registry fails instead of stalling the run; `0` = no limit (default: `5m`, env: `FLUXVIEW_OCI_SOURCE_TIMEOUT`) |
 | `--schema-cache-dir` | validate | Cache directory for schemas downloaded from the default registry, version-pinned; `disabled` disables reuse (per-run temp dir) (default: `$FLUXVIEW_SCHEMA_CACHE_DIR`, else `~/.cache/fluxview/schemas`) |
 | `--crd-schema-cache-dir` | validate | Cache directory for schemas converted from CRD YAML manifests; `disabled` disables reuse (reconverted per run) (default: `$FLUXVIEW_CRD_SCHEMA_CACHE_DIR`, else `~/.cache/fluxview/crd-schemas`) |
 
@@ -126,6 +127,7 @@ Flux Kustomizations whose `sourceRef` names an `OCIRepository` have their `spec.
 - **Failure semantics**: a failed fetch (network, auth, provider) warns in every command — including the hr subcommands — and validate leaves the Kustomization unchecked (exit 0). A path missing **inside** a fetched artifact is a configuration error like a missing path in an external clone: warning everywhere, validate exit 2.
 - **`disabled` disables reuse, not fetching**: `--oci-source-cache-dir=disabled` still fetches — every run pulls into a private temp directory, removed when the command exits.
 - **`--no-oci-source-fetch` disables fetching itself**: no registry requests at all — the pre-fetch behavior: paths resolve locally, a locally absent path warn-and-skips (silently in the hr subcommands). The env var `FLUXVIEW_NO_OCI_SOURCE_FETCH=1` does the same for every command.
+- **Timeouts**: `--oci-source-timeout` (env `FLUXVIEW_OCI_SOURCE_TIMEOUT`, default `5m`, `0` = no limit) caps one artifact fetch — reference resolution, manifest and layer together, never the wait for another in-flight fetch of the same digest; connection phases are additionally capped at `30s` each. A hung registry fails with an error naming the flag instead of stalling the run until Ctrl-C.
 - **Diff sides**: both sides of a diff share one cache, so a digest-pinned (or TTL-fresh) artifact is byte-identical across the comparison.
 - **Cleanup**: no eviction — clear any time with `rm -rf ~/.cache/fluxview/oci-sources`; everything is re-fetchable.
 
