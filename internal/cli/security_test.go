@@ -35,10 +35,15 @@ func TestResolveSourcePath_SymlinkLoopFailsClosed(t *testing.T) {
 
 func TestResolveSourcePath_EmptyPath(t *testing.T) {
 	repoRoot := t.TempDir()
-	ks := flux.Kustomization{Spec: flux.KustomizationSpec{Path: ""}}
-	got := resolveSourcePath(repoRoot, ks)
-	if got != "" {
-		t.Errorf("expected empty string for empty spec.path, got %q", got)
+	// Empty kind reads as local: an absent spec.path is the source root.
+	local := flux.Kustomization{Spec: flux.KustomizationSpec{Path: ""}}
+	if got := resolveSourcePath(repoRoot, local); got != repoRoot {
+		t.Errorf("empty spec.path on a local source must resolve to the repo root, got %q", got)
+	}
+	// A never-root kind keeps the empty resolution.
+	bucket := flux.Kustomization{Spec: flux.KustomizationSpec{Path: "", SourceRef: flux.KustomizationSourceRef{Kind: flux.KindBucket}}}
+	if got := resolveSourcePath(repoRoot, bucket); got != "" {
+		t.Errorf("empty spec.path on a Bucket source must stay empty, got %q", got)
 	}
 }
 
@@ -117,7 +122,8 @@ func TestCollectKustomizationPaths_IncludesValidPaths(t *testing.T) {
 	kustomizations := []flux.Kustomization{
 		{Metadata: flux.ObjectMeta{Name: "test-1"}, Spec: flux.KustomizationSpec{Path: "apps"}},
 		{Metadata: flux.ObjectMeta{Name: "test-2"}, Spec: flux.KustomizationSpec{Path: "monitoring"}},
-		{Metadata: flux.ObjectMeta{Name: "test-3"}, Spec: flux.KustomizationSpec{Path: ""}},
+		// Empty path on a Bucket source: never a root, contributes nothing.
+		{Metadata: flux.ObjectMeta{Name: "test-3"}, Spec: flux.KustomizationSpec{Path: "", SourceRef: flux.KustomizationSourceRef{Kind: flux.KindBucket}}},
 	}
 	paths := collectKustomizationPaths(repoRoot, kustomizations)
 	if len(paths) != 2 {

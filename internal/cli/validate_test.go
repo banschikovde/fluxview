@@ -416,12 +416,13 @@ spec:
 				runErr = runValidate(context.Background(), &ValidateFlags{
 					Path:                  clusterDir,
 					disableDefaultSchemas: true,
+					NoOCISourceFetch:      true, // the OCI part pins the kill-switch path; Bucket is never fetched
 				})
 			})
 			if runErr != nil {
 				t.Fatalf("a %s-sourced Kustomization with a path outside the checkout must not fail the gate, got: %v\nstderr:\n%s", kind, runErr, stderr)
 			}
-			if !strings.Contains(stderr, "path ./gateway-helm/charts/crds/crds not found locally (source kind "+kind+" is not fetched externally)") {
+			if !strings.Contains(stderr, "path ./gateway-helm/charts/crds/crds not found locally (source kind "+kind+" is not fetched)") {
 				t.Errorf("expected the per-KS skip warning, got:\n%s", stderr)
 			}
 			if !strings.Contains(stderr, "left unchecked") || !strings.Contains(stderr, "flux-system/envoy-crds") {

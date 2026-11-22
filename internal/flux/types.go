@@ -208,6 +208,36 @@ type OCIRepositorySpec struct {
 	URL      string            `yaml:"url"`
 	Ref      *OCIRepositoryRef `yaml:"ref,omitempty"`
 	Interval any               `yaml:"interval,omitempty"`
+	// LayerSelector picks the artifact layer to extract: without it the
+	// first layer is used, with mediaType the first matching layer.
+	LayerSelector *OCILayerSelector `yaml:"layerSelector,omitempty"`
+	// Insecure allows plain HTTP to the registry (spec.insecure).
+	Insecure bool `yaml:"insecure,omitempty"`
+	// Provider is the OIDC provider; only "generic" (the default) works
+	// outside a cluster — aws/azure/gcp need workload identity fluxview
+	// does not have.
+	Provider string `yaml:"provider,omitempty"`
+	// SecretRef names a dockerconfigjson Secret in the cluster; recognized
+	// so it can be reported as unsupported (fluxview never reads cluster
+	// secrets).
+	SecretRef *LocalObjectReference `yaml:"secretRef,omitempty"`
+}
+
+// OCILayerSelector specifies which layer of an OCI artifact to extract
+// (Flux source-controller semantics): no mediaType — the first layer;
+// mediaType — the first layer matching it. The selected layer must be
+// tar+gzip; operation copy keeps the tarball as stored in the artifact,
+// which for Kustomization reconciliation is still the same extracted
+// content — kustomize-controller untars the artifact either way.
+type OCILayerSelector struct {
+	MediaType string `yaml:"mediaType,omitempty"`
+	Operation string `yaml:"operation,omitempty"`
+}
+
+// LocalObjectReference is a same-namespace name reference (Flux
+// meta.LocalObjectReference shape).
+type LocalObjectReference struct {
+	Name string `yaml:"name,omitempty"`
 }
 
 // OCIRepositoryRef specifies which artifact version to pull.
@@ -216,6 +246,31 @@ type OCIRepositoryRef struct {
 	Tag    string `yaml:"tag,omitempty"`
 	Semver string `yaml:"semver,omitempty"`
 	Digest string `yaml:"digest,omitempty"`
+}
+
+// RefString renders the ref as a cache-key fragment: "digest:<d>",
+// "semver:<range>", "tag:<t>" or "" (the literal latest tag).
+func (r *OCIRepositoryRef) RefString() string {
+	if r == nil {
+		return ""
+	}
+	if r.Digest != "" {
+		return "digest:" + r.Digest
+	}
+	if r.Semver != "" {
+		return "semver:" + r.Semver
+	}
+	if r.Tag != "" {
+		return "tag:" + r.Tag
+	}
+	return ""
+}
+
+// IsPinned reports whether the ref resolves without the network: only a
+// digest is immutable in a registry — tags (and semver ranges over them)
+// are mutable and always re-resolved subject to the TTL.
+func (r *OCIRepositoryRef) IsPinned() bool {
+	return r != nil && r.Digest != ""
 }
 
 // ResolveVersion returns the chart version to use for this OCIRepository.

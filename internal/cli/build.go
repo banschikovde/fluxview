@@ -40,6 +40,9 @@ type BuildFlags struct {
 	// NoGitSourceFetch disables cloning external GitRepository sources
 	// (--no-git-source-fetch): the network kill switch for slow links.
 	NoGitSourceFetch bool
+	// NoOCISourceFetch disables fetching OCIRepository artifacts
+	// (--no-oci-source-fetch).
+	NoOCISourceFetch bool
 }
 
 func newBuildCmd() *cobra.Command {
@@ -80,6 +83,7 @@ Examples:
 	registerKustomizeCacheFlags(cmd, &flags.KsCache)
 	registerGitSourceAuthFlags(cmd, &flags.GitSourceSSHKnownHosts, &flags.GitSourceSSHAcceptNew)
 	registerNoGitSourceFetchFlag(cmd, &flags.NoGitSourceFetch)
+	registerNoOCISourceFetchFlag(cmd, &flags.NoOCISourceFetch)
 
 	return cmd
 }
@@ -162,15 +166,15 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		}
 	}
 
-	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache, flags.NoGitSourceFetch)
-	defer gitEnv.Close()
+	sources := newSourceEnvs(ctx, repoRoot, ksCache, flags.NoGitSourceFetch, flags.NoOCISourceFetch)
+	defer sources.Close()
 	output, err := buildKSContent(ctx, &ksBuildEnv{
 		scans:       scans,
 		builder:     builder,
 		repoRoot:    repoRoot,
 		clusterPath: clusterPath,
 		cache:       buildCache,
-		gitSources:  gitEnv,
+		sources:     sources,
 	}, kustomizations, substitutionSources{configMaps: configMaps, secrets: secrets})
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
@@ -213,13 +217,13 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	}
 
 	ksCache := flags.KsCache
-	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache, flags.NoGitSourceFetch)
-	defer gitEnv.Close()
+	sources := newSourceEnvs(ctx, repoRoot, ksCache, flags.NoGitSourceFetch, flags.NoOCISourceFetch)
+	defer sources.Close()
 	output, err := buildHRInflation(ctx, &hrInflationEnv{
-		scans:      newScanCache(),
-		helmCache:  helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout, kubeVersion: flags.KubernetesVersion},
-		ksCache:    ksCache,
-		gitSources: gitEnv,
+		scans:     newScanCache(),
+		helmCache: helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout, kubeVersion: flags.KubernetesVersion},
+		ksCache:   ksCache,
+		sources:   sources,
 	}, clusterPath, repoRoot, name, flags.Namespace, false)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
@@ -354,11 +358,11 @@ func (c buildCache) failedDirs() []string {
 // --- Path resolution ---
 
 func resolveSourcePath(repoRoot string, ks flux.Kustomization) string {
-	if ks.Spec.Path != "" {
-		resolved, err := securejoin.SecureJoin(repoRoot, ks.Spec.Path)
+	if p := effectiveKSPath(ks); p != "" {
+		resolved, err := securejoin.SecureJoin(repoRoot, p)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: cannot safely resolve path %s for %s/%s: %v, skipping\n",
-				ks.Spec.Path, ks.Metadata.Namespace, ks.Metadata.Name, err)
+				p, ks.Metadata.Namespace, ks.Metadata.Name, err)
 			return ""
 		}
 		return resolved
@@ -369,11 +373,11 @@ func resolveSourcePath(repoRoot string, ks flux.Kustomization) string {
 func collectKustomizationPaths(repoRoot string, kustomizations []flux.Kustomization) map[string]bool {
 	paths := make(map[string]bool)
 	for _, ks := range kustomizations {
-		if ks.Spec.Path != "" {
-			resolved, err := securejoin.SecureJoin(repoRoot, ks.Spec.Path)
+		if p := effectiveKSPath(ks); p != "" {
+			resolved, err := securejoin.SecureJoin(repoRoot, p)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: cannot safely resolve path %s for %s/%s: %v, excluding from overlay builds\n",
-					ks.Spec.Path, ks.Metadata.Namespace, ks.Metadata.Name, err)
+					p, ks.Metadata.Namespace, ks.Metadata.Name, err)
 				continue
 			}
 			paths[resolved] = true

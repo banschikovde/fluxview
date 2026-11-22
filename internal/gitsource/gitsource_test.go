@@ -18,6 +18,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport"
 
 	"github.com/banschikovde/fluxview/internal/flux"
+	"github.com/banschikovde/fluxview/internal/sourcecache"
 )
 
 // fixtureRepo is a local git repository used as a fetch upstream. Commits
@@ -286,7 +287,7 @@ func TestEnsure_BrokenSeedIsRepaired(t *testing.T) {
 	if fixed != dir {
 		t.Errorf("repaired clone must reuse the same key dir: %q vs %q", fixed, dir)
 	}
-	if !seedValid(dir) {
+	if !sourcecache.SeedValid(dir, ".fluxview-source.json") {
 		t.Error("seed must be valid after the repair re-clone")
 	}
 }
@@ -303,8 +304,8 @@ func TestEnsure_MissingSeedFileReclones(t *testing.T) {
 	}
 
 	again := mustEnsure(t, f, up.url(), &flux.GitRepositoryRef{Tag: "v1.0.0"})
-	if again != dir || !seedValid(dir) {
-		t.Errorf("clone with a missing seed must be re-created in place: %q, seedValid=%v", again, seedValid(dir))
+	if again != dir || !sourcecache.SeedValid(dir, ".fluxview-source.json") {
+		t.Errorf("clone with a missing seed must be re-created in place: %q", again)
 	}
 }
 

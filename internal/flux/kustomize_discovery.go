@@ -381,6 +381,15 @@ func ParseGitRepositoriesFromBytes(data []byte) []GitRepository {
 	})
 }
 
+// ParseOCIRepositoriesFromBytes extracts OCIRepository manifests from a
+// combined build output — recursively discovered Kustomizations may point
+// their sourceRef at them.
+func ParseOCIRepositoriesFromBytes(data []byte) []OCIRepository {
+	return parseResourcesFromBytes[OCIRepository](data, func(kind, api string) bool {
+		return kind == KindOCIRepository && isSourceAPI(api)
+	})
+}
+
 // HasKustomizationsFromBytes reports whether data holds at least one Flux
 // Kustomization document that fully decodes. It is the presence-check
 // counterpart of ParseKustomizationsFromBytes: it stops at the first match
