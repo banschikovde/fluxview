@@ -14,6 +14,7 @@ import (
 	"helm.sh/helm/v4/pkg/repo/v1/repotest"
 
 	"github.com/banschikovde/fluxview/internal/flux"
+	"github.com/banschikovde/fluxview/internal/ocisource/ocisourcetest"
 )
 
 // writeTgzChartAt (shared with inflater_test.go) writes the archive; the OCI
@@ -33,6 +34,15 @@ type ociTestEnv struct {
 // would fail with 401.
 func newOCITestEnv(t *testing.T) *ociTestEnv {
 	t.Helper()
+	// Isolated credential stores first: repotest's login below would
+	// otherwise write into the machine's native credential store (the
+	// macOS keychain) — its fresh credentials file counts as
+	// "unconfigured", which is exactly when oras detects the native
+	// store. With an isolated, configured config the login lands in a
+	// temp file, and the inflater's own anonymous pulls can never read
+	// machine credentials either.
+	ocisourcetest.IsolateCredentialStores(t)
+
 	dir := t.TempDir()
 	writeTgzChartAt(t, filepath.Join(dir, "oci-dependent-chart-0.1.0.tgz"), "oci-dependent-chart", map[string]string{
 		"Chart.yaml":  "apiVersion: v2\nname: oci-dependent-chart\nversion: 0.1.0\n",
@@ -44,6 +54,12 @@ func newOCITestEnv(t *testing.T) *ociTestEnv {
 	srv, err := repotest.NewOCIServer(t, dir)
 	if err != nil {
 		t.Fatalf("NewOCIServer: %v", err)
+	}
+	// repotest's own client uses <srv.Dir>/config.json as its credentials
+	// file; pre-seed it as configured so the login put stays plaintext in
+	// the temp file instead of native.
+	if err := os.WriteFile(filepath.Join(srv.Dir, "config.json"), []byte(`{"auths": {"fluxview-test.invalid": {}}}`+"\n"), 0o600); err != nil {
+		t.Fatalf("seeding repotest credentials file: %v", err)
 	}
 	res := srv.RunWithReturn(t)
 	return &ociTestEnv{

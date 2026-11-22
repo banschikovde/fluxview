@@ -37,7 +37,7 @@ func TestWriteValidationText(t *testing.T) {
 
 func TestWriteValidationJSON(t *testing.T) {
 	var buf bytes.Buffer
-	if err := writeValidationJSON(&buf, rendererFixtures()); err != nil {
+	if err := writeValidationJSON(&buf, rendererFixtures(), nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -60,11 +60,52 @@ func TestWriteValidationJSON(t *testing.T) {
 	if report.Resources[1].Errors[0] != "spec.color: color is required" {
 		t.Errorf("invalid resource errors = %v", report.Resources[1].Errors)
 	}
+	// A fully checked run carries no "unchecked" key at all.
+	if report.Unchecked != nil {
+		t.Errorf("unchecked = %+v, want none", report.Unchecked)
+	}
+	if strings.Contains(buf.String(), "unchecked") {
+		t.Errorf("a fully checked run must not emit the unchecked field:\n%s", buf.String())
+	}
+}
+
+func TestWriteValidationJSON_Unchecked(t *testing.T) {
+	unchecked := []uncheckedGroup{
+		{kustomizations: []string{"flux-system/envoy-crds", "flux-system/envoy-extra"}, source: "OCIRepository flux-system/envoy", cause: "source kind OCIRepository is not fetched"},
+		{kustomizations: []string{"kyverno/kyverno-crds"}, source: "GitRepository kyverno/kyverno", cause: "disabled by --no-git-source-fetch"},
+	}
+	var buf bytes.Buffer
+	if err := writeValidationJSON(&buf, rendererFixtures(), unchecked); err != nil {
+		t.Fatal(err)
+	}
+
+	var report jsonValidationReport
+	if err := json.Unmarshal(buf.Bytes(), &report); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, buf.String())
+	}
+	if len(report.Unchecked) != 3 {
+		t.Fatalf("unchecked = %d entries, want 3:\n%s", len(report.Unchecked), buf.String())
+	}
+	want := jsonUncheckedKustomization{
+		Kustomization: "flux-system/envoy-crds",
+		Source:        "OCIRepository flux-system/envoy",
+		Cause:         "source kind OCIRepository is not fetched",
+	}
+	if report.Unchecked[0] != want {
+		t.Errorf("first unchecked entry = %+v, want %+v", report.Unchecked[0], want)
+	}
+	if report.Unchecked[1].Kustomization != "flux-system/envoy-extra" || report.Unchecked[2].Kustomization != "kyverno/kyverno-crds" {
+		t.Errorf("group order not preserved: %+v", report.Unchecked)
+	}
+	// The summary stays about resources.
+	if report.Summary != (jsonValidationSummary{Valid: 1, Skipped: 1, Invalid: 1, Errors: 1}) {
+		t.Errorf("summary = %+v — unchecked entries must not touch resource counts", report.Summary)
+	}
 }
 
 func TestWriteValidationJSON_EmptyRun(t *testing.T) {
 	var buf bytes.Buffer
-	if err := writeValidationJSON(&buf, nil); err != nil {
+	if err := writeValidationJSON(&buf, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), `"resources": []`) {
@@ -95,7 +136,7 @@ type parsedJUnit struct {
 
 func TestWriteValidationJUnit(t *testing.T) {
 	var buf bytes.Buffer
-	if err := writeValidationJUnit(&buf, rendererFixtures()); err != nil {
+	if err := writeValidationJUnit(&buf, rendererFixtures(), nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -247,9 +288,9 @@ spec:
 
 // TestRunValidate_OutputJSON_UncheckedOCISource: a Kustomization sourced
 // from an OCIRepository whose path lives inside the artifact keeps the
-// machine-readable run green (exit 0, parseable report) — the unchecked
-// Kustomization is stderr-only today; an "unchecked" report field is a
-// possible follow-up.
+// run green (exit 0) but must not read as fully checked — the unchecked
+// Kustomization is carried in the report's "unchecked" array (#24) and
+// named in the stderr warning.
 func TestRunValidate_OutputJSON_UncheckedOCISource(t *testing.T) {
 	repoRoot := t.TempDir()
 	gitInit(t, repoRoot)
@@ -333,6 +374,101 @@ spec:
 	if !strings.Contains(stderr, "left unchecked") {
 		t.Errorf("the unchecked Kustomization must be named in stderr, got:\n%s", stderr)
 	}
+
+	// The machine-readable report carries the gap: one unchecked entry
+	// naming the Kustomization and its source. The fixture holds no
+	// OCIRepository manifest, so the cause is the missing object (#27).
+	if len(report.Unchecked) != 1 {
+		t.Fatalf("unchecked = %d entries, want 1:\n%s", len(report.Unchecked), stdout)
+	}
+	entry := report.Unchecked[0]
+	if entry.Kustomization != "flux-system/envoy-crds" ||
+		entry.Source != "OCIRepository flux-system/envoy-crds" ||
+		!strings.Contains(entry.Cause, "not found in the repository") {
+		t.Errorf("unchecked entry = %+v", entry)
+	}
+}
+
+// TestRunValidate_OutputJUNIT_UncheckedOCISource: the junit timeline
+// shows the gap as a skipped testcase instead of reading green (#24).
+func TestRunValidate_OutputJUNIT_UncheckedOCISource(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+
+	clusterDir := filepath.Join(repoRoot, "cluster")
+	writeHelper(t, clusterDir, "oci-ks.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: envoy-crds
+  namespace: flux-system
+spec:
+  interval: 24h
+  path: ./gateway-helm/charts/crds/crds
+  prune: false
+  sourceRef:
+    kind: OCIRepository
+    name: envoy-crds
+`)
+	writeHelper(t, clusterDir, "app.yaml", `apiVersion: test.example.com/v1
+kind: Widget
+metadata:
+  name: app-widget
+spec:
+  size: large
+  color: red
+`)
+
+	schemaDir := filepath.Join(repoRoot, "schemas")
+	if err := os.MkdirAll(schemaDir, 0755); err != nil {
+		t.Fatalf("mkdir schema dir: %v", err)
+	}
+	writeHelper(t, schemaDir, "widget-test-v1.json", `{
+	"type": "object",
+	"properties": {
+		"spec": {"type": "object", "required": ["color"], "properties": {
+			"size": {"type": "string"},
+			"color": {"type": "string"}
+		}}
+	}
+}`)
+
+	var runErr error
+	var stderr string
+	stdout := captureStdout(func() {
+		stderr = captureStderr(func() {
+			runErr = runValidate(context.Background(), &ValidateFlags{
+				Path:                  clusterDir,
+				SchemaDir:             schemaDir,
+				Output:                "junit",
+				disableDefaultSchemas: true,
+			})
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("junit output must stay green with an unchecked OCI source, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+
+	var report parsedJUnit
+	if err := xml.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("stdout is not junit xml: %v\n%s", err, stdout)
+	}
+	if report.Failures != 0 || report.Errors != 0 {
+		t.Errorf("failures = %d, errors = %d, want 0/0\n%s", report.Failures, report.Errors, stdout)
+	}
+	var uncheckedSeen bool
+	for _, suite := range report.Suites {
+		for _, tc := range suite.Cases {
+			if tc.Name == "Kustomization flux-system/envoy-crds" {
+				uncheckedSeen = true
+				if tc.Skipped == nil {
+					t.Errorf("the unchecked Kustomization must be a skipped testcase:\n%s", stdout)
+				}
+			}
+		}
+	}
+	if !uncheckedSeen {
+		t.Errorf("the unchecked Kustomization must appear in the junit report:\n%s", stdout)
+	}
 }
 
 func TestRunValidate_UnknownOutputFormat(t *testing.T) {
@@ -343,5 +479,38 @@ func TestRunValidate_UnknownOutputFormat(t *testing.T) {
 	}
 	if exitErr.ExitCode != ExitCodeError {
 		t.Errorf("exit code = %d, want %d (ExitCodeError)", exitErr.ExitCode, ExitCodeError)
+	}
+}
+
+func TestWriteValidationJUnit_Unchecked(t *testing.T) {
+	unchecked := []uncheckedGroup{
+		{kustomizations: []string{"flux-system/envoy-crds"}, source: "OCIRepository flux-system/envoy", cause: "source kind OCIRepository is not fetched"},
+	}
+	var buf bytes.Buffer
+	if err := writeValidationJUnit(&buf, rendererFixtures(), unchecked); err != nil {
+		t.Fatal(err)
+	}
+
+	var report parsedJUnit
+	if err := xml.Unmarshal(buf.Bytes(), &report); err != nil {
+		t.Fatalf("output is not valid XML: %v\n%s", err, buf.String())
+	}
+	// 4 resources + 1 unchecked Kustomization.
+	if report.Tests != 5 || report.Skipped != 2 {
+		t.Errorf("counts = tests %d, skipped %d; want 5/2 (4 resources incl. 1 schema-less skip + 1 unchecked)", report.Tests, report.Skipped)
+	}
+	var found bool
+	for _, suite := range report.Suites {
+		for _, tc := range suite.Cases {
+			if tc.Name == "Kustomization flux-system/envoy-crds" {
+				found = true
+				if tc.Skipped == nil {
+					t.Errorf("the unchecked testcase must carry <skipped>:\n%s", buf.String())
+				}
+			}
+		}
+	}
+	if !found {
+		t.Errorf("the unchecked Kustomization must be a testcase:\n%s", buf.String())
 	}
 }

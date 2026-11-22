@@ -271,7 +271,7 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 	}
 
 	results := validator.ValidateAll(output)
-	return emitValidationReport(flags, results)
+	return emitValidationReport(flags, results, groupUnchecked(buildState.report.fetchErrors))
 }
 
 // announceValidationContext prints what validation will run against,
@@ -441,22 +441,42 @@ func warnUncheckedKustomizations(report buildReport) {
 	if len(report.fetchErrors) == 0 {
 		return
 	}
-	var order []string
-	byCause := make(map[string][]string)
-	for _, fe := range report.fetchErrors {
-		cause := fe.source + ": " + fe.err
-		if _, seen := byCause[cause]; !seen {
-			order = append(order, cause)
-		}
-		byCause[cause] = append(byCause[cause], fe.ks)
-	}
-	parts := make([]string, 0, len(order))
-	for _, cause := range order {
-		parts = append(parts, strings.Join(byCause[cause], ", ")+" ("+cause+")")
+	parts := make([]string, 0)
+	for _, g := range groupUnchecked(report.fetchErrors) {
+		parts = append(parts, strings.Join(g.kustomizations, ", ")+" ("+g.source+": "+g.cause+")")
 	}
 	fmt.Fprintf(os.Stderr,
 		"Warning: %d Kustomization(s) left unchecked: %s\n",
 		len(report.fetchErrors), strings.Join(parts, ", "))
+}
+
+// uncheckedGroup is every Kustomization sharing one unchecked cause.
+type uncheckedGroup struct {
+	kustomizations []string
+	source         string
+	cause          string
+}
+
+// groupUnchecked folds fetch errors per cause (source + error) in
+// first-seen order — the shared grouping of the stderr summary and the
+// machine-readable reports (json/junit).
+func groupUnchecked(fetchErrors []fetchError) []uncheckedGroup {
+	var groups []uncheckedGroup
+	byCause := make(map[string]int, len(fetchErrors))
+	for _, fe := range fetchErrors {
+		cause := fe.source + ": " + fe.err
+		if idx, seen := byCause[cause]; seen {
+			groups[idx].kustomizations = append(groups[idx].kustomizations, fe.ks)
+			continue
+		}
+		groups = append(groups, uncheckedGroup{
+			kustomizations: []string{fe.ks},
+			source:         fe.source,
+			cause:          fe.err,
+		})
+		byCause[cause] = len(groups) - 1
+	}
+	return groups
 }
 
 // filterValidationOutput applies --namespace; done=true means there is
@@ -528,16 +548,19 @@ func prefetchSchemas(ctx context.Context, flags *ValidateFlags, output []byte, c
 
 // emitValidationReport writes the validation report: machine formats to
 // stdout, human text to stderr (stdout stays reserved for machine
-// output), and turns failures into the validation exit code.
-func emitValidationReport(flags *ValidateFlags, results []validate.Result) error {
+// output), and turns failures into the validation exit code. unchecked
+// (grouped) names the Kustomizations whose source content could not be
+// obtained — the machine formats must carry them or a partial check
+// reads as a green one.
+func emitValidationReport(flags *ValidateFlags, results []validate.Result, unchecked []uncheckedGroup) error {
 	failures := validate.Failures(results)
 	switch flags.Output {
 	case "json":
-		if err := writeValidationJSON(os.Stdout, results); err != nil {
+		if err := writeValidationJSON(os.Stdout, results, unchecked); err != nil {
 			return NewExitError(fmt.Errorf("writing json output: %w", err), ExitCodeError)
 		}
 	case "junit":
-		if err := writeValidationJUnit(os.Stdout, results); err != nil {
+		if err := writeValidationJUnit(os.Stdout, results, unchecked); err != nil {
 			return NewExitError(fmt.Errorf("writing junit output: %w", err), ExitCodeError)
 		}
 	default:

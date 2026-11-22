@@ -35,10 +35,15 @@ func dockerConfigFor(t *testing.T, reg *ocisourcetest.Registry) {
 	t.Setenv("DOCKER_CONFIG", dir)
 }
 
-// noDockerConfigFor points DOCKER_CONFIG at an empty directory — anonymous
-// pulls only.
+// noDockerConfigFor pins anonymous pulls: a configured-but-empty config
+// (NewRegistry already isolated the stores — a missing config would make
+// oras detect the machine's native credential store).
 func noDockerConfigFor(t *testing.T) {
-	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"auths": {"fluxview-test.invalid": {}}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_CONFIG", dir)
 }
 
 // ociRepo builds a flux.OCIRepository for the test registry.
@@ -220,6 +225,9 @@ func TestEnsure_Auth_UnauthorizedHintsDockerConfig(t *testing.T) {
 	noDockerConfigFor(t)
 	reg.PushArtifact(t, "u/private", "v1", ocisourcetest.DefaultLayerMediaType, map[string]string{"cm.yaml": "kind: ConfigMap\n"})
 
+	// The registry runs under isolated credential stores (NewRegistry), so
+	// anonymous means anonymous — no native keychain can leak credentials
+	// in, whatever entries the machine happens to hold.
 	f := NewFetcher(t.TempDir(), time.Hour)
 	defer f.Close()
 	_, err := f.Ensure(context.Background(), ociRepo("oci://"+reg.URL+"/u/private", &flux.OCIRepositoryRef{Tag: "v1"}))
@@ -413,25 +421,14 @@ func TestPickSemverTag(t *testing.T) {
 		tags       []string
 		constraint string
 		want       string
-		wantErr    bool
 	}{
 		{name: "highest in range", tags: []string{"v1.0.0", "v1.2.0", "v2.0.0"}, constraint: ">=1.0.0 <2.0.0", want: "v1.2.0"},
 		{name: "v prefix tolerated", tags: []string{"1.1.0", "v1.2.0"}, constraint: "*", want: "v1.2.0"},
 		{name: "underscore plus", tags: []string{"1.2.3-beta.1_4"}, constraint: ">=1.0.0-0", want: "1.2.3-beta.1_4"},
 		{name: "non-semver ignored", tags: []string{"latest", "1.0.0"}, constraint: "*", want: "1.0.0"},
-		{name: "no match", tags: []string{"1.0.0"}, constraint: ">=2.0.0", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := pickSemverTag(tc.tags, tc.constraint)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got %q", got)
-				}
-				if !strings.Contains(err.Error(), tc.constraint) {
-					t.Errorf("error must name the constraint, got: %v", err)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatalf("pickSemverTag: %v", err)
 			}
@@ -439,6 +436,19 @@ func TestPickSemverTag(t *testing.T) {
 				t.Errorf("pickSemverTag(%v, %q) = %q, want %q", tc.tags, tc.constraint, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestPickSemverTag_NoMatchNamesConstraint(t *testing.T) {
+	_, err := pickSemverTag([]string{"1.0.0"}, ">=2.0.0")
+	if err == nil {
+		t.Fatal("expected a no-match error")
+	}
+	if !strings.Contains(err.Error(), ">=2.0.0") {
+		t.Errorf("the error must name the constraint, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "1.0.0") {
+		t.Errorf("the error must list the available tags, got: %v", err)
 	}
 }
 
@@ -610,6 +620,7 @@ func TestEnsure_Auth_SecretRefNamedInHint(t *testing.T) {
 	noDockerConfigFor(t)
 	reg.PushArtifact(t, "u/private", "v1", ocisourcetest.DefaultLayerMediaType, map[string]string{"cm.yaml": "kind: ConfigMap\n"})
 
+	// Isolated stores (NewRegistry): anonymous stays anonymous here too.
 	repo := ociRepo("oci://"+reg.URL+"/u/private", &flux.OCIRepositoryRef{Tag: "v1"})
 	repo.Spec.SecretRef = &flux.LocalObjectReference{Name: "regcred"}
 
