@@ -431,6 +431,62 @@ spec:
 	}
 }
 
+// TestRunValidate_OCISourceLocalPathBuilds: an OCIRepository-sourced
+// Kustomization whose spec.path exists in the checkout builds like any
+// local path — the intended case for a flux push artifact of this very
+// repository (a foreign artifact's same-name directory is different
+// content that cannot be told apart locally; see README).
+func TestRunValidate_OCISourceLocalPathBuilds(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+
+	clusterDir := filepath.Join(repoRoot, "cluster")
+	writeHelper(t, clusterDir, "ks.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: artifact-content
+  namespace: flux-system
+spec:
+  interval: 5m
+  path: ./artifact
+  prune: true
+  sourceRef:
+    kind: OCIRepository
+    name: fleet-artifact
+`)
+
+	artifactDir := filepath.Join(repoRoot, "artifact")
+	writeHelper(t, artifactDir, "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cm.yaml
+`)
+	writeHelper(t, artifactDir, "cm.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: artifact-cm
+data:
+  key: value
+`)
+
+	var runErr error
+	stderr := captureStderr(func() {
+		runErr = runValidate(context.Background(), &ValidateFlags{
+			Path:                  clusterDir,
+			disableDefaultSchemas: true,
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("an OCI-sourced Kustomization with a local path must build and validate normally, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+	if !strings.Contains(stderr, "Building flux-system/artifact-content") {
+		t.Errorf("the local path must build like any local Kustomization, got:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "not found locally") || strings.Contains(stderr, "left unchecked") {
+		t.Errorf("no skip warnings expected when the path exists locally, got:\n%s", stderr)
+	}
+}
+
 // TestRunValidate_SkipKind wires --skip-kind end to end: the same invalid
 // resource fails validation without the flag and is skipped with it.
 func TestRunValidate_SkipKind(t *testing.T) {

@@ -132,5 +132,5 @@ func describeSource(ks flux.Kustomization) string {
 // run.
 func registerNoGitSourceFetchFlag(cmd *cobra.Command, noFetch *bool) {
 	cmd.Flags().BoolVar(noFetch, "no-git-source-fetch", gitsource.DefaultNoFetch(),
-		"Do not clone external GitRepository sources (no network at all): Kustomizations pointing at them are skipped with a warning, validate fails — for slow or offline networks (env: "+gitsource.EnvNoFetch+")")
+		"Do not clone external GitRepository sources (no network at all): Kustomizations pointing at them are skipped with a warning and left unchecked by validate — for slow or offline networks (env: "+gitsource.EnvNoFetch+")")
 }

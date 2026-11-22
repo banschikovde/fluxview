@@ -210,12 +210,13 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 	defer buildState.close()
 
 	// A validation gate must not pass on a partial build: kustomize build
-	// failures, KS paths missing from the repository, or unfetchable
-	// external sources all leave resources silently absent from the
-	// checked set. The first two fail the run; content fluxview cannot
-	// obtain — unfetchable external sources and never-fetched
-	// OCIRepository/Bucket sources — is best-effort (warn) — failing would
-	// abort every --no-git-source-fetch run outright.
+	// failures, KS paths missing from the repository, or sources whose
+	// content could not be obtained all leave resources silently absent
+	// from the checked set. The first two fail the run; unavailable source
+	// content is best-effort (warn): failing an uncloned external
+	// GitRepository would abort every --no-git-source-fetch run outright,
+	// and OCIRepository/Bucket sources are never fetched at all — their
+	// paths live inside the artifact, not in any checkout.
 	if err := gatePartialBuild(buildState); err != nil {
 		return err
 	}
@@ -423,11 +424,14 @@ func gatePartialBuild(state *validateBuildState) error {
 		len(parts), strings.Join(parts, ", ")), ExitCodeError)
 }
 
-// warnUncheckedKustomizations warns about external GitRepository sources
-// that could not be fetched (an unreachable upstream or the
-// --no-git-source-fetch kill switch); external content is best-effort for
-// the gate. Causes are grouped (source + error) so a single global cause —
-// e.g. the kill switch — is stated once with all its Kustomizations,
+// warnUncheckedKustomizations warns about Kustomizations whose source
+// content could not be obtained: external GitRepository sources that could
+// not be fetched (an unreachable upstream or the --no-git-source-fetch
+// kill switch), and OCIRepository/Bucket sources that fluxview never
+// fetches — unavailable source content is best-effort for the gate.
+// Causes are grouped (source + error) so a single global cause —
+// e.g. the kill switch, or one never-fetched OCIRepository behind several
+// Kustomizations — is stated once with all its Kustomizations,
 // instead of once per KS.
 func warnUncheckedKustomizations(report buildReport) {
 	if len(report.fetchErrors) == 0 {

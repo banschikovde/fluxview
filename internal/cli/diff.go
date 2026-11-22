@@ -622,11 +622,15 @@ func warnMissingKSSource(ks flux.Kustomization, externalSource string, report *b
 	case kind == flux.KindOCIRepository || kind == flux.KindBucket:
 		fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally (source kind %s is not fetched externally), skipping its resources\n",
 			ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, kind)
+		// err carries only the cause — no path: the grouping in
+		// warnUncheckedKustomizations must fold every Kustomization of one
+		// source into a single entry, and the per-KS warning above already
+		// names each path.
 		if report != nil {
 			report.fetchErrors = append(report.fetchErrors, fetchError{
 				ks:     key,
 				source: describeSource(ks),
-				err:    fmt.Sprintf("source kind %s is not fetched externally, path %s not found locally", kind, ks.Spec.Path),
+				err:    "source kind " + kind + " is not fetched externally",
 			})
 		}
 	default:
