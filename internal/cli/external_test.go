@@ -628,6 +628,43 @@ func TestBuildHR_UnfetchedKSSource_QuietDiscovery(t *testing.T) {
 	}
 }
 
+// TestBuildHR_MissingLocalPath_StillWarns: quiet covers only never-fetched
+// OCI/Bucket sources. A Kustomization on the local GitRepository whose
+// spec.path is absent from the checkout is a real configuration error —
+// its HelmReleases would silently vanish from the hr output — so the
+// warning is printed in hr mode too, and the lenient build still exits 0.
+func TestBuildHR_MissingLocalPath_StillWarns(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	clusterDir := filepath.Join(repoRoot, "clusters", "test")
+	writeHelper(t, clusterDir, "ks-apps.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: apps
+  namespace: flux-system
+spec:
+  interval: 24h
+  path: ./does-not-exist
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+`)
+
+	var runErr error
+	var stderr string
+	_ = captureStdout(func() {
+		stderr = captureStderr(func() {
+			runErr = runBuild(context.Background(), []string{"hr"}, &BuildFlags{Path: clusterDir})
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("build hr must stay lenient over a missing local path, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+	if !strings.Contains(stderr, "path ./does-not-exist not found locally") {
+		t.Errorf("a missing local path is a config error and must warn in hr mode, got:\n%s", stderr)
+	}
+}
+
 // TestDiffKS_UnfetchedKSSource_WarnsOnce: the diff comparison side builds
 // quietly, so the per-KS skip warning for an OCI-sourced Kustomization must
 // come from the current side only — exactly once, not once per diff side.

@@ -608,10 +608,13 @@ func resolveKSSource(ctx context.Context, env *ksBuildEnv, ks flux.Kustomization
 // be checked out, and a local miss says nothing about the manifest —
 // those are recorded as unchecked (warn), exactly like an unfetched
 // external GitRepository.
-// stderr follows the same quiet contract as the other diagnostics: quiet
-// stages (hr pipeline discovery, diff comparison side) get no per-KS
-// warning — their output is HelmReleases / the other diff side. The
-// report recording is never suppressed: validate's gate and the "left
+// quiet silences only the OCIRepository/Bucket warning: a never-fetched
+// source is noise in the quiet stages (hr pipeline discovery, diff
+// comparison side). A missing path in a repository fluxview can see —
+// the local checkout or a fetched external clone — is a real
+// configuration error (its HelmReleases would silently vanish from an
+// hr diff), so that warning is printed in every mode. The report
+// recording is never suppressed: validate's gate and the "left
 // unchecked" summary must stay complete wherever the build ran.
 func warnMissingKSSource(ks flux.Kustomization, externalSource string, report *buildReport, quiet bool) {
 	if ks.Spec.Path == "" {
@@ -621,10 +624,8 @@ func warnMissingKSSource(ks flux.Kustomization, externalSource string, report *b
 	kind := ks.Spec.SourceRef.Kind
 	switch {
 	case externalSource != "":
-		if !quiet {
-			fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found in external source %s, skipping its resources\n",
-				ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, externalSource)
-		}
+		fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found in external source %s, skipping its resources\n",
+			ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, externalSource)
 		recordMissingKSPath(report, key, ks.Spec.Path)
 	case kind == flux.KindOCIRepository || kind == flux.KindBucket:
 		if !quiet {
@@ -643,10 +644,8 @@ func warnMissingKSSource(ks flux.Kustomization, externalSource string, report *b
 			})
 		}
 	default:
-		if !quiet {
-			fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally, skipping its resources\n",
-				ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path)
-		}
+		fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally, skipping its resources\n",
+			ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path)
 		recordMissingKSPath(report, key, ks.Spec.Path)
 	}
 }
