@@ -119,7 +119,9 @@ type extractBudget struct {
 
 // check verifies an entry against the caps before anything is written.
 // Only regular files count; a negative declared size is rejected here so
-// it never reaches the writer.
+// it never reaches the writer. The byte comparison never adds the sizes:
+// a tar header can declare up to MaxInt64, and total+size would overflow
+// to a negative value that slips past the cap.
 func (b *extractBudget) check(hdr *tar.Header) error {
 	if hdr.Typeflag != tar.TypeReg {
 		return nil
@@ -130,7 +132,7 @@ func (b *extractBudget) check(hdr *tar.Header) error {
 	if b.files+1 > maxExtractFiles {
 		return fmt.Errorf("archive holds more than %d files", maxExtractFiles)
 	}
-	if b.total+hdr.Size > maxExtractBytes {
+	if hdr.Size > maxExtractBytes-b.total {
 		return fmt.Errorf("archive expands beyond %d bytes", int64(maxExtractBytes))
 	}
 	return nil

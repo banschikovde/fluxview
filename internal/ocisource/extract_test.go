@@ -4,6 +4,9 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"encoding/binary"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -164,6 +167,17 @@ func TestBudgetCheckRejectsBeforeWriting(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "expands beyond") {
 		t.Fatalf("an over-budget entry must fail before writing: %v", err)
 	}
+
+	// A MaxInt64-declared entry after a small file must fail, not
+	// overflow the addition into a negative pass.
+	if err := b.commit(3, true); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	maxExtractBytes = origBytes
+	err = b.check(&tar.Header{Name: "bomb", Size: math.MaxInt64, Typeflag: tar.TypeReg})
+	if err == nil || !strings.Contains(err.Error(), "expands beyond") {
+		t.Fatalf("a MaxInt64 entry must fail the cap without overflowing: %v", err)
+	}
 	// Non-file entries cost nothing.
 	if err := b.check(&tar.Header{Name: "d", Typeflag: tar.TypeDir}); err != nil {
 		t.Fatalf("directories must pass the check: %v", err)
@@ -273,4 +287,65 @@ func TestExtractTarGz_SlowReaderVerified(t *testing.T) {
 	if err := extractTarGz(iotest.OneByteReader(bytes.NewReader(blob)), descFor(blob, false), dst); err != nil {
 		t.Fatalf("one-byte reads must verify like any other chunking: %v", err)
 	}
+}
+
+func TestExtractTarGz_MaxInt64EntryFailsClosed(t *testing.T) {
+	// A real archive: one small file, then an entry whose header declares
+	// math.MaxInt64 bytes (base-256 tar encoding — the octal field cannot
+	// hold it). Compressed, the lie costs nothing; uncompressed it would
+	// fill any disk. The pre-write cap must reject it before a byte is
+	// written, without the size addition overflowing into a pass.
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(regHdr("a.txt", 3)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("abc")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hand-encoded second header: tar.Writer refuses to flush an entry
+	// whose content is not written.
+	block := make([]byte, 512)
+	copy(block, "bomb.bin")
+	copy(block[100:], "0000644\x00")
+	copy(block[108:], "0000000\x00")
+	copy(block[116:], "0000000\x00")
+	copy(block[136:], "00000000000\x00")
+	copy(block[148:], "        ")
+	block[156] = '0'
+	copy(block[257:], "ustar\x0000")
+	// Size field (124..135) in GNU base-256: 0x80 marker + big-endian
+	// value in the remaining 11 bytes.
+	block[124] = 0x80
+	binary.BigEndian.PutUint64(block[128:136], math.MaxInt64)
+	var sum int64
+	for _, b := range block {
+		sum += int64(b)
+	}
+	copy(block[148:], fmt.Sprintf("%06o", sum)+"\x00 ")
+	if _, err := gz.Write(block); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gz.Write(make([]byte, 1024)); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := t.TempDir()
+	blob := buf.Bytes()
+	err := extractTarGz(bytes.NewReader(blob), descFor(blob, false), dst)
+	if err == nil || !strings.Contains(err.Error(), "expands beyond") {
+		t.Fatalf("a MaxInt64 entry must fail the extraction, got: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dst, "bomb.bin")); statErr == nil {
+		t.Fatal("the bomb entry must not be created")
+	}
+	// The honest first entry may exist; only the bomb must not.
 }
