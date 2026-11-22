@@ -256,14 +256,18 @@ func discoverHelmFleet(ctx context.Context, scans *scanCache, clusterPath, repoR
 	configMaps := resolveConfigMaps(ctx, scans, clusterPath, builder, buildCache)
 	secrets := resolveSecrets(ctx, scans, clusterPath, builder, buildCache)
 
+	// quiet here means the revision-comparison side at every call site
+	// (diff's --branch-orig worktree, inventory's comparison state), so it
+	// doubles as the comparisonSide marker.
 	output, err := buildKSContent(ctx, &ksBuildEnv{
-		scans:       scans,
-		builder:     builder,
-		repoRoot:    repoRoot,
-		clusterPath: clusterPath,
-		quiet:       true,
-		cache:       buildCache,
-		sources:     sources,
+		scans:          scans,
+		builder:        builder,
+		repoRoot:       repoRoot,
+		clusterPath:    clusterPath,
+		quiet:          true,
+		comparisonSide: quiet,
+		cache:          buildCache,
+		sources:        sources,
 	}, kustomizations, substitutionSources{configMaps: configMaps, secrets: secrets})
 	if err != nil {
 		return nil, err

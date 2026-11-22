@@ -371,14 +371,17 @@ func buildKSOutputAtRevision(ctx context.Context, env *ksPipelineEnv, rev revisi
 	// substitution work identically to the current state. External
 	// GitRepository sources are fetched for both diff sides through the same
 	// git source env (identity from the real repository, shared clone cache).
+	// comparisonSide: the current side already printed the per-KS
+	// missing-path and OCI-fetch warnings for identical manifests.
 	return buildKSContent(ctx, &ksBuildEnv{
-		scans:       scans,
-		builder:     builder,
-		repoRoot:    worktreePath,
-		clusterPath: worktreeClusterPath,
-		quiet:       true,
-		cache:       buildCache,
-		sources:     sources,
+		scans:          scans,
+		builder:        builder,
+		repoRoot:       worktreePath,
+		clusterPath:    worktreeClusterPath,
+		quiet:          true,
+		comparisonSide: true,
+		cache:          buildCache,
+		sources:        sources,
 	}, kustomizations, substitutionSources{configMaps: configMaps, secrets: secrets})
 }
 
@@ -387,15 +390,22 @@ func buildKSOutputAtRevision(ctx context.Context, env *ksPipelineEnv, rev revisi
 // against, and the per-run knobs — quiet (suppress diagnostics), the build
 // result cache, the anomaly report (nil = don't collect; build and diff
 // stay lenient) and the external source envs (nil = strictly local).
+// comparisonSide marks the revision-comparison build of a diff/inventory
+// (--branch-orig worktree): its missing-path and OCI-fetch warnings are
+// duplicates of the current side's — report recording is unaffected.
 type ksBuildEnv struct {
 	scans       *scanCache
 	builder     *kustomize.Builder
 	repoRoot    string
 	clusterPath string
 	quiet       bool
-	cache       buildCache
-	report      *buildReport
-	sources     *sourceEnvs
+	// comparisonSide suppresses the per-KS warnings the current side
+	// already printed (missing path, OCI fetch failure); report entries
+	// are still recorded.
+	comparisonSide bool
+	cache          buildCache
+	report         *buildReport
+	sources        *sourceEnvs
 }
 
 // substitutionSources is the ConfigMap/Secret set Flux postBuild variable
@@ -659,8 +669,13 @@ func resolveFromOCIArtifact(ctx context.Context, env *ksBuildEnv, ks flux.Kustom
 	res.externalSource = describeSource(ks)
 	artifactDir, err := env.sources.oci.ensure(ctx, repo)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: fetching %s for %s/%s failed: %v — skipping its resources\n",
-			res.externalSource, ks.Metadata.Namespace, ks.Metadata.Name, err)
+		// Every mode of the current side warns — a skipped artifact would
+		// silently drop its HelmReleases; the revision-comparison side
+		// stays silent (the current side already reported the same fetch).
+		if !env.comparisonSide {
+			fmt.Fprintf(os.Stderr, "Warning: fetching %s for %s/%s failed: %v — skipping its resources\n",
+				res.externalSource, ks.Metadata.Namespace, ks.Metadata.Name, err)
+		}
 		if env.report != nil {
 			env.report.fetchErrors = append(env.report.fetchErrors, fetchError{
 				ks:     key,
@@ -695,15 +710,21 @@ func resolveFromOCIArtifact(ctx context.Context, env *ksBuildEnv, ks flux.Kustom
 // path in a repository fluxview can see — the local checkout, a fetched
 // external clone or a fetched artifact — is a real configuration error
 // (its HelmReleases would silently vanish from an hr diff), so that
-// warning is printed in every mode. The report recording is never
-// suppressed: validate's gate and the "left unchecked" summary must stay
-// complete wherever the build ran.
+// warning is printed in every mode of the current side; the
+// revision-comparison side stays silent — the current side already
+// reported the same manifest. The report recording is never suppressed:
+// validate's gate and the "left unchecked" summary must stay complete
+// wherever the build ran.
 // warnMissingOptions carries the mode knobs of warnMissingKSSource.
 type warnMissingOptions struct {
 	externalSource string
 	report         *buildReport
 	quiet          bool
 	ociFetchOn     bool
+	// comparisonSide silences the warning: the revision-comparison build
+	// of a diff/inventory re-derives the same missing paths the current
+	// side already reported. The report entry is still recorded.
+	comparisonSide bool
 }
 
 func warnMissingKSSource(ks flux.Kustomization, opts warnMissingOptions) {
@@ -715,8 +736,10 @@ func warnMissingKSSource(ks flux.Kustomization, opts warnMissingOptions) {
 	kind := ks.Spec.SourceRef.Kind
 	switch {
 	case externalSource != "":
-		fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found in external source %s, skipping its resources\n",
-			ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, externalSource)
+		if !opts.comparisonSide {
+			fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found in external source %s, skipping its resources\n",
+				ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, externalSource)
+		}
 		recordMissingKSPath(report, key, ks.Spec.Path)
 	case kind == flux.KindOCIRepository || kind == flux.KindBucket:
 		// With fetching on, a missing OCIRepository manifest is its own
@@ -741,8 +764,10 @@ func warnMissingKSSource(ks flux.Kustomization, opts warnMissingOptions) {
 			})
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally, skipping its resources\n",
-			ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path)
+		if !opts.comparisonSide {
+			fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally, skipping its resources\n",
+				ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path)
+		}
 		recordMissingKSPath(report, key, ks.Spec.Path)
 	}
 }
@@ -777,6 +802,7 @@ func buildOneKustomization(ctx context.Context, env *ksBuildEnv, ks flux.Kustomi
 				report:         env.report,
 				quiet:          env.quiet,
 				ociFetchOn:     env.sources != nil && env.sources.oci.fetchEnabled(),
+				comparisonSide: env.comparisonSide,
 			})
 		}
 		return string(ksYAML), nil, nil
