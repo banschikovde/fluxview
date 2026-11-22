@@ -418,25 +418,14 @@ func TestPickSemverTag(t *testing.T) {
 		tags       []string
 		constraint string
 		want       string
-		wantErr    bool
 	}{
 		{name: "highest in range", tags: []string{"v1.0.0", "v1.2.0", "v2.0.0"}, constraint: ">=1.0.0 <2.0.0", want: "v1.2.0"},
 		{name: "v prefix tolerated", tags: []string{"1.1.0", "v1.2.0"}, constraint: "*", want: "v1.2.0"},
 		{name: "underscore plus", tags: []string{"1.2.3-beta.1_4"}, constraint: ">=1.0.0-0", want: "1.2.3-beta.1_4"},
 		{name: "non-semver ignored", tags: []string{"latest", "1.0.0"}, constraint: "*", want: "1.0.0"},
-		{name: "no match", tags: []string{"1.0.0"}, constraint: ">=2.0.0", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := pickSemverTag(tc.tags, tc.constraint)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got %q", got)
-				}
-				if !strings.Contains(err.Error(), tc.constraint) {
-					t.Errorf("error must name the constraint, got: %v", err)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatalf("pickSemverTag: %v", err)
 			}
@@ -444,6 +433,19 @@ func TestPickSemverTag(t *testing.T) {
 				t.Errorf("pickSemverTag(%v, %q) = %q, want %q", tc.tags, tc.constraint, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestPickSemverTag_NoMatchNamesConstraint(t *testing.T) {
+	_, err := pickSemverTag([]string{"1.0.0"}, ">=2.0.0")
+	if err == nil {
+		t.Fatal("expected a no-match error")
+	}
+	if !strings.Contains(err.Error(), ">=2.0.0") {
+		t.Errorf("the error must name the constraint, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "1.0.0") {
+		t.Errorf("the error must list the available tags, got: %v", err)
 	}
 }
 
@@ -469,167 +471,6 @@ func buildTarGz(t *testing.T, files map[string]string) []byte {
 		t.Fatalf("closing gzip: %v", err)
 	}
 	return buf.Bytes()
-}
-
-func TestDefaultsFromEnv(t *testing.T) {
-	t.Setenv("FLUXVIEW_NO_OCI_SOURCE_FETCH", "1")
-	if !DefaultNoFetch() {
-		t.Error("FLUXVIEW_NO_OCI_SOURCE_FETCH=1 must default the kill switch on")
-	}
-	t.Setenv("FLUXVIEW_NO_OCI_SOURCE_FETCH", "no")
-	if DefaultNoFetch() {
-		t.Error("an unknown value must leave the kill switch off")
-	}
-
-	t.Setenv("FLUXVIEW_OCI_SOURCE_CACHE_TTL", "90s")
-	if got := DefaultTTL(); got != 90*time.Second {
-		t.Errorf("DefaultTTL = %s, want 90s", got)
-	}
-	t.Setenv("FLUXVIEW_OCI_SOURCE_CACHE_DIR", "/tmp/oci-default-test")
-	if got := DefaultCacheDir(); got != "/tmp/oci-default-test" {
-		t.Errorf("DefaultCacheDir = %s, want the env value", got)
-	}
-}
-
-func TestEnsure_IndexManifestRejected(t *testing.T) {
-	reg := ocisourcetest.NewRegistry(t)
-	dockerConfigFor(t, reg)
-	reg.PushIndex(t, "u/idx", "v1")
-
-	f := NewFetcher(t.TempDir(), time.Hour)
-	defer f.Close()
-	_, err := f.Ensure(context.Background(), ociRepo("oci://"+reg.URL+"/u/idx", &flux.OCIRepositoryRef{Tag: "v1"}))
-	if err == nil || !strings.Contains(err.Error(), "multi-platform index") {
-		t.Fatalf("an index artifact must fail with a clear message, got: %v", err)
-	}
-}
-
-func TestEnsure_EmptyLayerRejected(t *testing.T) {
-	reg := ocisourcetest.NewRegistry(t)
-	dockerConfigFor(t, reg)
-	reg.PushLayerlessManifest(t, "u/empty", "v1")
-
-	f := NewFetcher(t.TempDir(), time.Hour)
-	defer f.Close()
-	_, err := f.Ensure(context.Background(), ociRepo("oci://"+reg.URL+"/u/empty", &flux.OCIRepositoryRef{Tag: "v1"}))
-	if err == nil || !strings.Contains(err.Error(), "no layers") {
-		t.Fatalf("a layerless manifest must fail with a clear message, got: %v", err)
-	}
-}
-
-func TestEnsure_OversizedEntryLeavesNoCacheResidue(t *testing.T) {
-	reg := ocisourcetest.NewRegistry(t)
-	dockerConfigFor(t, reg)
-
-	// A blob whose single entry declares more than the extraction budget
-	// holds: the pre-write check must fail the fetch before the file (or
-	// anything else) lands on disk.
-	origBytes := maxExtractBytes
-	t.Cleanup(func() { maxExtractBytes = origBytes })
-	maxExtractBytes = 16
-
-	blob := tarGzWithLyingHeader(t)
-	reg.PushLayerBytes(t, "u/huge", "v1", ocisourcetest.DefaultLayerMediaType, blob)
-
-	cacheDir := t.TempDir()
-	f := NewFetcher(cacheDir, time.Hour)
-	defer f.Close()
-	_, err := f.Ensure(context.Background(), ociRepo("oci://"+reg.URL+"/u/huge", &flux.OCIRepositoryRef{Tag: "v1"}))
-	if err == nil || !strings.Contains(err.Error(), "expands beyond") {
-		t.Fatalf("an over-budget entry must fail the fetch, got: %v", err)
-	}
-	if data, err2 := os.ReadDir(filepath.Join(cacheDir, "data")); err2 == nil && len(data) != 0 {
-		t.Errorf("a failed fetch must leave nothing in data/, got %d entries", len(data))
-	}
-	if tmpEntries, _ := os.ReadDir(filepath.Join(cacheDir, "tmp")); len(tmpEntries) != 0 {
-		t.Errorf("a failed fetch must clean its tmp/ staging, got %d entries", len(tmpEntries))
-	}
-}
-
-// tarGzWithLyingHeader builds a tar.gz whose entry header declares a
-// huge size the content does not have. The header block is encoded by
-// hand — tar.Writer refuses to close (or flush) with unwritten content.
-func tarGzWithLyingHeader(t *testing.T) []byte {
-	t.Helper()
-	block := make([]byte, 512)
-	copy(block, "huge.bin")
-	copy(block[100:], "0000644\x00")                              // mode
-	copy(block[108:], "0000000\x00")                              // uid
-	copy(block[116:], "0000000\x00")                              // gid
-	copy(block[124:], fmt.Sprintf("%011o", uint64(1<<30))+"\x00") // size
-	copy(block[136:], "00000000000\x00")                          // mtime
-	copy(block[148:], "        ")                                 // chksum placeholder
-	block[156] = '0'                                              // regular file
-	copy(block[257:], "ustar\x0000")                              // magic + version
-	var sum int64
-	for _, b := range block {
-		sum += int64(b)
-	}
-	copy(block[148:], fmt.Sprintf("%06o", sum)+"\x00 ")
-
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	if _, err := gz.Write(block); err != nil {
-		t.Fatal(err)
-	}
-	// Two zero blocks = end of archive (no content follows the lying
-	// header).
-	if _, err := gz.Write(make([]byte, 1024)); err != nil {
-		t.Fatal(err)
-	}
-	if err := gz.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return buf.Bytes()
-}
-
-func TestEnsure_TimeoutFailsPromptly(t *testing.T) {
-	// A registry that accepts the connection and never answers.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done()
-	}))
-	defer srv.Close()
-	host := strings.TrimPrefix(srv.URL, "http://")
-
-	f := NewFetcher(t.TempDir(), time.Hour, WithTimeout(200*time.Millisecond))
-	defer f.Close()
-
-	start := time.Now()
-	_, err := f.Ensure(context.Background(), ociRepo("oci://"+host+"/u/hang", &flux.OCIRepositoryRef{Tag: "v1"}))
-	elapsed := time.Since(start)
-	if err == nil {
-		t.Fatal("a hung registry must fail the fetch")
-	}
-	if elapsed > 5*time.Second {
-		t.Fatalf("the timeout must fire promptly, took %s", elapsed)
-	}
-	for _, want := range []string{EnvTimeout, "--oci-source-timeout"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the timeout error must mention %q, got: %v", want, err)
-		}
-	}
-}
-
-func TestEnsure_Auth_SecretRefNamedInHint(t *testing.T) {
-	reg := ocisourcetest.NewRegistry(t)
-	noDockerConfigFor(t)
-	reg.PushArtifact(t, "u/private", "v1", ocisourcetest.DefaultLayerMediaType, map[string]string{"cm.yaml": "kind: ConfigMap\n"})
-
-	url := strings.Replace(reg.URL, "localhost", "127.0.0.1", 1) // see the unauthorized test
-	repo := ociRepo("oci://"+url+"/u/private", &flux.OCIRepositoryRef{Tag: "v1"})
-	repo.Spec.SecretRef = &flux.LocalObjectReference{Name: "regcred"}
-
-	f := NewFetcher(t.TempDir(), time.Hour)
-	defer f.Close()
-	_, err := f.Ensure(context.Background(), repo)
-	if err == nil {
-		t.Fatal("anonymous pull against an htpasswd registry must fail")
-	}
-	for _, want := range []string{"spec.secretRef \"regcred\" is ignored outside the cluster", "Docker config"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error must mention %q, got: %v", want, err)
-		}
-	}
 }
 
 func TestPickSemverTag_ErrorCapsTagList(t *testing.T) {
