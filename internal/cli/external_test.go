@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 	gossh "golang.org/x/crypto/ssh"
 
+	"github.com/banschikovde/fluxview/internal/flux"
 	"github.com/banschikovde/fluxview/internal/gitsource"
 	"github.com/banschikovde/fluxview/internal/gitsource/gitsourcetest"
 )
@@ -520,6 +521,178 @@ func TestBuildHR_NoGitSourceFetch_QuietDiscovery(t *testing.T) {
 	}
 	if strings.Contains(stderr, "skipping its resources") || strings.Contains(stderr, "fetching GitRepository") {
 		t.Errorf("hr discovery must not print per-KS fetch warnings, got:\n%s", stderr)
+	}
+}
+
+// writeUnfetchedKSTree lays out the issue #25 tree: one Flux Kustomization
+// builds locally (apps/base with a HelmRelease backed by a chart in the
+// checkout), another points into an artifact fluxview never fetches (kind
+// OCIRepository or Bucket) with its spec.path absent from the checkout.
+// Returns the cluster directory path.
+func writeUnfetchedKSTree(t *testing.T, repoRoot, kind string) string {
+	t.Helper()
+
+	chartDir := filepath.Join(repoRoot, "charts", "my-chart")
+	writeHelper(t, chartDir, "Chart.yaml", `apiVersion: v2
+name: my-chart
+version: 1.0.0
+`)
+	writeHelper(t, chartDir, "values.yaml", "")
+	writeHelper(t, filepath.Join(chartDir, "templates"), "dep.yaml", `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: from-local-chart
+spec:
+  replicas: 1
+`)
+
+	writeHelper(t, filepath.Join(repoRoot, "apps", "base"), "hr.yaml", `apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: app
+  namespace: apps
+spec:
+  chart:
+    spec:
+      chart: charts/my-chart
+      version: "1.0.0"
+      sourceRef:
+        kind: GitRepository
+        name: flux-system
+`)
+	writeHelper(t, filepath.Join(repoRoot, "apps", "base"), "kustomization.yaml", `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - hr.yaml
+`)
+
+	clusterDir := filepath.Join(repoRoot, "clusters", "test")
+	writeHelper(t, clusterDir, "ks-apps.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: apps
+  namespace: flux-system
+spec:
+  interval: 24h
+  path: ./apps/base
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+`)
+	writeHelper(t, clusterDir, "ks-envoy-crds.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: envoy-gateway-crds
+  namespace: envoy-gateway-system
+spec:
+  interval: 24h
+  path: ./gateway-helm/charts/crds/crds
+  prune: false
+  sourceRef:
+    kind: `+kind+`
+    name: envoy-gateway
+`)
+	return clusterDir
+}
+
+// TestBuildHR_UnfetchedKSSource_QuietDiscovery pins the fix for issue #25:
+// the hr pipeline discovers Kustomizations in a quiet stage (its output is
+// HelmReleases), so an OCIRepository/Bucket-sourced Kustomization whose
+// spec.path lives inside the unfetched artifact must not print the per-KS
+// skip warning there — the skip stays symmetric and the locally buildable
+// HelmRelease still inflates.
+func TestBuildHR_UnfetchedKSSource_QuietDiscovery(t *testing.T) {
+	for _, kind := range []string{flux.KindOCIRepository, flux.KindBucket} {
+		t.Run(kind, func(t *testing.T) {
+			repoRoot := t.TempDir()
+			gitInit(t, repoRoot)
+			clusterDir := writeUnfetchedKSTree(t, repoRoot, kind)
+
+			var runErr error
+			var stderr string
+			stdout := captureStdout(func() {
+				stderr = captureStderr(func() {
+					runErr = runBuild(context.Background(), []string{"hr"}, &BuildFlags{Path: clusterDir})
+				})
+			})
+			if runErr != nil {
+				t.Fatalf("build hr over a tree with a %s-sourced Kustomization must succeed, got: %v\nstderr:\n%s", kind, runErr, stderr)
+			}
+			if strings.Contains(stderr, "not fetched externally") || strings.Contains(stderr, "skipping its resources") {
+				t.Errorf("hr discovery must not print the per-KS skip warning, got:\n%s", stderr)
+			}
+			if !strings.Contains(stdout, "from-local-chart") {
+				t.Errorf("the HelmRelease from the local Kustomization must still inflate, got:\n%s", stdout)
+			}
+		})
+	}
+}
+
+// TestBuildHR_MissingLocalPath_StillWarns: quiet covers only never-fetched
+// OCI/Bucket sources. A Kustomization on the local GitRepository whose
+// spec.path is absent from the checkout is a real configuration error —
+// its HelmReleases would silently vanish from the hr output — so the
+// warning is printed in hr mode too, and the lenient build still exits 0.
+func TestBuildHR_MissingLocalPath_StillWarns(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	clusterDir := filepath.Join(repoRoot, "clusters", "test")
+	writeHelper(t, clusterDir, "ks-apps.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: apps
+  namespace: flux-system
+spec:
+  interval: 24h
+  path: ./does-not-exist
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+`)
+
+	var runErr error
+	var stderr string
+	_ = captureStdout(func() {
+		stderr = captureStderr(func() {
+			runErr = runBuild(context.Background(), []string{"hr"}, &BuildFlags{Path: clusterDir})
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("build hr must stay lenient over a missing local path, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+	if !strings.Contains(stderr, "path ./does-not-exist not found locally") {
+		t.Errorf("a missing local path is a config error and must warn in hr mode, got:\n%s", stderr)
+	}
+}
+
+// TestDiffKS_UnfetchedKSSource_WarnsOnce: the diff comparison side builds
+// quietly, so the per-KS skip warning for an OCI-sourced Kustomization must
+// come from the current side only — exactly once, not once per diff side.
+func TestDiffKS_UnfetchedKSSource_WarnsOnce(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	clusterDir := writeUnfetchedKSTree(t, repoRoot, flux.KindOCIRepository)
+
+	gitRun(t, repoRoot, "add", "-A")
+	gitRun(t, repoRoot, "-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "-q", "-m", "fixture")
+	commit := strings.TrimSpace(gitOutput(t, repoRoot, "rev-parse", "HEAD"))
+
+	var runErr error
+	var stderr string
+	_ = captureStdout(func() {
+		stderr = captureStderr(func() {
+			runErr = runDiff(context.Background(), []string{"ks"}, &DiffFlags{
+				Path:       clusterDir,
+				BranchOrig: commit,
+				Color:      "never",
+			})
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("diff ks over a tree with an OCI-sourced Kustomization must stay lenient, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+	if got := strings.Count(stderr, "not fetched externally"); got != 1 {
+		t.Errorf("the skip warning must be printed exactly once (current side only), got %d times:\n%s", got, stderr)
 	}
 }
 

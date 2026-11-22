@@ -608,7 +608,15 @@ func resolveKSSource(ctx context.Context, env *ksBuildEnv, ks flux.Kustomization
 // be checked out, and a local miss says nothing about the manifest —
 // those are recorded as unchecked (warn), exactly like an unfetched
 // external GitRepository.
-func warnMissingKSSource(ks flux.Kustomization, externalSource string, report *buildReport) {
+// quiet silences only the OCIRepository/Bucket warning: a never-fetched
+// source is noise in the quiet stages (hr pipeline discovery, diff
+// comparison side). A missing path in a repository fluxview can see —
+// the local checkout or a fetched external clone — is a real
+// configuration error (its HelmReleases would silently vanish from an
+// hr diff), so that warning is printed in every mode. The report
+// recording is never suppressed: validate's gate and the "left
+// unchecked" summary must stay complete wherever the build ran.
+func warnMissingKSSource(ks flux.Kustomization, externalSource string, report *buildReport, quiet bool) {
 	if ks.Spec.Path == "" {
 		return
 	}
@@ -620,8 +628,10 @@ func warnMissingKSSource(ks flux.Kustomization, externalSource string, report *b
 			ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, externalSource)
 		recordMissingKSPath(report, key, ks.Spec.Path)
 	case kind == flux.KindOCIRepository || kind == flux.KindBucket:
-		fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally (source kind %s is not fetched externally), skipping its resources\n",
-			ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, kind)
+		if !quiet {
+			fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally (source kind %s is not fetched externally), skipping its resources\n",
+				ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, kind)
+		}
 		// err carries only the cause — no path: the grouping in
 		// warnUncheckedKustomizations must fold every Kustomization of one
 		// source into a single entry, and the per-KS warning above already
@@ -665,7 +675,7 @@ func buildOneKustomization(ctx context.Context, env *ksBuildEnv, ks flux.Kustomi
 	res := resolveKSSource(ctx, env, ks, key, knownRepos)
 	if res.sourcePath == "" {
 		if !res.fetchFailed {
-			warnMissingKSSource(ks, res.externalSource, env.report)
+			warnMissingKSSource(ks, res.externalSource, env.report, env.quiet)
 		}
 		return string(ksYAML), nil, nil
 	}
