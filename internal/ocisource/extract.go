@@ -14,10 +14,11 @@ import (
 
 // Extraction limits for untrusted artifact content: a manifest URL is
 // attacker-controlled input, so a decompression bomb or a huge file tree
-// must fail the fetch instead of filling the disk.
-const (
+// must fail the fetch instead of filling the disk. Variables (not consts)
+// so tests can tighten them.
+var (
 	// maxExtractBytes caps the total uncompressed size of one artifact.
-	maxExtractBytes = 512 << 20
+	maxExtractBytes int64 = 512 << 20
 	// maxExtractFiles caps the number of regular files in one artifact.
 	maxExtractFiles = 100_000
 )

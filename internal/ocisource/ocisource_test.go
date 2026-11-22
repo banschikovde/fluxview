@@ -463,3 +463,49 @@ func buildTarGz(t *testing.T, files map[string]string) []byte {
 	}
 	return buf.Bytes()
 }
+
+func TestDefaultsFromEnv(t *testing.T) {
+	t.Setenv("FLUXVIEW_NO_OCI_SOURCE_FETCH", "1")
+	if !DefaultNoFetch() {
+		t.Error("FLUXVIEW_NO_OCI_SOURCE_FETCH=1 must default the kill switch on")
+	}
+	t.Setenv("FLUXVIEW_NO_OCI_SOURCE_FETCH", "no")
+	if DefaultNoFetch() {
+		t.Error("an unknown value must leave the kill switch off")
+	}
+
+	t.Setenv("FLUXVIEW_OCI_SOURCE_CACHE_TTL", "90s")
+	if got := DefaultTTL(); got != 90*time.Second {
+		t.Errorf("DefaultTTL = %s, want 90s", got)
+	}
+	t.Setenv("FLUXVIEW_OCI_SOURCE_CACHE_DIR", "/tmp/oci-default-test")
+	if got := DefaultCacheDir(); got != "/tmp/oci-default-test" {
+		t.Errorf("DefaultCacheDir = %s, want the env value", got)
+	}
+}
+
+func TestEnsure_IndexManifestRejected(t *testing.T) {
+	reg := ocisourcetest.NewRegistry(t)
+	dockerConfigFor(t, reg)
+	reg.PushIndex(t, "u/idx", "v1")
+
+	f := NewFetcher(t.TempDir(), time.Hour)
+	defer f.Close()
+	_, err := f.Ensure(context.Background(), ociRepo("oci://"+reg.URL+"/u/idx", &flux.OCIRepositoryRef{Tag: "v1"}))
+	if err == nil || !strings.Contains(err.Error(), "multi-platform index") {
+		t.Fatalf("an index artifact must fail with a clear message, got: %v", err)
+	}
+}
+
+func TestEnsure_EmptyLayerRejected(t *testing.T) {
+	reg := ocisourcetest.NewRegistry(t)
+	dockerConfigFor(t, reg)
+	reg.PushLayerlessManifest(t, "u/empty", "v1")
+
+	f := NewFetcher(t.TempDir(), time.Hour)
+	defer f.Close()
+	_, err := f.Ensure(context.Background(), ociRepo("oci://"+reg.URL+"/u/empty", &flux.OCIRepositoryRef{Tag: "v1"}))
+	if err == nil || !strings.Contains(err.Error(), "no layers") {
+		t.Fatalf("a layerless manifest must fail with a clear message, got: %v", err)
+	}
+}

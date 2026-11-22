@@ -502,6 +502,36 @@ spec:
 	}
 }
 
+func TestParseOCIRepositoriesFromBytes(t *testing.T) {
+	input := `apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: envoy
+  namespace: flux-system
+spec:
+  url: oci://docker.io/envoyproxy/gateway-helm
+  ref:
+    tag: v1.10.0
+---
+apiVersion: example.com/v1
+kind: OCIRepository
+metadata:
+  name: fake
+spec:
+  url: oci://example.com/repo
+`
+	repos := ParseOCIRepositoriesFromBytes([]byte(input))
+	if len(repos) != 1 {
+		t.Fatalf("OCIRepositories = %d, want 1 (wrong group filtered)", len(repos))
+	}
+	if repos[0].Metadata.Name != "envoy" || repos[0].Spec.URL != "oci://docker.io/envoyproxy/gateway-helm" {
+		t.Errorf("parsed OCIRepository = %+v", repos[0])
+	}
+	if repos[0].Spec.Ref == nil || repos[0].Spec.Ref.Tag != "v1.10.0" {
+		t.Errorf("ref.tag not parsed: %+v", repos[0].Spec.Ref)
+	}
+}
+
 func TestParseGitRepositoriesFromBytes(t *testing.T) {
 	input := `apiVersion: source.toolkit.fluxcd.io/v1
 kind: GitRepository

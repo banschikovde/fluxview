@@ -2,6 +2,8 @@ package flux
 
 import (
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestGitRepositoryRefRefString(t *testing.T) {
@@ -139,5 +141,77 @@ func TestGetSecretValue(t *testing.T) {
 				t.Errorf("GetSecretValue(%q) = %q, want %q", tt.key, result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestOCIRepositoryRefRefString(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ref  *OCIRepositoryRef
+		want string
+	}{
+		{name: "nil", ref: nil, want: ""},
+		{name: "empty", ref: &OCIRepositoryRef{}, want: ""},
+		{name: "digest", ref: &OCIRepositoryRef{Digest: "sha256:abc", Tag: "v1"}, want: "digest:sha256:abc"},
+		{name: "semver", ref: &OCIRepositoryRef{Semver: ">=1.0.0", Tag: "v1"}, want: "semver:>=1.0.0"},
+		{name: "tag", ref: &OCIRepositoryRef{Tag: "v1"}, want: "tag:v1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.ref.RefString(); got != tc.want {
+				t.Errorf("RefString() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestOCIRepositoryRefIsPinned(t *testing.T) {
+	if (&OCIRepositoryRef{Tag: "v1"}).IsPinned() {
+		t.Error("a tag is mutable — not pinned")
+	}
+	if !(&OCIRepositoryRef{Digest: "sha256:abc"}).IsPinned() {
+		t.Error("a digest is pinned")
+	}
+	var nilRef *OCIRepositoryRef
+	if nilRef.IsPinned() {
+		t.Error("a nil ref is not pinned")
+	}
+}
+
+func TestOCIRepositorySpecParsesFetchFields(t *testing.T) {
+	manifest := `apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: envoy
+  namespace: flux-system
+spec:
+  url: oci://docker.io/envoyproxy/gateway-helm
+  insecure: true
+  provider: generic
+  secretRef:
+    name: regcred
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  ref:
+    tag: v1.10.0
+`
+	// Decoded through the same YAML unmarshalling the parser uses.
+	var repo OCIRepository
+	if err := yaml.Unmarshal([]byte(manifest), &repo); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !repo.Spec.Insecure || repo.Spec.Provider != "generic" {
+		t.Errorf("insecure/provider not parsed: %+v", repo.Spec)
+	}
+	if repo.Spec.SecretRef == nil || repo.Spec.SecretRef.Name != "regcred" {
+		t.Errorf("secretRef not parsed: %+v", repo.Spec.SecretRef)
+	}
+	if repo.Spec.LayerSelector == nil ||
+		repo.Spec.LayerSelector.MediaType != "application/vnd.cncf.helm.chart.content.v1.tar+gzip" ||
+		repo.Spec.LayerSelector.Operation != "copy" {
+		t.Errorf("layerSelector not parsed: %+v", repo.Spec.LayerSelector)
+	}
+	if repo.Spec.Ref == nil || repo.Spec.Ref.Tag != "v1.10.0" || repo.Spec.Ref.RefString() != "tag:v1.10.0" {
+		t.Errorf("ref.tag not parsed: %+v", repo.Spec.Ref)
 	}
 }

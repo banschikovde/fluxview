@@ -20,9 +20,6 @@ package ocisource
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,6 +29,7 @@ import (
 
 	"github.com/banschikovde/fluxview/internal/cachedir"
 	"github.com/banschikovde/fluxview/internal/flux"
+	"github.com/banschikovde/fluxview/internal/sourcecache"
 )
 
 // ociPrefix is the required URL scheme of an OCIRepository.
@@ -89,15 +87,6 @@ func DefaultNoFetch() bool {
 	return false
 }
 
-// meta is the shared shape of the in-directory seed file and the
-// floating-ref pointer: what was requested, what it resolved to, and when.
-type meta struct {
-	URL       string `json:"url"`
-	Ref       string `json:"ref"`
-	Resolved  string `json:"resolved"`
-	FetchedAt string `json:"fetchedAt"`
-}
-
 // Fetcher downloads OCIRepository artifacts into the OCI source cache.
 // A nil *Fetcher (or a disabled cache directory) still fetches — every
 // artifact lands in a private temp directory with no reuse — because the
@@ -115,11 +104,12 @@ type Fetcher struct {
 	// lazily and removed by Close (guarded by mu).
 	offDir string
 
-	// inflight dedups concurrent Ensure calls for the same artifact
-	// directory within one process: the second caller waits for the first
-	// fetch instead of racing it with a duplicate.
-	mu       sync.Mutex
-	inflight map[string]chan struct{}
+	// dedup serializes concurrent Ensure calls for the same artifact
+	// directory within one process (shared plumbing, see sourcecache).
+	dedup *sourcecache.Dedup
+
+	// mu guards offDir (lazily created).
+	mu sync.Mutex
 
 	// clientOnce guards the lazy construction of the shared registry
 	// client (with its token cache and docker-config credentials).
@@ -132,7 +122,7 @@ type Fetcher struct {
 // A negative ttl is normalized to zero (always re-resolve floating refs).
 func NewFetcher(cacheDir string, ttl time.Duration) *Fetcher {
 	f := &Fetcher{
-		inflight: make(map[string]chan struct{}),
+		dedup: sourcecache.NewDedup(),
 	}
 	if !cachedir.Disabled(cacheDir) {
 		f.dir = cacheDir
@@ -217,7 +207,7 @@ func (f *Fetcher) Ensure(ctx context.Context, repo flux.OCIRepository) (string, 
 	}
 
 	dir := filepath.Join(f.dir, "data", dataKey(url, resolved, repo.Spec.LayerSelector))
-	if seedValid(dir) {
+	if sourcecache.SeedValid(dir, seedFileName) {
 		f.rememberPointer(url, refSpec, resolved, resolvedFresh)
 		return dir, nil
 	}
@@ -250,7 +240,7 @@ func (f *Fetcher) resolveRef(ctx context.Context, url, base string, repo flux.OC
 		return repo.Spec.Ref.RefString(), false, nil
 	}
 	if f != nil && f.dir != "" {
-		if p, ok := readPointer(f.dir, cacheKey(url, repo.Spec.Ref.RefString())); ok && f.fresh(p) {
+		if p, ok := sourcecache.ReadPointer(f.dir, cacheKey(url, repo.Spec.Ref.RefString())); ok && sourcecache.Fresh(f.ttl, p) {
 			return p.Resolved, true, nil
 		}
 	}
@@ -325,35 +315,12 @@ func (f *Fetcher) ensureUncached(ctx context.Context, url, base, resolved string
 }
 
 // fetchSynced fetches the artifact into dir, deduplicating concurrent
-// fetches of the same directory within this process.
+// fetches of the same directory within this process (the
+// content-addressed directory is the dedup key).
 func (f *Fetcher) fetchSynced(ctx context.Context, url, base, resolved string, repo flux.OCIRepository, dir string) error {
-	key := dir // the content-addressed directory is the dedup key
-
-	f.mu.Lock()
-	if done, ok := f.inflight[key]; ok {
-		f.mu.Unlock()
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-		if seedValid(dir) {
-			return nil
-		}
-		// The first fetch failed; try again ourselves.
-		return f.fetchSynced(ctx, url, base, resolved, repo, dir)
-	}
-	done := make(chan struct{})
-	f.inflight[key] = done
-	f.mu.Unlock()
-
-	err := f.fetchAtomic(ctx, base, resolved, repo, dir)
-
-	f.mu.Lock()
-	delete(f.inflight, key)
-	f.mu.Unlock()
-	close(done)
-	return err
+	return f.dedup.Do(ctx, dir,
+		func() bool { return sourcecache.SeedValid(dir, seedFileName) },
+		func() error { return f.fetchAtomic(ctx, base, resolved, repo, dir) })
 }
 
 // fetchAtomic extracts the artifact into a temp directory and publishes it
@@ -375,18 +342,7 @@ func (f *Fetcher) fetchAtomic(ctx context.Context, base, resolved string, repo f
 		return err
 	}
 
-	if err := os.Rename(tmp, dir); err != nil {
-		// Another process may have published the same digest while we
-		// were extracting: its complete directory is as good as ours.
-		if seedValid(dir) {
-			return nil
-		}
-		os.RemoveAll(dir)
-		if err := os.Rename(tmp, dir); err != nil {
-			return fmt.Errorf("publishing OCI artifact to cache: %w", err)
-		}
-	}
-	return nil
+	return sourcecache.Publish(tmp, dir, func(d string) bool { return sourcecache.SeedValid(d, seedFileName) })
 }
 
 // fetchInto downloads the artifact at digest (resolved, "digest:<sha>")
@@ -417,26 +373,20 @@ func (f *Fetcher) fetchInto(ctx context.Context, base, resolved string, repo flu
 		return fmt.Errorf("extracting layer of %s@%s: %w", ociPrefix+base, digest, err)
 	}
 
-	seed := meta{
+	if err := sourcecache.WriteSeed(dst, seedFileName, sourcecache.Meta{
 		URL:       ociPrefix + base,
 		Ref:       repo.Spec.Ref.RefString(),
 		Resolved:  resolved,
 		FetchedAt: time.Now().Format(time.RFC3339),
-	}
-	data, err := json.MarshalIndent(seed, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding OCI source seed: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(dst, seedFileName), data, 0o644); err != nil {
-		return fmt.Errorf("writing OCI source seed: %w", err)
+	}); err != nil {
+		return fmt.Errorf("recording OCI source seed: %w", err)
 	}
 	return nil
 }
 
 // cacheKey is the shared content key of a (url, ref spec) pair.
 func cacheKey(url, refSpec string) string {
-	h := sha256.Sum256([]byte(url + "\x00" + refSpec))
-	return hex.EncodeToString(h[:])
+	return sourcecache.Key(url, refSpec)
 }
 
 // dataKey extends the resolved digest with the selected layer media type:
@@ -446,7 +396,7 @@ func dataKey(url, resolved string, sel *flux.OCILayerSelector) string {
 	if sel != nil {
 		mediaType = sel.MediaType
 	}
-	return cacheKey(url, resolved+"\x00layer:"+mediaType)
+	return sourcecache.Key(url, resolved, "layer:"+mediaType)
 }
 
 // rememberPointer records a floating-ref resolution (tag/semver/latest →
@@ -456,85 +406,7 @@ func (f *Fetcher) rememberPointer(url, refSpec, resolved string, fresh bool) {
 	if f == nil || f.dir == "" || refSpec == resolved || fresh {
 		return
 	}
-	m := meta{URL: url, Ref: refSpec, Resolved: resolved, FetchedAt: time.Now().Format(time.RFC3339)}
-	writePointer(f.dir, cacheKey(url, refSpec), m)
-}
-
-// fresh reports whether a floating-ref resolution is still within the TTL.
-// With ttl == 0 nothing is fresh — floating refs always re-resolve (the
-// fresh resolution is still written back for later runs).
-func (f *Fetcher) fresh(m meta) bool {
-	if f == nil || f.ttl <= 0 {
-		return false
-	}
-	ts, err := time.Parse(time.RFC3339, m.FetchedAt)
-	if err != nil {
-		return false
-	}
-	return time.Since(ts) < f.ttl
-}
-
-// seedValid reports whether dir holds a complete artifact: the seed file
-// exists, parses and names a resolution.
-func seedValid(dir string) bool {
-	data, err := os.ReadFile(filepath.Join(dir, seedFileName))
-	if err != nil {
-		return false
-	}
-	var m meta
-	if err := json.Unmarshal(data, &m); err != nil {
-		return false
-	}
-	return m.Resolved != ""
-}
-
-// pointerPath is the floating-ref pointer file for key.
-func pointerPath(cacheDir, key string) string {
-	return filepath.Join(cacheDir, "refs", key+".json")
-}
-
-// readPointer loads the floating-ref pointer for key, if present and valid.
-func readPointer(cacheDir, key string) (meta, bool) {
-	data, err := os.ReadFile(pointerPath(cacheDir, key))
-	if err != nil {
-		return meta{}, false
-	}
-	var m meta
-	if err := json.Unmarshal(data, &m); err != nil {
-		return meta{}, false
-	}
-	if m.Resolved == "" {
-		return meta{}, false
-	}
-	return m, true
-}
-
-// writePointer atomically stores the floating-ref pointer for key (temp
-// file in the same directory, then rename).
-func writePointer(cacheDir, key string, m meta) {
-	p := pointerPath(cacheDir, key)
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return
-	}
-	data, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(p), "ptr-*")
-	if err != nil {
-		return
-	}
-	name := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(name)
-		return
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(name)
-		return
-	}
-	// Rename over an existing pointer is atomic on POSIX: the new pointer
-	// replaces the old one in one step.
-	_ = os.Rename(name, p)
+	sourcecache.WritePointer(f.dir, cacheKey(url, refSpec), sourcecache.Meta{
+		URL: url, Ref: refSpec, Resolved: resolved, FetchedAt: time.Now().Format(time.RFC3339),
+	})
 }

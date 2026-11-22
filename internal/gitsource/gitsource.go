@@ -28,9 +28,6 @@ package gitsource
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -48,6 +45,7 @@ import (
 	"github.com/banschikovde/fluxview/internal/cachedir"
 	"github.com/banschikovde/fluxview/internal/flux"
 	"github.com/banschikovde/fluxview/internal/git"
+	"github.com/banschikovde/fluxview/internal/sourcecache"
 )
 
 // seedFileName records the provenance of one clone directory inside the
@@ -108,15 +106,6 @@ func DefaultNoFetch() bool {
 	return false
 }
 
-// meta is the shared shape of the in-clone seed file and the floating-ref
-// pointer: what was requested, what it resolved to, and when.
-type meta struct {
-	URL       string `json:"url"`
-	Ref       string `json:"ref"`
-	Resolved  string `json:"resolved"`
-	FetchedAt string `json:"fetchedAt"`
-}
-
 // Fetcher clones external GitRepository sources into the git source cache.
 // A nil *Fetcher (or a disabled cache directory) still fetches — every
 // clone lands in a private temp directory with no reuse — because the
@@ -133,11 +122,12 @@ type Fetcher struct {
 	// lazily and removed by Close (guarded by mu).
 	offDir string
 
-	// inflight dedups concurrent Ensure calls for the same clone directory
-	// within one process: the second caller waits for the first clone
-	// instead of racing it with a duplicate.
-	mu       sync.Mutex
-	inflight map[string]chan struct{}
+	// dedup serializes concurrent Ensure calls for the same clone
+	// directory within one process (shared plumbing, see sourcecache).
+	dedup *sourcecache.Dedup
+
+	// mu guards offDir (lazily created).
+	mu sync.Mutex
 
 	// auth resolves environment credentials (SSH keys, agent, basic auth)
 	// for every network operation of this Fetcher; closed by Close. Nil
@@ -151,8 +141,8 @@ type Fetcher struct {
 // A negative ttl is normalized to zero (always re-resolve floating refs).
 func NewFetcher(cacheDir string, ttl time.Duration) *Fetcher {
 	f := &Fetcher{
-		inflight: make(map[string]chan struct{}),
-		auth:     newAuthResolver(),
+		dedup: sourcecache.NewDedup(),
+		auth:  newAuthResolver(),
 	}
 	if !cachedir.Disabled(cacheDir) {
 		f.dir = cacheDir
@@ -277,7 +267,7 @@ func (f *Fetcher) Ensure(ctx context.Context, repo flux.GitRepository) (string, 
 	}
 
 	dir := filepath.Join(f.dir, "data", cacheKey(url, resolved))
-	if seedValid(dir) {
+	if sourcecache.SeedValid(dir, seedFileName) {
 		f.rememberPointer(url, refSpec, resolved, resolvedFresh)
 		return dir, nil
 	}
@@ -298,7 +288,7 @@ func (f *Fetcher) resolveRef(ctx context.Context, url string, repo flux.GitRepos
 		return refSpec, "", false, nil
 	}
 	if f != nil && f.dir != "" {
-		if p, ok := readPointer(f.dir, cacheKey(url, refSpec)); ok && f.fresh(p) {
+		if p, ok := sourcecache.ReadPointer(f.dir, cacheKey(url, refSpec)); ok && sourcecache.Fresh(f.ttl, p) {
 			return p.Resolved, "", true, nil
 		}
 	}
@@ -333,33 +323,9 @@ func (f *Fetcher) ensureUncached(ctx context.Context, url, resolved, cloneRef st
 // cloneSynced clones url at resolved into dir, deduplicating concurrent
 // clones of the same directory within this process.
 func (f *Fetcher) cloneSynced(ctx context.Context, url, resolved, cloneRef, dir string, auth transport.AuthMethod) error {
-	key := cacheKey(url, resolved)
-
-	f.mu.Lock()
-	if done, ok := f.inflight[key]; ok {
-		f.mu.Unlock()
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-		if seedValid(dir) {
-			return nil
-		}
-		// The first clone failed; try again ourselves.
-		return f.cloneSynced(ctx, url, resolved, cloneRef, dir, auth)
-	}
-	done := make(chan struct{})
-	f.inflight[key] = done
-	f.mu.Unlock()
-
-	err := cloneAtomic(ctx, f.dir, url, resolved, cloneRef, dir, auth)
-
-	f.mu.Lock()
-	delete(f.inflight, key)
-	f.mu.Unlock()
-	close(done)
-	return err
+	return f.dedup.Do(ctx, cacheKey(url, resolved),
+		func() bool { return sourcecache.SeedValid(dir, seedFileName) },
+		func() error { return cloneAtomic(ctx, f.dir, url, resolved, cloneRef, dir, auth) })
 }
 
 // rememberPointer records a floating-ref resolution (branch/semver/HEAD →
@@ -370,22 +336,9 @@ func (f *Fetcher) rememberPointer(url, refSpec, resolved string, fresh bool) {
 	if f == nil || f.dir == "" || refSpec == resolved || fresh {
 		return
 	}
-	m := meta{URL: url, Ref: refSpec, Resolved: resolved, FetchedAt: time.Now().Format(time.RFC3339)}
-	writePointer(f.dir, cacheKey(url, refSpec), m)
-}
-
-// fresh reports whether a floating-ref resolution is still within the TTL.
-// With ttl == 0 nothing is fresh — floating refs always re-resolve (the
-// fresh resolution is still written back for later runs).
-func (f *Fetcher) fresh(m meta) bool {
-	if f == nil || f.ttl <= 0 {
-		return false
-	}
-	ts, err := time.Parse(time.RFC3339, m.FetchedAt)
-	if err != nil {
-		return false
-	}
-	return time.Since(ts) < f.ttl
+	sourcecache.WritePointer(f.dir, cacheKey(url, refSpec), sourcecache.Meta{
+		URL: url, Ref: refSpec, Resolved: resolved, FetchedAt: time.Now().Format(time.RFC3339),
+	})
 }
 
 // resolveFloating resolves a floating ref to its immutable form without a
@@ -448,29 +401,18 @@ func cloneAtomic(ctx context.Context, cacheDir, url, resolved, cloneRef, dir str
 		os.RemoveAll(tmp)
 		return err
 	}
-	m := meta{URL: url, Ref: resolved, Resolved: resolved, FetchedAt: time.Now().Format(time.RFC3339)}
-	seed, err := json.MarshalIndent(m, "", "  ")
-	if err == nil {
-		err = os.WriteFile(filepath.Join(tmp, seedFileName), seed, 0o644)
-	}
-	if err != nil {
+	if err := sourcecache.WriteSeed(tmp, seedFileName, sourcecache.Meta{
+		URL: url, Ref: resolved, Resolved: resolved, FetchedAt: time.Now().Format(time.RFC3339),
+	}); err != nil {
 		os.RemoveAll(tmp)
 		return fmt.Errorf("recording git source seed: %w", err)
 	}
 
-	if err := os.Rename(tmp, dir); err != nil {
-		// Another process won the race; reuse its directory if complete.
-		if seedValid(dir) {
-			os.RemoveAll(tmp)
-			return nil
-		}
-		// The target exists but is broken (interrupted copy, corrupted
-		// seed) — replace it while holding nothing else.
-		os.RemoveAll(dir)
-		if err := os.Rename(tmp, dir); err != nil {
-			os.RemoveAll(tmp)
-			return fmt.Errorf("publishing git source clone: %w", err)
-		}
+	// A rename race with a concurrent process is fine — Publish drops the
+	// loser's tmp and reuses the winner's directory when it is complete.
+	if err := sourcecache.Publish(tmp, dir, func(d string) bool { return sourcecache.SeedValid(d, seedFileName) }); err != nil {
+		os.RemoveAll(tmp)
+		return err
 	}
 	return nil
 }
@@ -623,71 +565,5 @@ func lsRemoteHead(ctx context.Context, url string, auth transport.AuthMethod) (s
 
 // cacheKey is the shared content key of a (normalized url, ref spec) pair.
 func cacheKey(url, refSpec string) string {
-	h := sha256.Sum256([]byte(git.NormalizeGitURL(url) + "\x00" + refSpec))
-	return hex.EncodeToString(h[:])
-}
-
-// seedValid reports whether dir holds a complete clone: the seed file
-// exists, parses and names a resolution.
-func seedValid(dir string) bool {
-	data, err := os.ReadFile(filepath.Join(dir, seedFileName))
-	if err != nil {
-		return false
-	}
-	var m meta
-	if err := json.Unmarshal(data, &m); err != nil {
-		return false
-	}
-	return m.Resolved != ""
-}
-
-// pointerPath is the floating-ref pointer file for key.
-func pointerPath(cacheDir, key string) string {
-	return filepath.Join(cacheDir, "refs", key+".json")
-}
-
-// readPointer loads the floating-ref pointer for key, if present and valid.
-func readPointer(cacheDir, key string) (meta, bool) {
-	data, err := os.ReadFile(pointerPath(cacheDir, key))
-	if err != nil {
-		return meta{}, false
-	}
-	var m meta
-	if err := json.Unmarshal(data, &m); err != nil {
-		return meta{}, false
-	}
-	if m.Resolved == "" {
-		return meta{}, false
-	}
-	return m, true
-}
-
-// writePointer atomically stores the floating-ref pointer for key (temp
-// file in the same directory, then rename).
-func writePointer(cacheDir, key string, m meta) {
-	p := pointerPath(cacheDir, key)
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return
-	}
-	data, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(p), "ptr-*")
-	if err != nil {
-		return
-	}
-	name := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(name)
-		return
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(name)
-		return
-	}
-	// Rename over an existing pointer is atomic on POSIX: the new pointer
-	// replaces the old one in one step.
-	_ = os.Rename(name, p)
+	return sourcecache.Key(git.NormalizeGitURL(url), refSpec)
 }
