@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/banschikovde/fluxview/internal/flux"
 	"github.com/banschikovde/fluxview/internal/validate"
 )
 
@@ -379,6 +380,54 @@ spec:
 	}
 	if strings.Contains(stderr, "not found locally") {
 		t.Errorf("suspended KS must not warn about its path, got:\n%s", stderr)
+	}
+}
+
+// TestRunValidate_UnfetchedSourceMissingPath_WarnsAndPasses pins the fix
+// for issue #21: a Kustomization sourced from OCIRepository (or Bucket) —
+// kinds fluxview never fetches — warn-and-skips when its spec.path is
+// absent from the checkout instead of failing the gate. The path lives
+// inside the artifact and Flux reconciles it in-cluster, so the same
+// best-effort contract as an unfetched external GitRepository applies; a
+// local GitRepository source keeps failing the gate (test above).
+func TestRunValidate_UnfetchedSourceMissingPath_WarnsAndPasses(t *testing.T) {
+	for _, kind := range []string{flux.KindOCIRepository, flux.KindBucket} {
+		t.Run(kind, func(t *testing.T) {
+			repoRoot := t.TempDir()
+			gitInit(t, repoRoot)
+
+			clusterDir := filepath.Join(repoRoot, "cluster")
+			writeHelper(t, clusterDir, "ks.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: envoy-crds
+  namespace: flux-system
+spec:
+  interval: 24h
+  path: ./gateway-helm/charts/crds/crds
+  prune: false
+  sourceRef:
+    kind: `+kind+`
+    name: envoy-crds
+`)
+
+			var runErr error
+			stderr := captureStderr(func() {
+				runErr = runValidate(context.Background(), &ValidateFlags{
+					Path:                  clusterDir,
+					disableDefaultSchemas: true,
+				})
+			})
+			if runErr != nil {
+				t.Fatalf("a %s-sourced Kustomization with a path outside the checkout must not fail the gate, got: %v\nstderr:\n%s", kind, runErr, stderr)
+			}
+			if !strings.Contains(stderr, "path ./gateway-helm/charts/crds/crds not found locally (source kind "+kind+" is not fetched externally)") {
+				t.Errorf("expected the per-KS skip warning, got:\n%s", stderr)
+			}
+			if !strings.Contains(stderr, "left unchecked") || !strings.Contains(stderr, "flux-system/envoy-crds") {
+				t.Errorf("the gate summary must name the unchecked Kustomization, got:\n%s", stderr)
+			}
+		})
 	}
 }
 

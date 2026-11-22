@@ -28,7 +28,7 @@ type gitSourceEnv struct {
 	// sources are still identified (their paths must not resolve against the
 	// local repository), but ensure fails fast instead of cloning. The KS then
 	// follows the ordinary fetch-failure path: warn + skip in build/diff,
-	// gate failure in validate.
+	// warn and leave unchecked in validate.
 	noFetch bool
 }
 

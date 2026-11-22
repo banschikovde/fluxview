@@ -548,7 +548,8 @@ type ksSourceResolution struct {
 // the same name happens to exist locally, it is a different repository's
 // content. Everything else (local GitRepository, OCIRepository, Bucket,
 // unknown source) resolves locally. A failed external fetch reports into
-// env.report (validate fails on it) and yields an unusable resolution.
+// env.report (validate warns and leaves the Kustomization unchecked) and
+// yields an unusable resolution.
 func resolveKSSource(ctx context.Context, env *ksBuildEnv, ks flux.Kustomization, key string, knownRepos map[string]flux.GitRepository) ksSourceResolution {
 	res := ksSourceResolution{readRoot: env.repoRoot}
 	if ks.Spec.Path == "" {
@@ -602,26 +603,46 @@ func resolveKSSource(ctx context.Context, env *ksBuildEnv, ks flux.Kustomization
 // warnMissingKSSource reports a Kustomization whose source path is absent
 // (in the external clone or locally) and records it for the validate
 // gate — its resources would be silently missing from the checked set.
+// OCIRepository and Bucket sources are the exception: fluxview never
+// fetches them, so their spec.path lives inside an artifact that cannot
+// be checked out, and a local miss says nothing about the manifest —
+// those are recorded as unchecked (warn), exactly like an unfetched
+// external GitRepository.
 func warnMissingKSSource(ks flux.Kustomization, externalSource string, report *buildReport) {
 	if ks.Spec.Path == "" {
 		return
 	}
+	key := fmt.Sprintf("%s/%s", ks.Metadata.Namespace, ks.Metadata.Name)
+	kind := ks.Spec.SourceRef.Kind
 	switch {
 	case externalSource != "":
 		fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found in external source %s, skipping its resources\n",
 			ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, externalSource)
-	case ks.Spec.SourceRef.Kind == flux.KindOCIRepository || ks.Spec.SourceRef.Kind == flux.KindBucket:
+		recordMissingKSPath(report, key, ks.Spec.Path)
+	case kind == flux.KindOCIRepository || kind == flux.KindBucket:
 		fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally (source kind %s is not fetched externally), skipping its resources\n",
-			ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, ks.Spec.SourceRef.Kind)
+			ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, kind)
+		if report != nil {
+			report.fetchErrors = append(report.fetchErrors, fetchError{
+				ks:     key,
+				source: describeSource(ks),
+				err:    fmt.Sprintf("source kind %s is not fetched externally, path %s not found locally", kind, ks.Spec.Path),
+			})
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally, skipping its resources\n",
 			ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path)
+		recordMissingKSPath(report, key, ks.Spec.Path)
 	}
+}
+
+// recordMissingKSPath files a Kustomization as a gate failure for
+// validate: its spec.path is missing from a repository fluxview can see
+// (the local checkout or a fetched external clone), so a silent skip
+// would report success while its resources never reach the checked set.
+func recordMissingKSPath(report *buildReport, ks, path string) {
 	if report != nil {
-		report.missingPaths = append(report.missingPaths, missingPath{
-			ks:   fmt.Sprintf("%s/%s", ks.Metadata.Namespace, ks.Metadata.Name),
-			path: ks.Spec.Path,
-		})
+		report.missingPaths = append(report.missingPaths, missingPath{ks: ks, path: path})
 	}
 }
 

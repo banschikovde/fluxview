@@ -212,9 +212,10 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 	// A validation gate must not pass on a partial build: kustomize build
 	// failures, KS paths missing from the repository, or unfetchable
 	// external sources all leave resources silently absent from the
-	// checked set. The first two fail the run; unfetchable external
-	// content is best-effort (warn) — failing would abort every
-	// --no-git-source-fetch run outright.
+	// checked set. The first two fail the run; content fluxview cannot
+	// obtain — unfetchable external sources and never-fetched
+	// OCIRepository/Bucket sources — is best-effort (warn) — failing would
+	// abort every --no-git-source-fetch run outright.
 	if err := gatePartialBuild(buildState); err != nil {
 		return err
 	}

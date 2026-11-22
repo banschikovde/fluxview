@@ -310,8 +310,10 @@ type missingPath struct {
 	path string // the declared spec.path
 }
 
-// fetchError is one Flux Kustomization whose external GitRepository source
-// could not be fetched, so its resources are missing from the output.
+// fetchError is one Flux Kustomization whose source content could not be
+// obtained externally — an unfetched external GitRepository, or an
+// OCIRepository/Bucket source fluxview never fetches — so its resources
+// are missing from the output.
 type fetchError struct {
 	ks     string // "namespace/name"
 	source string // e.g. "GitRepository kyverno/kyverno"
