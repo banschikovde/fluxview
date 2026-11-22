@@ -268,13 +268,31 @@ spec:
     kind: OCIRepository
     name: envoy-crds
 `)
-	writeHelper(t, clusterDir, "app.yaml", `apiVersion: v1
-kind: ConfigMap
+	writeHelper(t, clusterDir, "app.yaml", `apiVersion: test.example.com/v1
+kind: Widget
 metadata:
-  name: app-cm
-data:
-  key: value
+  name: app-widget
+spec:
+  size: large
+  color: red
 `)
+
+	// A local schema source: without one the validator reports no results
+	// at all, and an empty report could not prove the local tree was
+	// actually checked.
+	schemaDir := filepath.Join(repoRoot, "schemas")
+	if err := os.MkdirAll(schemaDir, 0755); err != nil {
+		t.Fatalf("mkdir schema dir: %v", err)
+	}
+	writeHelper(t, schemaDir, "widget-test-v1.json", `{
+	"type": "object",
+	"properties": {
+		"spec": {"type": "object", "required": ["color"], "properties": {
+			"size": {"type": "string"},
+			"color": {"type": "string"}
+		}}
+	}
+}`)
 
 	var runErr error
 	var stderr string
@@ -282,6 +300,7 @@ data:
 		stderr = captureStderr(func() {
 			runErr = runValidate(context.Background(), &ValidateFlags{
 				Path:                  clusterDir,
+				SchemaDir:             schemaDir,
 				Output:                "json",
 				disableDefaultSchemas: true,
 			})
@@ -296,6 +315,20 @@ data:
 	}
 	if report.Summary.Invalid != 0 {
 		t.Errorf("summary = %+v, want invalid=0\n%s", report.Summary, stdout)
+	}
+	// The local tree must actually be in the report — a green summary on
+	// an empty resource list would also "pass" the check above.
+	var widgetSeen bool
+	for _, r := range report.Resources {
+		if r.Kind == "Widget" && r.Name == "app-widget" {
+			widgetSeen = true
+			if r.Status != string(validate.StatusValid) {
+				t.Errorf("app-widget status = %s, want %s\n%s", r.Status, validate.StatusValid, stdout)
+			}
+		}
+	}
+	if !widgetSeen {
+		t.Errorf("the local Widget app-widget must be in the report, got:\n%s", stdout)
 	}
 	if !strings.Contains(stderr, "left unchecked") {
 		t.Errorf("the unchecked Kustomization must be named in stderr, got:\n%s", stderr)

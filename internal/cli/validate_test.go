@@ -431,6 +431,67 @@ spec:
 	}
 }
 
+// TestRunValidate_UncheckedOCISource_GroupsByCause: several
+// Kustomizations of one never-fetched OCIRepository (here with different
+// paths) share a single cause — the gate summary must fold them into one
+// entry, stating the source once, not one entry per Kustomization.
+func TestRunValidate_UncheckedOCISource_GroupsByCause(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+
+	clusterDir := filepath.Join(repoRoot, "cluster")
+	for _, ks := range []struct{ file, name, path string }{
+		{"envoy-crds.yaml", "envoy-crds", "./gateway-helm/charts/crds/crds"},
+		{"envoy-extra.yaml", "envoy-extra", "./gateway-helm/charts/crds/extra"},
+	} {
+		writeHelper(t, clusterDir, ks.file, `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: `+ks.name+`
+  namespace: flux-system
+spec:
+  interval: 24h
+  path: `+ks.path+`
+  sourceRef:
+    kind: OCIRepository
+    name: envoy
+`)
+	}
+
+	var runErr error
+	stderr := captureStderr(func() {
+		runErr = runValidate(context.Background(), &ValidateFlags{
+			Path:                  clusterDir,
+			disableDefaultSchemas: true,
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("never-fetched OCI sources must not fail the gate, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+
+	var gateLine string
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.Contains(line, "left unchecked") {
+			gateLine = line
+			break
+		}
+	}
+	if gateLine == "" {
+		t.Fatalf("gate summary not found in stderr:\n%s", stderr)
+	}
+	// "flux-system/envoy:" (the source, colon-terminated) must appear
+	// exactly once; the bare prefix also matches both Kustomization names,
+	// hence the colon.
+	if got := strings.Count(gateLine, "flux-system/envoy:"); got != 1 {
+		t.Errorf("the shared cause must be stated exactly once in the gate summary, got %d times: %s", got, gateLine)
+	}
+	for _, name := range []string{"flux-system/envoy-crds", "flux-system/envoy-extra"} {
+		if !strings.Contains(gateLine, name) {
+			t.Errorf("gate summary must name %s, got: %s", name, gateLine)
+		}
+	}
+}
+
 // TestRunValidate_OCISourceLocalPathBuilds: an OCIRepository-sourced
 // Kustomization whose spec.path exists in the checkout builds like any
 // local path — the intended case for a flux push artifact of this very
