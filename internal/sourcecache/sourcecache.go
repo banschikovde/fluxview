@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -211,4 +212,107 @@ func Publish(tmp, dir string, valid func(dir string) bool) error {
 		}
 	}
 	return nil
+}
+
+// ttlWarnOnce keeps the invalid-env warning to a single line per env per
+// process (the same convention as the Helm cache).
+var (
+	ttlWarnMu   sync.Mutex
+	ttlWarnOnce = map[string]bool{}
+)
+
+// TTLFromEnv reads a source-cache TTL env (Go duration) with the shared
+// convention: unset → 10 minutes; invalid → one warning line naming the
+// env, then the default; zero is returned as-is (always re-resolve).
+func TTLFromEnv(envName string) time.Duration {
+	const def = 10 * time.Minute
+	v := os.Getenv(envName)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		ttlWarnMu.Lock()
+		warned := ttlWarnOnce[envName]
+		ttlWarnOnce[envName] = true
+		ttlWarnMu.Unlock()
+		if !warned {
+			fmt.Fprintf(os.Stderr, "Warning: invalid %s %q, using %s\n", envName, v, def)
+		}
+		return def
+	}
+	return d
+}
+
+// NoFetchFromEnv reads a source-fetch kill-switch env: 1/true/yes/on
+// (case-insensitive, whitespace-tolerant) means off.
+func NoFetchFromEnv(envName string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(envName))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// TempBase is the per-process base directory for cache-disabled fetches:
+// created lazily on first use, removed by Remove, never reused across
+// runs.
+type TempBase struct {
+	mu  sync.Mutex
+	dir string
+}
+
+// Dir creates the base directory on first use (MkdirTemp with prefix) and
+// returns it.
+func (t *TempBase) Dir(prefix string) (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.dir == "" {
+		dir, err := os.MkdirTemp("", prefix)
+		if err != nil {
+			return "", fmt.Errorf("preparing source fetch: %w", err)
+		}
+		t.dir = dir
+	}
+	return t.dir, nil
+}
+
+// Remove deletes the base directory, if one was created. Safe when unused.
+func (t *TempBase) Remove() error {
+	t.mu.Lock()
+	dir := t.dir
+	t.mu.Unlock()
+	if dir == "" {
+		return nil
+	}
+	return os.RemoveAll(dir)
+}
+
+// RememberPointer records a floating-ref resolution (→ immutable resolved
+// form) with the current timestamp under the caller's key (each fetcher
+// keys by its own URL normalization), unless the value came from that very
+// pointer (fresh) or the ref is its own resolved form. cacheDir empty is a
+// no-op (disabled cache).
+func RememberPointer(cacheDir, key, url, refSpec, resolved string, fresh bool) {
+	if cacheDir == "" || refSpec == resolved || fresh {
+		return
+	}
+	WritePointer(cacheDir, key, Meta{
+		URL: url, Ref: refSpec, Resolved: resolved, FetchedAt: time.Now().Format(time.RFC3339),
+	})
+}
+
+// ScratchDir allocates a fresh temp directory under <cacheDir>/tmp for an
+// in-progress fetch; the caller removes it on failure or publishes it via
+// Publish.
+func ScratchDir(cacheDir, pattern string) (string, error) {
+	tmp := filepath.Join(cacheDir, "tmp")
+	if err := os.MkdirAll(tmp, 0o755); err != nil {
+		return "", fmt.Errorf("preparing source cache: %w", err)
+	}
+	dir, err := os.MkdirTemp(tmp, pattern)
+	if err != nil {
+		return "", fmt.Errorf("preparing source fetch: %w", err)
+	}
+	return dir, nil
 }

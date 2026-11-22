@@ -47,28 +47,12 @@ func DefaultCacheDir() string {
 	return cachedir.DefaultDir("FLUXVIEW_OCI_SOURCE_CACHE_DIR", "oci-sources")
 }
 
-// warnTTLOnce keeps the invalid-env warning to a single line per process
-// (same convention as the git source and Helm caches).
-var warnTTLOnce sync.Once
-
 // DefaultTTL returns how long a floating-ref resolution (tag/semver/latest
 // → digest pointer) stays fresh: env FLUXVIEW_OCI_SOURCE_CACHE_TTL (Go
 // duration), else 10 minutes. Zero always re-resolves (fresh results are
 // still written).
 func DefaultTTL() time.Duration {
-	const def = 10 * time.Minute
-	v := os.Getenv("FLUXVIEW_OCI_SOURCE_CACHE_TTL")
-	if v == "" {
-		return def
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		warnTTLOnce.Do(func() {
-			fmt.Fprintf(os.Stderr, "Warning: invalid FLUXVIEW_OCI_SOURCE_CACHE_TTL %q, using %s\n", v, def)
-		})
-		return def
-	}
-	return d
+	return sourcecache.TTLFromEnv("FLUXVIEW_OCI_SOURCE_CACHE_TTL")
 }
 
 // EnvNoFetch turns OCI artifact fetching off for the run: no registry
@@ -80,11 +64,7 @@ const EnvNoFetch = "FLUXVIEW_NO_OCI_SOURCE_FETCH"
 // DefaultNoFetch reports whether OCI artifact fetching is off by default:
 // env FLUXVIEW_NO_OCI_SOURCE_FETCH (1/true/yes/on).
 func DefaultNoFetch() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvNoFetch))) {
-	case "1", "true", "yes", "on":
-		return true
-	}
-	return false
+	return sourcecache.NoFetchFromEnv(EnvNoFetch)
 }
 
 // Fetcher downloads OCIRepository artifacts into the OCI source cache.
@@ -100,16 +80,13 @@ type Fetcher struct {
 	// Zero always re-resolves. Digest-pinned refs ignore it.
 	ttl time.Duration
 
-	// offDir is the base directory for cache-disabled fetches, created
-	// lazily and removed by Close (guarded by mu).
-	offDir string
+	// temp is the base directory for cache-disabled fetches, created
+	// lazily and removed by Close.
+	temp sourcecache.TempBase
 
 	// dedup serializes concurrent Ensure calls for the same artifact
 	// directory within one process (shared plumbing, see sourcecache).
 	dedup *sourcecache.Dedup
-
-	// mu guards offDir (lazily created).
-	mu sync.Mutex
 
 	// clientOnce guards the lazy construction of the shared registry
 	// client (with its token cache and docker-config credentials).
@@ -141,28 +118,13 @@ func (f *Fetcher) Close() error {
 	if f == nil {
 		return nil
 	}
-	f.mu.Lock()
-	offDir := f.offDir
-	f.mu.Unlock()
-	if offDir != "" {
-		return os.RemoveAll(offDir)
-	}
-	return nil
+	return f.temp.Remove()
 }
 
 // offTempDir returns the base directory for cache-disabled fetches,
 // creating it on first use.
 func (f *Fetcher) offTempDir() (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.offDir == "" {
-		dir, err := os.MkdirTemp("", "fluxview-ocisource-*")
-		if err != nil {
-			return "", fmt.Errorf("preparing OCI source fetch: %w", err)
-		}
-		f.offDir = dir
-	}
-	return f.offDir, nil
+	return f.temp.Dir("fluxview-ocisource-*")
 }
 
 // Ensure returns a local directory holding the extracted artifact content
@@ -326,15 +288,9 @@ func (f *Fetcher) fetchSynced(ctx context.Context, url, base, resolved string, r
 // fetchAtomic extracts the artifact into a temp directory and publishes it
 // with a rename, tolerating a concurrent winner of the same target.
 func (f *Fetcher) fetchAtomic(ctx context.Context, base, resolved string, repo flux.OCIRepository, dir string) error {
-	if err := os.MkdirAll(filepath.Join(f.dir, "tmp"), 0o755); err != nil {
-		return fmt.Errorf("preparing OCI source cache: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Join(f.dir, "data"), 0o755); err != nil {
-		return fmt.Errorf("preparing OCI source cache: %w", err)
-	}
-	tmp, err := os.MkdirTemp(filepath.Join(f.dir, "tmp"), "fetch-*")
+	tmp, err := sourcecache.ScratchDir(f.dir, "fetch-*")
 	if err != nil {
-		return fmt.Errorf("preparing OCI source fetch: %w", err)
+		return err
 	}
 	defer os.RemoveAll(tmp)
 
@@ -400,13 +356,11 @@ func dataKey(url, resolved string, sel *flux.OCILayerSelector) string {
 }
 
 // rememberPointer records a floating-ref resolution (tag/semver/latest →
-// manifest digest) with the current timestamp, unless the fresh value came
-// from that very pointer or the ref is its own resolved form.
+// manifest digest); nil-safe on a nil Fetcher (nothing to remember).
 func (f *Fetcher) rememberPointer(url, refSpec, resolved string, fresh bool) {
-	if f == nil || f.dir == "" || refSpec == resolved || fresh {
-		return
+	var dir string
+	if f != nil {
+		dir = f.dir
 	}
-	sourcecache.WritePointer(f.dir, cacheKey(url, refSpec), sourcecache.Meta{
-		URL: url, Ref: refSpec, Resolved: resolved, FetchedAt: time.Now().Format(time.RFC3339),
-	})
+	sourcecache.RememberPointer(dir, cacheKey(url, refSpec), url, refSpec, resolved, fresh)
 }

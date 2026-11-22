@@ -249,3 +249,84 @@ func TestPublishReusesWinnerAndReplacesBroken(t *testing.T) {
 		t.Errorf("a broken target must be replaced, got %q", data)
 	}
 }
+
+func TestTTLFromEnv(t *testing.T) {
+	t.Setenv("TTL_TEST_ENV", "")
+	if got := TTLFromEnv("TTL_TEST_ENV"); got != 10*time.Minute {
+		t.Errorf("unset env must yield the 10m default, got %s", got)
+	}
+	t.Setenv("TTL_TEST_ENV", "90s")
+	if got := TTLFromEnv("TTL_TEST_ENV"); got != 90*time.Second {
+		t.Errorf("a valid duration must pass through, got %s", got)
+	}
+	t.Setenv("TTL_TEST_ENV", "nonsense")
+	if got := TTLFromEnv("TTL_TEST_ENV"); got != 10*time.Minute {
+		t.Errorf("an invalid value must fall back to the default, got %s", got)
+	}
+}
+
+func TestNoFetchFromEnv(t *testing.T) {
+	for _, v := range []string{"1", "true", "YES", " on "} {
+		t.Setenv("SWITCH_TEST_ENV", v)
+		if !NoFetchFromEnv("SWITCH_TEST_ENV") {
+			t.Errorf("%q must read as on", v)
+		}
+	}
+	for _, v := range []string{"", "0", "false", "maybe"} {
+		t.Setenv("SWITCH_TEST_ENV", v)
+		if NoFetchFromEnv("SWITCH_TEST_ENV") {
+			t.Errorf("%q must read as off", v)
+		}
+	}
+}
+
+func TestTempBaseLifecycle(t *testing.T) {
+	var tb TempBase
+	if err := tb.Remove(); err != nil {
+		t.Fatalf("Remove before any Dir must be a no-op: %v", err)
+	}
+	dir, err := tb.Dir("fluxview-test-*")
+	if err != nil {
+		t.Fatalf("Dir: %v", err)
+	}
+	again, err := tb.Dir("fluxview-test-*")
+	if err != nil || again != dir {
+		t.Fatalf("Dir must be memoized: %q vs %q (err %v)", again, dir, err)
+	}
+	if err := tb.Remove(); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Error("Remove must delete the directory")
+	}
+}
+
+func TestRememberPointer(t *testing.T) {
+	cache := t.TempDir()
+	// The fresh-from-pointer and self-resolved cases write nothing.
+	RememberPointer(cache, "k", "u", "tag:v1", "digest:sha256:x", true)
+	RememberPointer(cache, "k", "u", "digest:sha256:x", "digest:sha256:x", false)
+	if _, ok := ReadPointer(cache, "k"); ok {
+		t.Error("neither a fresh nor a self-resolved resolution writes a pointer")
+	}
+	RememberPointer(cache, "k", "u", "tag:v1", "digest:sha256:x", false)
+	if m, ok := ReadPointer(cache, "k"); !ok || m.Resolved != "digest:sha256:x" {
+		t.Fatalf("pointer not recorded: ok=%v m=%+v", ok, m)
+	}
+	RememberPointer("", "k", "u", "tag:v1", "digest:sha256:x", false) // no-op, no panic
+}
+
+func TestScratchDir(t *testing.T) {
+	cache := t.TempDir()
+	dir, err := ScratchDir(cache, "fetch-*")
+	if err != nil {
+		t.Fatalf("ScratchDir: %v", err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("scratch dir missing: %v", err)
+	}
+	rel, err := filepath.Rel(cache, dir)
+	if err != nil || filepath.Dir(rel) != "tmp" {
+		t.Errorf("scratch dir must live under <cache>/tmp, got %s (rel %s)", dir, rel)
+	}
+}

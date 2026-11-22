@@ -67,27 +67,11 @@ func DefaultCacheDir() string {
 	return cachedir.DefaultDir("FLUXVIEW_GIT_SOURCE_CACHE_DIR", "git-sources")
 }
 
-// warnTTLOnce keeps the invalid-env warning to a single line per process
-// (same convention as the Helm and build caches).
-var warnTTLOnce sync.Once
-
 // DefaultTTL returns how long a floating-ref resolution (branch/semver/HEAD
 // pointer) stays fresh: env FLUXVIEW_GIT_SOURCE_CACHE_TTL (Go duration),
 // else 10 minutes. Zero always re-resolves (fresh results are still written).
 func DefaultTTL() time.Duration {
-	const def = 10 * time.Minute
-	v := os.Getenv("FLUXVIEW_GIT_SOURCE_CACHE_TTL")
-	if v == "" {
-		return def
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		warnTTLOnce.Do(func() {
-			fmt.Fprintf(os.Stderr, "Warning: invalid FLUXVIEW_GIT_SOURCE_CACHE_TTL %q, using %s\n", v, def)
-		})
-		return def
-	}
-	return d
+	return sourcecache.TTLFromEnv("FLUXVIEW_GIT_SOURCE_CACHE_TTL")
 }
 
 // EnvNoFetch turns external git source cloning off for the run: no ls-remote,
@@ -99,11 +83,7 @@ const EnvNoFetch = "FLUXVIEW_NO_GIT_SOURCE_FETCH"
 // DefaultNoFetch reports whether external git source cloning is off by
 // default: env FLUXVIEW_NO_GIT_SOURCE_FETCH (1/true/yes/on).
 func DefaultNoFetch() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvNoFetch))) {
-	case "1", "true", "yes", "on":
-		return true
-	}
-	return false
+	return sourcecache.NoFetchFromEnv(EnvNoFetch)
 }
 
 // Fetcher clones external GitRepository sources into the git source cache.
@@ -118,16 +98,13 @@ type Fetcher struct {
 	// re-resolves. Pinned refs ignore it.
 	ttl time.Duration
 
-	// offDir is the base directory for cache-disabled clones, created
-	// lazily and removed by Close (guarded by mu).
-	offDir string
+	// temp is the base directory for cache-disabled clones, created
+	// lazily and removed by Close.
+	temp sourcecache.TempBase
 
 	// dedup serializes concurrent Ensure calls for the same clone
 	// directory within one process (shared plumbing, see sourcecache).
 	dedup *sourcecache.Dedup
-
-	// mu guards offDir (lazily created).
-	mu sync.Mutex
 
 	// auth resolves environment credentials (SSH keys, agent, basic auth)
 	// for every network operation of this Fetcher; closed by Close. Nil
@@ -162,13 +139,9 @@ func (f *Fetcher) Close() error {
 	if f == nil {
 		return nil
 	}
-	f.mu.Lock()
-	offDir := f.offDir
-	f.mu.Unlock()
-
 	var errs []error
-	if offDir != "" {
-		errs = append(errs, os.RemoveAll(offDir))
+	if err := f.temp.Remove(); err != nil {
+		errs = append(errs, err)
 	}
 	if f.auth != nil {
 		errs = append(errs, f.auth.Close())
@@ -210,16 +183,7 @@ func explainAuthFailure(res authOutcome, err error) error {
 // offTempDir returns the base directory for cache-disabled clones, creating
 // it on first use.
 func (f *Fetcher) offTempDir() (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.offDir == "" {
-		dir, err := os.MkdirTemp("", "fluxview-gitsource-*")
-		if err != nil {
-			return "", fmt.Errorf("preparing git source clone: %w", err)
-		}
-		f.offDir = dir
-	}
-	return f.offDir, nil
+	return f.temp.Dir("fluxview-gitsource-*")
 }
 
 // Ensure returns a local directory holding the repository clone at the ref
@@ -329,16 +293,15 @@ func (f *Fetcher) cloneSynced(ctx context.Context, url, resolved, cloneRef, dir 
 }
 
 // rememberPointer records a floating-ref resolution (branch/semver/HEAD →
-// immutable resolved form) with the current timestamp, unless the fresh
-// value came from that very pointer. No-ref (HEAD) resolutions are cached
-// under their own empty-ref key, same as every other floating ref.
+// immutable resolved form); nil-safe on a nil Fetcher. No-ref (HEAD)
+// resolutions are cached under their own empty-ref key, same as every
+// other floating ref.
 func (f *Fetcher) rememberPointer(url, refSpec, resolved string, fresh bool) {
-	if f == nil || f.dir == "" || refSpec == resolved || fresh {
-		return
+	var dir string
+	if f != nil {
+		dir = f.dir
 	}
-	sourcecache.WritePointer(f.dir, cacheKey(url, refSpec), sourcecache.Meta{
-		URL: url, Ref: refSpec, Resolved: resolved, FetchedAt: time.Now().Format(time.RFC3339),
-	})
+	sourcecache.RememberPointer(dir, cacheKey(url, refSpec), url, refSpec, resolved, fresh)
 }
 
 // resolveFloating resolves a floating ref to its immutable form without a
@@ -385,17 +348,9 @@ func resolveFloating(ctx context.Context, url string, ref *flux.GitRepositoryRef
 // concurrent process is fine — the loser discards its temp and reuses the
 // winner's directory.
 func cloneAtomic(ctx context.Context, cacheDir, url, resolved, cloneRef, dir string, auth transport.AuthMethod) error {
-	if err := os.MkdirAll(filepath.Join(cacheDir, "tmp"), 0o755); err != nil {
-		return fmt.Errorf("preparing git source cache: %w", err)
-	}
-	// data/ must exist before the publish rename below — rename does not
-	// create missing parents.
-	if err := os.MkdirAll(filepath.Join(cacheDir, "data"), 0o755); err != nil {
-		return fmt.Errorf("preparing git source cache: %w", err)
-	}
-	tmp, err := os.MkdirTemp(filepath.Join(cacheDir, "tmp"), "clone-*")
+	tmp, err := sourcecache.ScratchDir(cacheDir, "clone-*")
 	if err != nil {
-		return fmt.Errorf("preparing git source clone: %w", err)
+		return err
 	}
 	if _, err := cloneOnce(ctx, url, resolved, cloneRef, tmp, auth); err != nil {
 		os.RemoveAll(tmp)
