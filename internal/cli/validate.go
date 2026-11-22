@@ -266,7 +266,7 @@ func runValidate(ctx context.Context, flags *ValidateFlags) error {
 	}
 
 	results := validator.ValidateAll(output)
-	return emitValidationReport(flags, results, validate.Failures(results))
+	return emitValidationReport(flags, results)
 }
 
 // announceValidationContext prints what validation will run against,
@@ -521,7 +521,8 @@ func prefetchSchemas(ctx context.Context, flags *ValidateFlags, output []byte, c
 // emitValidationReport writes the validation report: machine formats to
 // stdout, human text to stderr (stdout stays reserved for machine
 // output), and turns failures into the validation exit code.
-func emitValidationReport(flags *ValidateFlags, results []validate.Result, failures []validate.Result) error {
+func emitValidationReport(flags *ValidateFlags, results []validate.Result) error {
+	failures := validate.Failures(results)
 	switch flags.Output {
 	case "json":
 		if err := writeValidationJSON(os.Stdout, results); err != nil {
