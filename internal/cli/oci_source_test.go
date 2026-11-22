@@ -555,3 +555,102 @@ func TestValidate_OCIArtifact_ValidContent_Passes(t *testing.T) {
 		t.Errorf("a successful fetch must leave no warnings, got:\n%s", stderr)
 	}
 }
+
+// TestOCIArtifact_EmptyPathIsArtifactRoot: a Kustomization on an
+// OCIRepository without spec.path builds the artifact root — Flux's
+// "absent path = source root". Local, git and kill-switch sources keep
+// the historical empty-path behavior (separate follow-up).
+func TestOCIArtifact_EmptyPathIsArtifactRoot(t *testing.T) {
+	f := newOCIFleetFixture(t)
+	f.reg.PushArtifact(t, "u/root", "v1", ocisourcetest.DefaultLayerMediaType, map[string]string{
+		"kustomization.yaml": "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - cm.yaml\n  - hr.yaml\n",
+		"cm.yaml":            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: from-artifact-root\n",
+		"hr.yaml": `apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: root-hr
+  namespace: apps
+spec:
+  chart:
+    spec:
+      chart: charts/my-chart
+      version: "1.0.0"
+      sourceRef:
+        kind: GitRepository
+        name: flux-system
+`,
+	})
+	writeHelper(t, f.clusterDir, "root-source.yaml", `apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: root-source
+  namespace: flux-system
+spec:
+  url: oci://`+f.reg.URL+`/u/root
+  ref:
+    tag: v1
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: root-app
+  namespace: flux-system
+spec:
+  interval: 24h
+  sourceRef:
+    kind: OCIRepository
+    name: root-source
+`)
+	chartDir := filepath.Join(f.repoRoot, "charts", "my-chart")
+	writeHelper(t, chartDir, "Chart.yaml", "apiVersion: v2\nname: my-chart\nversion: 1.0.0\n")
+	writeHelper(t, chartDir, "values.yaml", "")
+	writeHelper(t, filepath.Join(chartDir, "templates"), "dep.yaml", "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: from-local-chart\nspec:\n  replicas: 1\n")
+
+	// build ks: the artifact root's resources are in the output.
+	var runErr error
+	var stderr string
+	stdout := captureStdout(func() {
+		stderr = captureStderr(func() {
+			runErr = runBuild(context.Background(), []string{"ks"}, f.buildFlags())
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("build ks over an empty-path OCI Kustomization must succeed, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+	if !strings.Contains(stdout, "from-artifact-root") {
+		t.Errorf("the artifact root content must build, got:\n%s", stdout)
+	}
+
+	// build hr: a HelmRelease at the artifact root inflates.
+	stdout = captureStdout(func() {
+		stderr = captureStderr(func() {
+			runErr = runBuild(context.Background(), []string{"hr"}, f.buildFlags())
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("build hr must discover the artifact-root HelmRelease, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+	if !strings.Contains(stdout, "from-local-chart") {
+		t.Errorf("the artifact-root HelmRelease must inflate, got:\n%s", stdout)
+	}
+
+	// validate: the artifact root content reaches the checked set.
+	stderr = captureStderr(func() {
+		runErr = runValidate(context.Background(), &ValidateFlags{
+			Path:                  f.clusterDir,
+			disableDefaultSchemas: true,
+			KsCache: kustomizeCacheOptions{
+				ociSourceDir: filepath.Join(f.repoRoot, ".cache-test-oci"),
+				ociSourceTtl: time.Hour,
+				gitSourceDir: filepath.Join(f.repoRoot, ".cache-test-git"),
+				gitSourceTtl: time.Hour,
+			},
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("validate must pass over the artifact root, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+	if strings.Contains(stderr, "left unchecked") || strings.Contains(stderr, "Warning: fetching") {
+		t.Errorf("a successful empty-path fetch must leave no warnings, got:\n%s", stderr)
+	}
+}

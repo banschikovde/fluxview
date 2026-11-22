@@ -568,21 +568,24 @@ type ksSourceResolution struct {
 // exist locally, it is different content that cannot be told apart
 // locally (unless the OCIRepository is listed in
 // FLUXVIEW_OCI_LOCAL_SOURCES — this repository's own pushed artifact).
-// Everything else (local GitRepository, Bucket, unknown source) resolves
-// locally. A failed external fetch reports into env.report (validate
-// warns and leaves the Kustomization unchecked) and yields an unusable
-// resolution.
+// An empty spec.path is the source root — but only the fetched-artifact
+// branch honors it today; for every other source an empty path keeps the
+// historical behavior (the KS resource alone, no warning), matching the
+// pre-feature pipeline. Everything else (local GitRepository, Bucket,
+// unknown source) resolves locally. A failed external fetch reports into
+// env.report (validate warns and leaves the Kustomization unchecked) and
+// yields an unusable resolution.
 func resolveKSSource(ctx context.Context, env *ksBuildEnv, ks flux.Kustomization, key string, known knownSources) ksSourceResolution {
 	res := ksSourceResolution{readRoot: env.repoRoot}
-	if ks.Spec.Path == "" {
-		return res
-	}
 	if s := env.sources; s != nil {
-		if gr, ok := s.git.lookupExternal(known.git, ks); ok {
-			return resolveFromGitClone(ctx, env, ks, key, res, gr)
+		if ks.Spec.Path != "" {
+			if gr, ok := s.git.lookupExternal(known.git, ks); ok {
+				return resolveFromGitClone(ctx, env, ks, key, res, gr)
+			}
 		}
 		// OCIRepository: the artifact is fetched and the path resolves
-		// inside it (source-first), unless the repository is listed in
+		// inside it (source-first; an empty path is the artifact root),
+		// unless the repository is listed in
 		// FLUXVIEW_OCI_LOCAL_SOURCES (this repository's own pushed
 		// artifact) or fetching is disabled (the kill switch restores the
 		// pre-fetch local resolution exactly). Unlike the git fetch above,
@@ -593,6 +596,10 @@ func resolveKSSource(ctx context.Context, env *ksBuildEnv, ks flux.Kustomization
 		if repo, ok := s.oci.lookup(known.oci, ks); ok && s.oci.fetchEnabled() && !s.oci.isLocal(ks) {
 			return resolveFromOCIArtifact(ctx, env, ks, key, res, repo)
 		}
+	}
+
+	if ks.Spec.Path == "" {
+		return res
 	}
 
 	res.sourcePath = resolveSourcePath(env.repoRoot, ks)
@@ -642,10 +649,12 @@ func resolveFromGitClone(ctx context.Context, env *ksBuildEnv, ks flux.Kustomiza
 }
 
 // resolveFromOCIArtifact resolves the Kustomization's path inside the
-// extracted artifact of its OCIRepository. A path missing from the
-// artifact is a real configuration error: externalSource stays set, so
-// warnMissingKSSource treats it like a missing path in a fetched external
-// clone (warning in every mode, validate gate failure).
+// extracted artifact of its OCIRepository; an empty spec.path is the
+// artifact root (Flux: an absent path means the source root). A path
+// missing from the artifact is a real configuration error:
+// externalSource stays set, so warnMissingKSSource treats it like a
+// missing path in a fetched external clone (warning in every mode,
+// validate gate failure).
 func resolveFromOCIArtifact(ctx context.Context, env *ksBuildEnv, ks flux.Kustomization, key string, res ksSourceResolution, repo flux.OCIRepository) ksSourceResolution {
 	res.externalSource = describeSource(ks)
 	artifactDir, err := env.sources.oci.ensure(ctx, repo)
