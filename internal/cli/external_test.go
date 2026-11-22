@@ -612,13 +612,16 @@ func TestBuildHR_UnfetchedKSSource_QuietDiscovery(t *testing.T) {
 			var stderr string
 			stdout := captureStdout(func() {
 				stderr = captureStderr(func() {
-					runErr = runBuild(context.Background(), []string{"hr"}, &BuildFlags{Path: clusterDir})
+					runErr = runBuild(context.Background(), []string{"hr"}, &BuildFlags{
+						Path:             clusterDir,
+						NoOCISourceFetch: true, // the OCI part pins the kill-switch path; Bucket is never fetched
+					})
 				})
 			})
 			if runErr != nil {
 				t.Fatalf("build hr over a tree with a %s-sourced Kustomization must succeed, got: %v\nstderr:\n%s", kind, runErr, stderr)
 			}
-			if strings.Contains(stderr, "not fetched externally") || strings.Contains(stderr, "skipping its resources") {
+			if strings.Contains(stderr, "not fetched") || strings.Contains(stderr, "skipping its resources") {
 				t.Errorf("hr discovery must not print the per-KS skip warning, got:\n%s", stderr)
 			}
 			if !strings.Contains(stdout, "from-local-chart") {
@@ -682,16 +685,17 @@ func TestDiffKS_UnfetchedKSSource_WarnsOnce(t *testing.T) {
 	_ = captureStdout(func() {
 		stderr = captureStderr(func() {
 			runErr = runDiff(context.Background(), []string{"ks"}, &DiffFlags{
-				Path:       clusterDir,
-				BranchOrig: commit,
-				Color:      "never",
+				Path:             clusterDir,
+				BranchOrig:       commit,
+				Color:            "never",
+				NoOCISourceFetch: true,
 			})
 		})
 	})
 	if runErr != nil {
 		t.Fatalf("diff ks over a tree with an OCI-sourced Kustomization must stay lenient, got: %v\nstderr:\n%s", runErr, stderr)
 	}
-	if got := strings.Count(stderr, "not fetched externally"); got != 1 {
+	if got := strings.Count(stderr, "not fetched"); got != 1 {
 		t.Errorf("the skip warning must be printed exactly once (current side only), got %d times:\n%s", got, stderr)
 	}
 }

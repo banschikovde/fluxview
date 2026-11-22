@@ -40,6 +40,9 @@ type BuildFlags struct {
 	// NoGitSourceFetch disables cloning external GitRepository sources
 	// (--no-git-source-fetch): the network kill switch for slow links.
 	NoGitSourceFetch bool
+	// NoOCISourceFetch disables fetching OCIRepository artifacts
+	// (--no-oci-source-fetch).
+	NoOCISourceFetch bool
 }
 
 func newBuildCmd() *cobra.Command {
@@ -80,6 +83,7 @@ Examples:
 	registerKustomizeCacheFlags(cmd, &flags.KsCache)
 	registerGitSourceAuthFlags(cmd, &flags.GitSourceSSHKnownHosts, &flags.GitSourceSSHAcceptNew)
 	registerNoGitSourceFetchFlag(cmd, &flags.NoGitSourceFetch)
+	registerNoOCISourceFetchFlag(cmd, &flags.NoOCISourceFetch)
 
 	return cmd
 }
@@ -162,15 +166,15 @@ func runBuildKS(ctx context.Context, clusterPath, repoRoot, name string, flags *
 		}
 	}
 
-	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache, flags.NoGitSourceFetch)
-	defer gitEnv.Close()
+	sources := newSourceEnvs(ctx, repoRoot, ksCache, flags.NoGitSourceFetch, flags.NoOCISourceFetch)
+	defer sources.Close()
 	output, err := buildKSContent(ctx, &ksBuildEnv{
 		scans:       scans,
 		builder:     builder,
 		repoRoot:    repoRoot,
 		clusterPath: clusterPath,
 		cache:       buildCache,
-		gitSources:  gitEnv,
+		sources:     sources,
 	}, kustomizations, substitutionSources{configMaps: configMaps, secrets: secrets})
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
@@ -213,13 +217,13 @@ func runBuildHR(ctx context.Context, clusterPath, repoRoot, name string, flags *
 	}
 
 	ksCache := flags.KsCache
-	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache, flags.NoGitSourceFetch)
-	defer gitEnv.Close()
+	sources := newSourceEnvs(ctx, repoRoot, ksCache, flags.NoGitSourceFetch, flags.NoOCISourceFetch)
+	defer sources.Close()
 	output, err := buildHRInflation(ctx, &hrInflationEnv{
-		scans:      newScanCache(),
-		helmCache:  helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout, kubeVersion: flags.KubernetesVersion},
-		ksCache:    ksCache,
-		gitSources: gitEnv,
+		scans:     newScanCache(),
+		helmCache: helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout, kubeVersion: flags.KubernetesVersion},
+		ksCache:   ksCache,
+		sources:   sources,
 	}, clusterPath, repoRoot, name, flags.Namespace, false)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)

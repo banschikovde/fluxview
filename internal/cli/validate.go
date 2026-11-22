@@ -58,6 +58,9 @@ type ValidateFlags struct {
 	// (--no-git-source-fetch): such Kustomizations are named in a warning
 	// and left unchecked by the gate.
 	NoGitSourceFetch bool
+	// NoOCISourceFetch disables fetching OCIRepository artifacts
+	// (--no-oci-source-fetch): such Kustomizations resolve paths locally.
+	NoOCISourceFetch bool
 
 	// disableDefaultSchemas drops the default HTTP schema registry. It has
 	// no flag — only tests set it, to keep them offline.
@@ -158,6 +161,7 @@ Examples:
 	cmd.Flags().StringVar(&flags.Output, "output", "text", "Output format: text, json or junit (machine formats go to stdout)")
 	registerKustomizeCacheFlags(cmd, &flags.KsCache)
 	registerNoGitSourceFetchFlag(cmd, &flags.NoGitSourceFetch)
+	registerNoOCISourceFetchFlag(cmd, &flags.NoOCISourceFetch)
 	flags.SchemaCacheDir = validate.DefaultSchemaCacheDir() // pre-seed: pflag.Var does not set defaults
 	cmd.Flags().Var(cachedir.NewFlag(&flags.SchemaCacheDir), "schema-cache-dir",
 		"Cache directory for schemas downloaded from the default registry, version-pinned; \"disabled\" disables reuse (per-run temp dir) (env: FLUXVIEW_SCHEMA_CACHE_DIR)")
@@ -384,7 +388,7 @@ func buildValidationOutput(ctx context.Context, flags *ValidateFlags, absCluster
 	configMaps := resolveConfigMaps(ctx, scans, absClusterPath, builder, buildCache)
 	secrets := resolveSecrets(ctx, scans, absClusterPath, builder, buildCache)
 
-	gitEnv := newGitSourceEnv(ctx, repoRoot, ksCache, flags.NoGitSourceFetch)
+	sourceEnvs := newSourceEnvs(ctx, repoRoot, ksCache, flags.NoGitSourceFetch, flags.NoOCISourceFetch)
 	output, err := buildKSContent(ctx, &ksBuildEnv{
 		scans:       scans,
 		builder:     builder,
@@ -392,13 +396,13 @@ func buildValidationOutput(ctx context.Context, flags *ValidateFlags, absCluster
 		clusterPath: absClusterPath,
 		cache:       buildCache,
 		report:      &report,
-		gitSources:  gitEnv,
+		sources:     sourceEnvs,
 	}, kustomizations, substitutionSources{configMaps: configMaps, secrets: secrets})
 	if err != nil {
-		gitEnv.Close()
+		sourceEnvs.Close()
 		return nil, nil, NewExitError(err, ExitCodeError)
 	}
-	return output, &validateBuildState{cache: buildCache, report: report, close: func() { _ = gitEnv.Close() }}, nil
+	return output, &validateBuildState{cache: buildCache, report: report, close: func() { _ = sourceEnvs.Close() }}, nil
 }
 
 // gatePartialBuild turns build anomalies into gate failures: kustomize

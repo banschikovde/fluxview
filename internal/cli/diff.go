@@ -55,6 +55,9 @@ type DiffFlags struct {
 	// NoGitSourceFetch disables cloning external GitRepository sources
 	// (--no-git-source-fetch): the network kill switch for slow links.
 	NoGitSourceFetch bool
+	// NoOCISourceFetch disables fetching OCIRepository artifacts
+	// (--no-oci-source-fetch): the OCI network kill switch for slow links.
+	NoOCISourceFetch bool
 }
 
 func newDiffCmd() *cobra.Command {
@@ -172,9 +175,9 @@ func runDiff(ctx context.Context, args []string, flags *DiffFlags) error {
 func runDiffKS(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoot, name, compareCommit string, flags *DiffFlags) error {
 	// External source identity comes from the real repository (the git ops
 	// handle), never from the comparison worktree — it has no remotes.
-	gitEnv := newGitSourceEnv(ctx, repoRoot, flags.KsCache, flags.NoGitSourceFetch)
-	defer gitEnv.Close()
-	env := &ksPipelineEnv{scans: newScanCache(), ksCache: flags.KsCache, gitSources: gitEnv}
+	sources := newSourceEnvs(ctx, repoRoot, flags.KsCache, flags.NoGitSourceFetch, flags.NoOCISourceFetch)
+	defer sources.Close()
+	env := &ksPipelineEnv{scans: newScanCache(), ksCache: flags.KsCache, sources: sources}
 
 	currentOutput, err := buildKSOutput(ctx, env, clusterPath, repoRoot, name)
 	if err != nil {
@@ -203,17 +206,18 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 	// side silently missing its resources would show up as a false
 	// "added" (green) / "removed" (red) diff.
 	scans := newScanCache()
-	// One git source env for both diff sides: the same origin identity, and
-	// the shared clone cache keeps pinned external sources byte-identical
-	// across the comparison (floating refs honor the cache TTL).
-	gitEnv := newGitSourceEnv(ctx, repoRoot, flags.KsCache, flags.NoGitSourceFetch)
-	defer gitEnv.Close()
+	// One source env bundle for both diff sides: the same origin identity,
+	// and the shared caches keep pinned external sources and OCI artifacts
+	// byte-identical across the comparison (floating refs honor the cache
+	// TTLs).
+	sources := newSourceEnvs(ctx, repoRoot, flags.KsCache, flags.NoGitSourceFetch, flags.NoOCISourceFetch)
+	defer sources.Close()
 	env := &hrInflationEnv{
-		scans:      scans,
-		strict:     true, // a side that cannot inflate must fail the diff
-		helmCache:  helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout, kubeVersion: flags.KubernetesVersion},
-		ksCache:    flags.KsCache,
-		gitSources: gitEnv,
+		scans:     scans,
+		strict:    true, // a side that cannot inflate must fail the diff
+		helmCache: helmCacheOptions{dir: flags.HelmCacheDir, indexTTL: flags.HelmIndexTTL, downloadTimeout: flags.HelmDownloadTimeout, kubeVersion: flags.KubernetesVersion},
+		ksCache:   flags.KsCache,
+		sources:   sources,
 	}
 	currentOutput, err := buildHRInflation(ctx, env, clusterPath, repoRoot, name, flags.Namespace, false)
 	if err != nil {
@@ -256,11 +260,11 @@ func runDiffHR(ctx context.Context, gitOps *git.Operations, clusterPath, repoRoo
 }
 
 // ksPipelineEnv is the per-command state of the KS diff pipeline: memoized
-// scans, the kustomize cache settings and the shared external git source env.
+// scans, the kustomize cache settings and the shared external source envs.
 type ksPipelineEnv struct {
-	scans      *scanCache
-	ksCache    kustomizeCacheOptions
-	gitSources *gitSourceEnv
+	scans   *scanCache
+	ksCache kustomizeCacheOptions
+	sources *sourceEnvs
 }
 
 // revisionRef points at the git state a comparison build runs against.
@@ -271,7 +275,7 @@ type revisionRef struct {
 
 // buildKSOutput builds the Kustomization output for the current working tree.
 func buildKSOutput(ctx context.Context, env *ksPipelineEnv, clusterPath, repoRoot, name string) ([]byte, error) {
-	scans, gitSources := env.scans, env.gitSources
+	scans, sources := env.scans, env.sources
 	// Check that the path contains Kustomization files directly (not just in subdirectories)
 	hasDirectKS, err := hasDirectKustomizations(clusterPath)
 	if err != nil {
@@ -307,13 +311,13 @@ func buildKSOutput(ctx context.Context, env *ksPipelineEnv, clusterPath, repoRoo
 		clusterPath: clusterPath,
 		quiet:       false,
 		cache:       buildCache,
-		gitSources:  gitSources,
+		sources:     sources,
 	}, kustomizations, substitutionSources{configMaps: configMaps, secrets: secrets})
 }
 
 // buildKSOutputAtRevision builds the Kustomization output at a specific git revision.
 func buildKSOutputAtRevision(ctx context.Context, env *ksPipelineEnv, rev revisionRef, clusterPath, repoRoot, name string) ([]byte, error) {
-	scans, gitSources := env.scans, env.gitSources
+	scans, sources := env.scans, env.sources
 	gitOps, revision := rev.ops, rev.revision
 	// Create a git worktree at the target revision.
 	worktreePath, err := gitOps.CloneToDir(ctx, revision)
@@ -374,7 +378,7 @@ func buildKSOutputAtRevision(ctx context.Context, env *ksPipelineEnv, rev revisi
 		clusterPath: worktreeClusterPath,
 		quiet:       true,
 		cache:       buildCache,
-		gitSources:  gitSources,
+		sources:     sources,
 	}, kustomizations, substitutionSources{configMaps: configMaps, secrets: secrets})
 }
 
@@ -382,7 +386,7 @@ func buildKSOutputAtRevision(ctx context.Context, env *ksPipelineEnv, rev revisi
 // memoized scans, the kustomize builder, the roots the build resolves
 // against, and the per-run knobs — quiet (suppress diagnostics), the build
 // result cache, the anomaly report (nil = don't collect; build and diff
-// stay lenient) and the external git source env (nil = strictly local).
+// stay lenient) and the external source envs (nil = strictly local).
 type ksBuildEnv struct {
 	scans       *scanCache
 	builder     *kustomize.Builder
@@ -391,7 +395,7 @@ type ksBuildEnv struct {
 	quiet       bool
 	cache       buildCache
 	report      *buildReport
-	gitSources  *gitSourceEnv
+	sources     *sourceEnvs
 }
 
 // substitutionSources is the ConfigMap/Secret set Flux postBuild variable
@@ -445,10 +449,10 @@ func buildAllKustomizations(ctx context.Context, env *ksBuildEnv, kustomizations
 	seen := make(map[string]bool)
 	var results []string
 
-	// Known GitRepository sources: parsed from the cluster path (with a
-	// repoRoot fallback) plus everything recursively discovered in build
-	// outputs — an external clone's output may reference further sources.
-	knownRepos := collectKnownRepos(ctx, env)
+	// Known source objects: parsed from the cluster path (with a repoRoot
+	// fallback) plus everything recursively discovered in build outputs —
+	// an external clone's output may reference further sources.
+	known := collectKnownSources(ctx, env)
 
 	// Queue of KS to process.
 	queue := make([]flux.Kustomization, len(kustomizations))
@@ -466,7 +470,7 @@ func buildAllKustomizations(ctx context.Context, env *ksBuildEnv, kustomizations
 			}
 			seen[key] = true
 
-			doc, discovered, err := buildOneKustomization(ctx, env, ks, key, knownRepos, seen, subs)
+			doc, discovered, err := buildOneKustomization(ctx, env, ks, key, known, seen, subs)
 			if err != nil {
 				return nil, err
 			}
@@ -494,24 +498,39 @@ func buildAllKustomizations(ctx context.Context, env *ksBuildEnv, kustomizations
 	return []byte(combined), nil
 }
 
-// collectKnownRepos parses the GitRepositories known before the first
+// knownSources holds the source objects a Kustomization's sourceRef may
+// name, keyed "namespace/name": external GitRepositories and
+// OCIRepositories.
+type knownSources struct {
+	git map[string]flux.GitRepository
+	oci map[string]flux.OCIRepository
+}
+
+// collectKnownSources parses the source objects known before the first
 // build: scanned from the cluster path with a repoRoot fallback. Only the
-// external-source pipeline needs them; a nil gitSources keeps the map empty.
-func collectKnownRepos(ctx context.Context, env *ksBuildEnv) map[string]flux.GitRepository {
-	knownRepos := map[string]flux.GitRepository{}
-	if env.gitSources == nil {
-		return knownRepos
+// external-source pipeline needs them; a nil source env keeps the maps
+// empty.
+func collectKnownSources(ctx context.Context, env *ksBuildEnv) knownSources {
+	known := knownSources{}
+	if env.sources == nil {
+		return known
 	}
 	stderr := func(format string, args ...any) {
 		if !env.quiet {
 			fmt.Fprintf(os.Stderr, format, args...)
 		}
 	}
+	known.git = map[string]flux.GitRepository{}
 	for _, gr := range parseWithRootFallback(env.scans, env.clusterPath, env.repoRoot, "GitRepositories",
 		func(p *flux.Parser) ([]flux.GitRepository, error) { return p.ParseGitRepositories(ctx) }, stderr) {
-		knownRepos[gr.Metadata.Namespace+"/"+gr.Metadata.Name] = gr
+		known.git[gr.Metadata.Namespace+"/"+gr.Metadata.Name] = gr
 	}
-	return knownRepos
+	known.oci = map[string]flux.OCIRepository{}
+	for _, repo := range parseWithRootFallback(env.scans, env.clusterPath, env.repoRoot, "OCIRepositories",
+		func(p *flux.Parser) ([]flux.OCIRepository, error) { return p.ParseOCIRepositories(ctx) }, stderr) {
+		known.oci[repo.Metadata.Namespace+"/"+repo.Metadata.Name] = repo
+	}
+	return known
 }
 
 // encodeKustomization serializes the Flux Kustomization resource itself
@@ -544,26 +563,48 @@ type ksSourceResolution struct {
 // resolveKSSource resolves one Kustomization's source with Flux
 // source-first semantics: spec.path always resolves against the
 // repository named by sourceRef. An external GitRepository (other than
-// the local origin) means the upstream clone — even when a directory of
-// the same name happens to exist locally, it is a different repository's
-// content. Everything else (local GitRepository, OCIRepository, Bucket,
-// unknown source) resolves locally. A failed external fetch reports into
-// env.report (validate warns and leaves the Kustomization unchecked) and
-// yields an unusable resolution.
-func resolveKSSource(ctx context.Context, env *ksBuildEnv, ks flux.Kustomization, key string, knownRepos map[string]flux.GitRepository) ksSourceResolution {
+// the local origin) means the upstream clone, an OCIRepository means the
+// fetched artifact — even when a directory of the same name happens to
+// exist locally, it is different content that cannot be told apart
+// locally (unless the OCIRepository is listed in
+// FLUXVIEW_OCI_LOCAL_SOURCES — this repository's own pushed artifact).
+// Everything else (local GitRepository, Bucket, unknown source) resolves
+// locally. A failed external fetch reports into env.report (validate
+// warns and leaves the Kustomization unchecked) and yields an unusable
+// resolution.
+func resolveKSSource(ctx context.Context, env *ksBuildEnv, ks flux.Kustomization, key string, known knownSources) ksSourceResolution {
 	res := ksSourceResolution{readRoot: env.repoRoot}
 	if ks.Spec.Path == "" {
 		return res
 	}
-	gr, ok := env.gitSources.lookupExternal(knownRepos, ks)
-	if !ok {
-		res.sourcePath = resolveSourcePath(env.repoRoot, ks)
-		if _, err := os.Stat(res.sourcePath); os.IsNotExist(err) {
-			res.sourcePath = ""
+	if s := env.sources; s != nil {
+		if gr, ok := s.git.lookupExternal(known.git, ks); ok {
+			return resolveFromGitClone(ctx, env, ks, key, res, gr)
 		}
-		return res
+		// OCIRepository: the artifact is fetched and the path resolves
+		// inside it (source-first), unless the repository is listed in
+		// FLUXVIEW_OCI_LOCAL_SOURCES (this repository's own pushed
+		// artifact) or fetching is disabled (the kill switch restores the
+		// pre-fetch local resolution exactly). Unlike the git fetch above,
+		// a failure warns in every mode — including the quiet hr
+		// discovery: after this feature a skipped artifact is no longer
+		// the expected baseline, and its HelmReleases would silently
+		// vanish from the output.
+		if repo, ok := s.oci.lookup(known.oci, ks); ok && s.oci.fetchEnabled() && !s.oci.isLocal(ks) {
+			return resolveFromOCIArtifact(ctx, env, ks, key, res, repo)
+		}
 	}
 
+	res.sourcePath = resolveSourcePath(env.repoRoot, ks)
+	if _, err := os.Stat(res.sourcePath); os.IsNotExist(err) {
+		res.sourcePath = ""
+	}
+	return res
+}
+
+// resolveFromGitClone resolves the Kustomization's path inside the clone
+// of its external GitRepository.
+func resolveFromGitClone(ctx context.Context, env *ksBuildEnv, ks flux.Kustomization, key string, res ksSourceResolution, gr flux.GitRepository) ksSourceResolution {
 	res.externalSource = describeSource(ks)
 	// The fetch is silent: for the user an external source must behave
 	// exactly like a local one — the "Building ns/name" line is the only
@@ -571,7 +612,7 @@ func resolveKSSource(ctx context.Context, env *ksBuildEnv, ks flux.Kustomization
 	// warns under the same quiet contract as the rest of the diagnostics:
 	// the hr pipeline's discovery stage is quiet (its output is
 	// HelmReleases, the skip is symmetric), as is the diff comparison side.
-	cloneDir, err := env.gitSources.ensure(ctx, gr)
+	cloneDir, err := env.sources.git.ensure(ctx, gr)
 	if err != nil {
 		if !env.quiet {
 			fmt.Fprintf(os.Stderr, "Warning: fetching %s for %s/%s failed: %v — skipping its resources\n",
@@ -600,22 +641,54 @@ func resolveKSSource(ctx context.Context, env *ksBuildEnv, ks flux.Kustomization
 	return res
 }
 
+// resolveFromOCIArtifact resolves the Kustomization's path inside the
+// extracted artifact of its OCIRepository. A path missing from the
+// artifact is a real configuration error: externalSource stays set, so
+// warnMissingKSSource treats it like a missing path in a fetched external
+// clone (warning in every mode, validate gate failure).
+func resolveFromOCIArtifact(ctx context.Context, env *ksBuildEnv, ks flux.Kustomization, key string, res ksSourceResolution, repo flux.OCIRepository) ksSourceResolution {
+	res.externalSource = describeSource(ks)
+	artifactDir, err := env.sources.oci.ensure(ctx, repo)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: fetching %s for %s/%s failed: %v — skipping its resources\n",
+			res.externalSource, ks.Metadata.Namespace, ks.Metadata.Name, err)
+		if env.report != nil {
+			env.report.fetchErrors = append(env.report.fetchErrors, fetchError{
+				ks:     key,
+				source: res.externalSource,
+				err:    err.Error(),
+			})
+		}
+		res.fetchFailed = true
+		return res
+	}
+	env.builder.AllowRoot(artifactDir)
+	if resolved, err := securejoin.SecureJoin(artifactDir, ks.Spec.Path); err == nil {
+		if _, statErr := os.Stat(resolved); statErr == nil {
+			res.sourcePath = resolved
+			res.readRoot = artifactDir
+		}
+	}
+	return res
+}
+
 // warnMissingKSSource reports a Kustomization whose source path is absent
-// (in the external clone or locally) and records it for the validate
-// gate — its resources would be silently missing from the checked set.
-// OCIRepository and Bucket sources are the exception: fluxview never
-// fetches them, so their spec.path lives inside an artifact that cannot
-// be checked out, and a local miss says nothing about the manifest —
-// those are recorded as unchecked (warn), exactly like an unfetched
-// external GitRepository.
-// quiet silences only the OCIRepository/Bucket warning: a never-fetched
-// source is noise in the quiet stages (hr pipeline discovery, diff
-// comparison side). A missing path in a repository fluxview can see —
-// the local checkout or a fetched external clone — is a real
-// configuration error (its HelmReleases would silently vanish from an
-// hr diff), so that warning is printed in every mode. The report
-// recording is never suppressed: validate's gate and the "left
-// unchecked" summary must stay complete wherever the build ran.
+// (in the external clone, the fetched OCI artifact or locally) and records
+// it for the validate gate — its resources would be silently missing from
+// the checked set. Bucket sources and unfetchable OCIRepositories (no
+// manifest found, --no-oci-source-fetch, or a local artifact from
+// FLUXVIEW_OCI_LOCAL_SOURCES) are the exception: fluxview cannot obtain
+// their content, so a local miss says nothing about the manifest — those
+// are recorded as unchecked (warn), exactly like an unfetched external
+// GitRepository.
+// quiet silences only that unfetched-source warning: it is noise in the
+// quiet stages (hr pipeline discovery, diff comparison side). A missing
+// path in a repository fluxview can see — the local checkout, a fetched
+// external clone or a fetched artifact — is a real configuration error
+// (its HelmReleases would silently vanish from an hr diff), so that
+// warning is printed in every mode. The report recording is never
+// suppressed: validate's gate and the "left unchecked" summary must stay
+// complete wherever the build ran.
 func warnMissingKSSource(ks flux.Kustomization, externalSource string, report *buildReport, quiet bool) {
 	if ks.Spec.Path == "" {
 		return
@@ -629,7 +702,7 @@ func warnMissingKSSource(ks flux.Kustomization, externalSource string, report *b
 		recordMissingKSPath(report, key, ks.Spec.Path)
 	case kind == flux.KindOCIRepository || kind == flux.KindBucket:
 		if !quiet {
-			fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally (source kind %s is not fetched externally), skipping its resources\n",
+			fmt.Fprintf(os.Stderr, "Warning: %s/%s path %s not found locally (source kind %s is not fetched), skipping its resources\n",
 				ks.Metadata.Namespace, ks.Metadata.Name, ks.Spec.Path, kind)
 		}
 		// err carries only the cause — no path: the grouping in
@@ -640,7 +713,7 @@ func warnMissingKSSource(ks flux.Kustomization, externalSource string, report *b
 			report.fetchErrors = append(report.fetchErrors, fetchError{
 				ks:     key,
 				source: describeSource(ks),
-				err:    "source kind " + kind + " is not fetched externally",
+				err:    "source kind " + kind + " content not fetched",
 			})
 		}
 	default:
@@ -664,15 +737,15 @@ func recordMissingKSPath(report *buildReport, ks, path string) {
 // document, the Kustomizations recursively discovered in that output, and
 // a context error. Unusable sources (failed fetch, missing path, failed
 // build) degrade to the KS resource alone — exactly the controller's
-// include-the-KS behavior — with the warning already printed. knownRepos
-// is updated with the GitRepositories found in the built output.
-func buildOneKustomization(ctx context.Context, env *ksBuildEnv, ks flux.Kustomization, key string, knownRepos map[string]flux.GitRepository, seen map[string]bool, subs substitutionSources) (string, []flux.Kustomization, error) {
+// include-the-KS behavior — with the warning already printed. known is
+// updated with the source objects found in the built output.
+func buildOneKustomization(ctx context.Context, env *ksBuildEnv, ks flux.Kustomization, key string, known knownSources, seen map[string]bool, subs substitutionSources) (string, []flux.Kustomization, error) {
 	if err := CheckInterrupted(ctx); err != nil {
 		return "", nil, err
 	}
 	ksYAML := encodeKustomization(ks)
 
-	res := resolveKSSource(ctx, env, ks, key, knownRepos)
+	res := resolveKSSource(ctx, env, ks, key, known)
 	if res.sourcePath == "" {
 		if !res.fetchFailed {
 			warnMissingKSSource(ks, res.externalSource, env.report, env.quiet)
@@ -693,11 +766,14 @@ func buildOneKustomization(ctx context.Context, env *ksBuildEnv, ks flux.Kustomi
 		return string(ksYAML), nil, nil
 	}
 
-	// Collect GitRepository sources referenced by the output — recursively
+	// Collect source objects referenced by the output — recursively
 	// discovered Kustomizations may point at them.
-	if env.gitSources != nil {
+	if env.sources != nil {
 		for _, gr := range flux.ParseGitRepositoriesFromBytes(output) {
-			knownRepos[gr.Metadata.Namespace+"/"+gr.Metadata.Name] = gr
+			known.git[gr.Metadata.Namespace+"/"+gr.Metadata.Name] = gr
+		}
+		for _, repo := range flux.ParseOCIRepositoriesFromBytes(output) {
+			known.oci[repo.Metadata.Namespace+"/"+repo.Metadata.Name] = repo
 		}
 	}
 

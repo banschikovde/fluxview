@@ -19,6 +19,7 @@ import (
 	"github.com/banschikovde/fluxview/internal/helm"
 	"github.com/banschikovde/fluxview/internal/kubeversion"
 	"github.com/banschikovde/fluxview/internal/kustomize"
+	"github.com/banschikovde/fluxview/internal/ocisource"
 	"github.com/cyphar/filepath-securejoin"
 )
 
@@ -48,11 +49,12 @@ func (o helmCacheOptions) inflaterOptions() []helm.InflaterOption {
 // kustomizeCacheOptions carries the kustomize caches from CLI flags/env
 // into the kustomize Builder and the KS pipeline: the remote resource cache
 // (remoteDir/remoteTtl), the build output cache
-// (buildCacheDir/buildCacheTTL) and the external git source clone cache
-// (gitSourceDir/gitSourceTtl, consumed by buildAllKustomizations — not a
-// Builder option). Independent of the Helm cache. All follow the same
-// conventions: dir "disabled" disables the cache, ttl 0
-// always bypasses it (entries are still refreshed on disk).
+// (buildCacheDir/buildCacheTTL), the external git source clone cache
+// (gitSourceDir/gitSourceTtl) and the OCI artifact cache
+// (ociSourceDir/ociSourceTtl) — the latter two are consumed by
+// buildAllKustomizations, not Builder options. Independent of the Helm
+// cache. All follow the same conventions: dir "disabled" disables the
+// cache, ttl 0 always bypasses it (entries are still refreshed on disk).
 type kustomizeCacheOptions struct {
 	remoteDir     string
 	remoteTtl     time.Duration
@@ -61,6 +63,8 @@ type kustomizeCacheOptions struct {
 	buildCacheTTL time.Duration
 	gitSourceDir  string
 	gitSourceTtl  time.Duration
+	ociSourceDir  string
+	ociSourceTtl  time.Duration
 }
 
 func (o kustomizeCacheOptions) builderOptions() []kustomize.BuilderOption {
@@ -142,11 +146,13 @@ func effectiveKubeVersion(cmd *cobra.Command, flagValue, pin string) string {
 //	--<name>-cache-ttl  freshness window; 0 always bypasses (still writes)
 //
 // Here <name> is "remote" (resources fetched by URL, referenced by
-// kustomizations), "build" (kustomize build outputs) and "git-source"
-// (clones of external GitRepository sources). Defaults come from
+// kustomizations), "build" (kustomize build outputs), "git-source"
+// (clones of external GitRepository sources) and "oci-source" (extracted
+// OCIRepository artifacts). Defaults come from
 // kustomize.DefaultRemoteCacheDir()/DefaultRemoteCacheTTL()/
 // DefaultRemoteCacheTimeout()/DefaultBuildCacheDir()/DefaultBuildCacheTTL()/
-// gitsource.DefaultCacheDir()/DefaultTTL().
+// gitsource.DefaultCacheDir()/DefaultTTL()/ocisource.DefaultCacheDir()/
+// DefaultTTL().
 func registerKustomizeCacheFlags(cmd *cobra.Command, opts *kustomizeCacheOptions) {
 	*opts = kustomizeCacheOptions{
 		remoteDir:     kustomize.DefaultRemoteCacheDir(), // pre-seed: pflag.Var does not set defaults
@@ -156,6 +162,8 @@ func registerKustomizeCacheFlags(cmd *cobra.Command, opts *kustomizeCacheOptions
 		buildCacheTTL: kustomize.DefaultBuildCacheTTL(),
 		gitSourceDir:  gitsource.DefaultCacheDir(),
 		gitSourceTtl:  gitsource.DefaultTTL(),
+		ociSourceDir:  ocisource.DefaultCacheDir(),
+		ociSourceTtl:  ocisource.DefaultTTL(),
 	}
 	cmd.Flags().Var(cachedir.NewFlag(&opts.remoteDir), "remote-cache-dir",
 		"Cache directory for remote resources referenced by kustomizations; \"disabled\" disables (env: FLUXVIEW_REMOTE_CACHE_DIR)")
@@ -171,6 +179,10 @@ func registerKustomizeCacheFlags(cmd *cobra.Command, opts *kustomizeCacheOptions
 		"Cache directory for clones of external GitRepository sources; \"disabled\" disables reuse (env: FLUXVIEW_GIT_SOURCE_CACHE_DIR)")
 	cmd.Flags().DurationVar(&opts.gitSourceTtl, "git-source-cache-ttl", gitsource.DefaultTTL(),
 		"How long floating external source resolutions (branch/semver/HEAD) stay fresh; pinned commit/tag clones never expire; 0 always re-resolves (env: FLUXVIEW_GIT_SOURCE_CACHE_TTL)")
+	cmd.Flags().Var(cachedir.NewFlag(&opts.ociSourceDir), "oci-source-cache-dir",
+		"Cache directory for fetched OCIRepository artifacts; \"disabled\" disables reuse (env: FLUXVIEW_OCI_SOURCE_CACHE_DIR)")
+	cmd.Flags().DurationVar(&opts.ociSourceTtl, "oci-source-cache-ttl", ocisource.DefaultTTL(),
+		"How long floating OCI artifact resolutions (tag/semver/latest to digest) stay fresh; digest-pinned artifacts never expire; 0 always re-resolves (env: FLUXVIEW_OCI_SOURCE_CACHE_TTL)")
 }
 
 // registerGitSourceAuthFlags registers the external git source auth flags
@@ -226,7 +238,7 @@ type helmFleet struct {
 // mergeSources). Returns a nil fleet when the path holds no Flux
 // Kustomizations — valid for the diff comparison state, an error for
 // commands that require them.
-func discoverHelmFleet(ctx context.Context, scans *scanCache, clusterPath, repoRoot string, quiet bool, ksCache kustomizeCacheOptions, gitSources *gitSourceEnv) (*helmFleet, error) {
+func discoverHelmFleet(ctx context.Context, scans *scanCache, clusterPath, repoRoot string, quiet bool, ksCache kustomizeCacheOptions, sources *sourceEnvs) (*helmFleet, error) {
 	kustomizations, err := scans.parserFor(clusterPath).ParseKustomizations(ctx)
 	if err != nil {
 		return nil, nil // no Flux KS — valid for diff
@@ -244,7 +256,7 @@ func discoverHelmFleet(ctx context.Context, scans *scanCache, clusterPath, repoR
 		clusterPath: clusterPath,
 		quiet:       true,
 		cache:       buildCache,
-		gitSources:  gitSources,
+		sources:     sources,
 	}, kustomizations, substitutionSources{configMaps: configMaps, secrets: secrets})
 	if err != nil {
 		return nil, err
@@ -307,15 +319,16 @@ func discoverHelmFleet(ctx context.Context, scans *scanCache, clusterPath, repoR
 }
 
 // hrInflationEnv is the shared state of one command's HelmRelease inflation
-// runs: memoized scans, cache settings and the external git source env. The
-// diff command builds one env and runs both sides (current state + comparison
-// revision) against it — only the paths and the quiet knob differ per side.
+// runs: memoized scans, cache settings and the external source envs (git
+// clones, OCI artifacts). The diff command builds one env and runs both
+// sides (current state + comparison revision) against it — only the paths
+// and the quiet knob differ per side.
 type hrInflationEnv struct {
-	scans      *scanCache
-	strict     bool
-	helmCache  helmCacheOptions
-	ksCache    kustomizeCacheOptions
-	gitSources *gitSourceEnv
+	scans     *scanCache
+	strict    bool
+	helmCache helmCacheOptions
+	ksCache   kustomizeCacheOptions
+	sources   *sourceEnvs
 }
 
 // buildHRInflation discovers HelmReleases through the Flux Kustomization pipeline
@@ -330,8 +343,8 @@ type hrInflationEnv struct {
 // error instead of a warning + skip, so an unbuildable state never produces a
 // misleading partial diff; quiet suppresses this run's diagnostics.
 func buildHRInflation(ctx context.Context, env *hrInflationEnv, clusterPath, repoRoot, name, namespace string, quiet bool) ([]byte, error) {
-	scans, gitSources := env.scans, env.gitSources
-	fleet, err := discoverHelmFleet(ctx, scans, clusterPath, repoRoot, quiet, env.ksCache, gitSources)
+	scans, sources := env.scans, env.sources
+	fleet, err := discoverHelmFleet(ctx, scans, clusterPath, repoRoot, quiet, env.ksCache, sources)
 	if err != nil {
 		return nil, err
 	}

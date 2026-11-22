@@ -36,6 +36,7 @@ type InventoryFlags struct {
 	HelmCache     helmCacheOptions
 	KsCache       kustomizeCacheOptions
 	NoFetch       bool
+	NoOCIFetch    bool
 	SSHHosts      string
 	SSHAcceptNew  bool
 }
@@ -128,6 +129,7 @@ func bindInventoryFlags(cmd *cobra.Command, flags *InventoryFlags) {
 	registerKustomizeCacheFlags(cmd, &flags.KsCache)
 	registerGitSourceAuthFlags(cmd, &flags.SSHHosts, &flags.SSHAcceptNew)
 	registerNoGitSourceFetchFlag(cmd, &flags.NoFetch)
+	registerNoOCISourceFetchFlag(cmd, &flags.NoOCIFetch)
 }
 
 // parseSourceFilter parses the --source flag into a source set. Empty means
@@ -183,8 +185,8 @@ func runInventory(ctx context.Context, flags *InventoryFlags) error {
 	}
 
 	scans := newScanCache()
-	gitEnv := newGitSourceEnv(ctx, repoRoot, flags.KsCache, flags.NoFetch)
-	defer gitEnv.Close()
+	sourceEnvs := newSourceEnvs(ctx, repoRoot, flags.KsCache, flags.NoFetch, flags.NoOCIFetch)
+	defer sourceEnvs.Close()
 
 	inflater, err := helm.NewInflater(flags.HelmCache.inflaterOptions()...)
 	if err != nil {
@@ -200,7 +202,7 @@ func runInventory(ctx context.Context, flags *InventoryFlags) error {
 		fmt.Fprintln(os.Stderr, "Note: no CR rules configured — CRs are hidden; add .fluxview/inventory-rules.yaml in the repo root or pass --rules (see docs/inventory-rules-example.yaml), or use --all-crs to list CRs with version unknown")
 	}
 
-	fleet, err := discoverHelmFleet(ctx, scans, absClusterPath, repoRoot, false, flags.KsCache, gitEnv)
+	fleet, err := discoverHelmFleet(ctx, scans, absClusterPath, repoRoot, false, flags.KsCache, sourceEnvs)
 	if err != nil {
 		return NewExitError(err, ExitCodeError)
 	}
@@ -212,7 +214,7 @@ func runInventory(ctx context.Context, flags *InventoryFlags) error {
 		inflater:      inflater,
 		scans:         scans,
 		rules:         rules,
-		gitEnv:        gitEnv,
+		sources:       sourceEnvs,
 		allCRs:        flags.AllCRs,
 		splitUmbrella: flags.SplitUmbrella,
 	}
@@ -288,14 +290,15 @@ func runInventory(ctx context.Context, flags *InventoryFlags) error {
 // their resolved chart context for rendering. quiet suppresses per-component
 // stderr diagnostics (the --branch-orig comparison side).
 // inventoryEnv is the per-run shared state of inventory collection: the
-// Helm inflater, memoized scans, the extraction rules and the external git
-// source env, plus the flag knobs both collection sides share. The current
-// side runs chatty; the --branch-orig comparison side passes quiet=true.
+// Helm inflater, memoized scans, the extraction rules and the external
+// source envs, plus the flag knobs both collection sides share. The
+// current side runs chatty; the --branch-orig comparison side passes
+// quiet=true.
 type inventoryEnv struct {
 	inflater      *helm.Inflater
 	scans         *scanCache
 	rules         *inventory.RuleSet
-	gitEnv        *gitSourceEnv
+	sources       *sourceEnvs
 	allCRs        bool
 	splitUmbrella bool
 }
@@ -317,7 +320,7 @@ func collectFleetComponents(ctx context.Context, env *inventoryEnv, fleet *helmF
 	components = append(components, collectCRComponents(docs, env.rules, env.allCRs)...)
 	components = append(components, inventory.CollectManifestComponents(manifestInputs(fleet.kustomizations, docs))...)
 	components = append(components, inventory.CRDComponents(crdRaws(docs),
-		crdGitSourceVersions(ctx, env.scans, repoRoot, env.gitEnv, quiet))...)
+		crdGitSourceVersions(ctx, env.scans, repoRoot, env.sources.git, quiet))...)
 	return rows, components, nil
 }
 
@@ -362,7 +365,7 @@ func collectAtRevision(ctx context.Context, env *inventoryEnv, gitOps *git.Opera
 		return nil, nil, nil, nil
 	}
 
-	fleet, err := discoverHelmFleet(ctx, env.scans, worktreeClusterPath, worktreePath, true, flags.KsCache, env.gitEnv)
+	fleet, err := discoverHelmFleet(ctx, env.scans, worktreeClusterPath, worktreePath, true, flags.KsCache, env.sources)
 	if err != nil {
 		return nil, nil, nil, err
 	}
