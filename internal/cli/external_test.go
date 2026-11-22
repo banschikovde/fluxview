@@ -1762,3 +1762,273 @@ spec:
 		t.Fatalf("validate with --git-source-ssh-accept-new must pass without known_hosts, got: %v\nstderr:\n%s", runErr, stderr)
 	}
 }
+
+// emptyPathGitFixture is a fleet repo whose Kustomization has NO spec.path
+// and sources from an external GitRepository whose clone ROOT holds the
+// content (kustomization.yaml + manifests). rootKustomization is the
+// root kustomization.yaml content of the upstream.
+type emptyPathGitFixture struct {
+	fleetDir    string
+	clusterDir  string
+	upstreamDir string
+}
+
+func newEmptyPathGitFixture(t *testing.T, rootKustomization, extraRootFile, extraContent string) *emptyPathGitFixture {
+	t.Helper()
+	upstreamDir := t.TempDir()
+	gitRun(t, upstreamDir, "init", "-q")
+	upstreamCommit(t, upstreamDir, "kustomization.yaml", rootKustomization)
+	if extraRootFile != "" {
+		upstreamCommit(t, upstreamDir, extraRootFile, extraContent)
+	}
+	gitRun(t, upstreamDir, "tag", "v1.0.0")
+
+	fleetDir := t.TempDir()
+	gitRun(t, fleetDir, "init", "-q")
+	gitRun(t, fleetDir, "remote", "add", "origin", "https://example.com/org/fleet.git")
+
+	f := &emptyPathGitFixture{
+		fleetDir:    fleetDir,
+		clusterDir:  filepath.Join(fleetDir, "cluster"),
+		upstreamDir: upstreamDir,
+	}
+	writeHelper(t, f.clusterDir, "gitrepository.yaml", `apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: root
+  namespace: flux-system
+spec:
+  url: file://`+upstreamDir+`
+  ref:
+    tag: v1.0.0
+`)
+	return f
+}
+
+func (f *emptyPathGitFixture) writeKS(t *testing.T, path string) {
+	t.Helper()
+	pathLine := ""
+	if path != "" {
+		pathLine = "  path: " + path + "\n"
+	}
+	writeHelper(t, f.clusterDir, "ks.yaml", `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: root-app
+  namespace: flux-system
+spec:
+  interval: 24h
+`+pathLine+`  sourceRef:
+    kind: GitRepository
+    name: root
+`)
+}
+
+func (f *emptyPathGitFixture) buildFlags(t *testing.T, noGitFetch bool) *BuildFlags {
+	t.Helper()
+	return &BuildFlags{
+		Path:             f.clusterDir,
+		NoGitSourceFetch: noGitFetch,
+		KsCache: kustomizeCacheOptions{
+			gitSourceDir: filepath.Join(t.TempDir(), "git-sources"),
+			gitSourceTtl: time.Hour,
+			ociSourceDir: filepath.Join(t.TempDir(), "oci-sources"),
+			ociSourceTtl: time.Hour,
+		},
+	}
+}
+
+// TestBuildKS_EmptyPathOnExternalGitIsCloneRoot: in Flux an absent
+// spec.path is the source root — the external clone's root builds.
+func TestBuildKS_EmptyPathOnExternalGitIsCloneRoot(t *testing.T) {
+	f := newEmptyPathGitFixture(t,
+		"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - cm.yaml\n",
+		"cm.yaml", "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: from-clone-root\n")
+	f.writeKS(t, "")
+
+	var runErr error
+	var stderr string
+	stdout := captureStdout(func() {
+		stderr = captureStderr(func() {
+			runErr = runBuild(context.Background(), []string{"ks"}, f.buildFlags(t, false))
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("build ks with an empty path must build the clone root, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+	if !strings.Contains(stdout, "from-clone-root") {
+		t.Errorf("the clone root content must be in the output, got:\n%s", stdout)
+	}
+}
+
+// TestBuildKS_EmptyPathLocalMatchesPathDot: on a local GitRepository an
+// empty path is the repository root — byte-identical to `path: ./`.
+func TestBuildKS_EmptyPathLocalMatchesPathDot(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	writeHelper(t, filepath.Join(repoRoot, "apps"), "kustomization.yaml", "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - cm.yaml\n")
+	writeHelper(t, filepath.Join(repoRoot, "apps"), "cm.yaml", "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app-cm\n")
+
+	ksManifest := func(path string) string {
+		pathLine := ""
+		if path != "" {
+			pathLine = "  path: " + path + "\n"
+		}
+		return `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: root-app
+  namespace: flux-system
+spec:
+  interval: 24h
+` + pathLine + `  sourceRef:
+    kind: GitRepository
+    name: flux-system
+`
+	}
+	build := func(path string) string {
+		clusterDir := filepath.Join(repoRoot, "clusters", "test")
+		writeHelper(t, clusterDir, "ks.yaml", ksManifest(path))
+		var runErr error
+		var stderr string
+		stdout := captureStdout(func() {
+			stderr = captureStderr(func() {
+				runErr = runBuild(context.Background(), []string{"ks"}, &BuildFlags{
+					Path: clusterDir,
+					KsCache: kustomizeCacheOptions{
+						gitSourceDir: filepath.Join(t.TempDir(), "git-sources"),
+						gitSourceTtl: time.Hour,
+						ociSourceDir: filepath.Join(t.TempDir(), "oci-sources"),
+						ociSourceTtl: time.Hour,
+					},
+				})
+			})
+		})
+		if runErr != nil {
+			t.Fatalf("build ks (path=%q) failed: %v\nstderr:\n%s", path, runErr, stderr)
+		}
+		return stdout
+	}
+
+	fromDot := build("./")
+	fromEmpty := build("")
+	// The only legitimate difference is the echoed KS object itself (the
+	// empty-path KS stays empty in the output — only its BUILD root
+	// changes); normalize blank lines and that one field away.
+	normalize := func(out string) string {
+		var kept []string
+		for _, line := range strings.Split(out, "\n") {
+			if trimmed := strings.TrimSpace(line); trimmed != "" && trimmed != "path: ./" {
+				kept = append(kept, trimmed)
+			}
+		}
+		return strings.Join(kept, "\n")
+	}
+	if normalize(fromEmpty) != normalize(fromDot) {
+		t.Errorf("an empty path must build identically to './' (the echoed path field aside):\n--- ./ ---\n%s\n--- empty ---\n%s", fromDot, fromEmpty)
+	}
+	if !strings.Contains(fromEmpty, "app-cm") {
+		t.Errorf("the repository root content must build, got:\n%s", fromEmpty)
+	}
+}
+
+// TestBuildHR_HelmReleaseAtCloneRootWithoutPath: a HelmRelease at the
+// clone root is discovered through the empty-path Kustomization.
+func TestBuildHR_HelmReleaseAtCloneRootWithoutPath(t *testing.T) {
+	f := newEmptyPathGitFixture(t,
+		"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - hr.yaml\n",
+		"hr.yaml", `apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: root-hr
+  namespace: apps
+spec:
+  chart:
+    spec:
+      chart: charts/my-chart
+      version: "1.0.0"
+      sourceRef:
+        kind: GitRepository
+        name: flux-system
+`)
+	f.writeKS(t, "")
+
+	chartDir := filepath.Join(f.fleetDir, "charts", "my-chart")
+	writeHelper(t, chartDir, "Chart.yaml", "apiVersion: v2\nname: my-chart\nversion: 1.0.0\n")
+	writeHelper(t, chartDir, "values.yaml", "")
+	writeHelper(t, filepath.Join(chartDir, "templates"), "dep.yaml", "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: from-local-chart\nspec:\n  replicas: 1\n")
+
+	var runErr error
+	var stderr string
+	stdout := captureStdout(func() {
+		stderr = captureStderr(func() {
+			runErr = runBuild(context.Background(), []string{"hr"}, f.buildFlags(t, false))
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("build hr must discover the clone-root HelmRelease, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+	if !strings.Contains(stdout, "from-local-chart") {
+		t.Errorf("the clone-root HelmRelease must inflate, got:\n%s", stdout)
+	}
+}
+
+// TestValidate_EmptyPathOnExternalGit_GateCatchesBrokenRoot: an invalid
+// manifest at the clone root fails validate through the empty-path KS —
+// before the fix it silently validated nothing.
+func TestValidate_EmptyPathOnExternalGit_GateCatchesBrokenRoot(t *testing.T) {
+	f := newEmptyPathGitFixture(t,
+		"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - broken.yaml\n",
+		"broken.yaml", "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: {{{{  broken\n")
+	f.writeKS(t, "")
+
+	var runErr error
+	stderr := captureStderr(func() {
+		runErr = runValidate(context.Background(), &ValidateFlags{
+			Path:                  f.clusterDir,
+			disableDefaultSchemas: true,
+			KsCache: kustomizeCacheOptions{
+				gitSourceDir: filepath.Join(t.TempDir(), "git-sources"),
+				gitSourceTtl: time.Hour,
+				ociSourceDir: filepath.Join(t.TempDir(), "oci-sources"),
+				ociSourceTtl: time.Hour,
+			},
+		})
+	})
+	if runErr == nil {
+		t.Fatalf("a broken root manifest must fail the gate\nstderr:\n%s", stderr)
+	}
+	if !strings.Contains(runErr.Error(), "kustomize build failed") {
+		t.Errorf("expected a build-failure gate error, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+}
+
+// TestValidate_EmptyPathOnExternalGit_NoFetchLeavesUnchecked: with the
+// kill switch the empty-path KS follows the ordinary unfetched-source
+// path — named "left unchecked", exit 0.
+func TestValidate_EmptyPathOnExternalGit_NoFetchLeavesUnchecked(t *testing.T) {
+	f := newEmptyPathGitFixture(t,
+		"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources: []\n", "", "")
+	f.writeKS(t, "")
+
+	var runErr error
+	stderr := captureStderr(func() {
+		runErr = runValidate(context.Background(), &ValidateFlags{
+			Path:                  f.clusterDir,
+			disableDefaultSchemas: true,
+			NoGitSourceFetch:      true,
+			KsCache: kustomizeCacheOptions{
+				gitSourceDir: filepath.Join(t.TempDir(), "git-sources"),
+				gitSourceTtl: time.Hour,
+				ociSourceDir: filepath.Join(t.TempDir(), "oci-sources"),
+				ociSourceTtl: time.Hour,
+			},
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("the kill switch must leave validate running, got: %v\nstderr:\n%s", runErr, stderr)
+	}
+	if !strings.Contains(stderr, "left unchecked") || !strings.Contains(stderr, "flux-system/root-app") {
+		t.Errorf("the gate summary must name the unchecked empty-path Kustomization, got:\n%s", stderr)
+	}
+}

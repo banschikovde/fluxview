@@ -558,6 +558,25 @@ func encodeKustomization(ks flux.Kustomization) []byte {
 	return buf.Bytes()
 }
 
+// effectiveKSPath returns the path a Kustomization builds from. In Flux
+// an absent spec.path means the root of the source: "./" for
+// GitRepository sources (the local checkout or the external clone — an
+// empty kind is treated as local, as everywhere else). The OCI fetch
+// branch resolves its own root (the artifact directory) and Bucket and
+// every other never-fetched kind keep "" — their root is not a checkout
+// fluxview has. The KS object itself is emitted unchanged (path stays
+// empty in the output).
+func effectiveKSPath(ks flux.Kustomization) string {
+	if ks.Spec.Path != "" {
+		return ks.Spec.Path
+	}
+	switch ks.Spec.SourceRef.Kind {
+	case flux.KindGitRepository, "":
+		return "./"
+	}
+	return ""
+}
+
 // ksSourceResolution is where one Kustomization's content comes from:
 // the resolved directory/file path, the root loose-file reads walk, and
 // the external clone description when one was involved. fetchFailed marks
@@ -578,17 +597,17 @@ type ksSourceResolution struct {
 // exist locally, it is different content that cannot be told apart
 // locally (unless the OCIRepository is listed in
 // FLUXVIEW_OCI_LOCAL_SOURCES — this repository's own pushed artifact).
-// An empty spec.path is the source root — but only the fetched-artifact
-// branch honors it today; for every other source an empty path keeps the
-// historical behavior (the KS resource alone, no warning), matching the
-// pre-feature pipeline. Everything else (local GitRepository, Bucket,
-// unknown source) resolves locally. A failed external fetch reports into
+// An empty spec.path is the source root: the artifact root for a fetched
+// OCIRepository, "./" for GitRepository sources (local or external
+// clone). Bucket and the other never-fetched kinds keep the historical
+// empty-path behavior (the KS resource alone, no warning). A failed external fetch reports into
 // env.report (validate warns and leaves the Kustomization unchecked) and
 // yields an unusable resolution.
 func resolveKSSource(ctx context.Context, env *ksBuildEnv, ks flux.Kustomization, key string, known knownSources) ksSourceResolution {
 	res := ksSourceResolution{readRoot: env.repoRoot}
+	path := effectiveKSPath(ks)
 	if s := env.sources; s != nil {
-		if ks.Spec.Path != "" {
+		if path != "" {
 			if gr, ok := s.git.lookupExternal(known.git, ks); ok {
 				return resolveFromGitClone(ctx, env, ks, key, res, gr)
 			}
@@ -608,7 +627,7 @@ func resolveKSSource(ctx context.Context, env *ksBuildEnv, ks flux.Kustomization
 		}
 	}
 
-	if ks.Spec.Path == "" {
+	if path == "" {
 		return res
 	}
 
@@ -646,7 +665,7 @@ func resolveFromGitClone(ctx context.Context, env *ksBuildEnv, ks flux.Kustomiza
 		return res
 	}
 	env.builder.AllowRoot(cloneDir)
-	if resolved, err := securejoin.SecureJoin(cloneDir, ks.Spec.Path); err == nil {
+	if resolved, err := securejoin.SecureJoin(cloneDir, effectiveKSPath(ks)); err == nil {
 		if _, statErr := os.Stat(resolved); statErr == nil {
 			res.sourcePath = resolved
 			// Loose-file reads under the clone are scoped to the clone
@@ -729,7 +748,7 @@ type warnMissingOptions struct {
 
 func warnMissingKSSource(ks flux.Kustomization, opts warnMissingOptions) {
 	externalSource, report, quiet, ociFetchOn := opts.externalSource, opts.report, opts.quiet, opts.ociFetchOn
-	if ks.Spec.Path == "" {
+	if effectiveKSPath(ks) == "" {
 		return
 	}
 	key := fmt.Sprintf("%s/%s", ks.Metadata.Namespace, ks.Metadata.Name)
