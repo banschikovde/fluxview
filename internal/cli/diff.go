@@ -698,7 +698,16 @@ func resolveFromOCIArtifact(ctx context.Context, env *ksBuildEnv, ks flux.Kustom
 // warning is printed in every mode. The report recording is never
 // suppressed: validate's gate and the "left unchecked" summary must stay
 // complete wherever the build ran.
-func warnMissingKSSource(ks flux.Kustomization, externalSource string, report *buildReport, quiet bool, ociFetchOn bool) {
+// warnMissingOptions carries the mode knobs of warnMissingKSSource.
+type warnMissingOptions struct {
+	externalSource string
+	report         *buildReport
+	quiet          bool
+	ociFetchOn     bool
+}
+
+func warnMissingKSSource(ks flux.Kustomization, opts warnMissingOptions) {
+	externalSource, report, quiet, ociFetchOn := opts.externalSource, opts.report, opts.quiet, opts.ociFetchOn
 	if ks.Spec.Path == "" {
 		return
 	}
@@ -763,8 +772,12 @@ func buildOneKustomization(ctx context.Context, env *ksBuildEnv, ks flux.Kustomi
 	res := resolveKSSource(ctx, env, ks, key, known)
 	if res.sourcePath == "" {
 		if !res.fetchFailed {
-			ociFetchOn := env.sources != nil && env.sources.oci.fetchEnabled()
-			warnMissingKSSource(ks, res.externalSource, env.report, env.quiet, ociFetchOn)
+			warnMissingKSSource(ks, warnMissingOptions{
+				externalSource: res.externalSource,
+				report:         env.report,
+				quiet:          env.quiet,
+				ociFetchOn:     env.sources != nil && env.sources.oci.fetchEnabled(),
+			})
 		}
 		return string(ksYAML), nil, nil
 	}

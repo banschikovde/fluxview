@@ -230,7 +230,9 @@ func (f *Fetcher) Ensure(ctx context.Context, repo flux.OCIRepository) (string, 
 // timeout (zero) it passes ctx through.
 func (f *Fetcher) timeoutCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 	if f == nil || f.timeout <= 0 {
-		return ctx, func() {}
+		return ctx, func() {
+			// No timeout configured — there is nothing to cancel.
+		}
 	}
 	return context.WithTimeout(ctx, f.timeout)
 }
