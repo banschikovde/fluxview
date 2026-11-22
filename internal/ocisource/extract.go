@@ -23,6 +23,11 @@ var (
 	maxExtractFiles = 100_000
 )
 
+// maxTrailingBytes caps the raw bytes tolerated after the end of the
+// gzip stream (a well-formed blob has none; a hostile one must not keep
+// the verifier streaming forever).
+const maxTrailingBytes = 1 << 20
+
 // extractTarGz extracts the gzip-compressed tar stream r into dst,
 // verifying the compressed bytes against layerDesc.Digest as they stream
 // through (the digest covers the blob as stored — before gunzip). The tar
@@ -35,7 +40,8 @@ var (
 func extractTarGz(r io.Reader, layerDesc ocispec.Descriptor, dst string) error {
 	dig := layerDesc.Digest
 	verifier := dig.Verifier()
-	gz, err := gzip.NewReader(io.TeeReader(r, verifier))
+	tee := io.TeeReader(r, verifier)
+	gz, err := gzip.NewReader(tee)
 	if err != nil {
 		return fmt.Errorf("layer is not valid gzip: %w", err)
 	}
@@ -61,12 +67,39 @@ func extractTarGz(r io.Reader, layerDesc ocispec.Descriptor, dst string) error {
 		if err != nil {
 			return err
 		}
-		if err := budget.add(written, isFile); err != nil {
+		if err := budget.commit(written, isFile); err != nil {
 			return err
 		}
 	}
+
+	// The tar loop stops at the archive's end marker; the gzip member can
+	// still hold the CRC/size footer and GNU tar's zero padding (up to
+	// 10240 bytes per record), and the blob can hold bytes after the gzip
+	// member. Drain both so every blob byte passes through the verifier
+	// before Verified() is consulted — a stream cut at the tar EOF would
+	// otherwise fail the digest of a perfectly valid layer. Both drains
+	// are bounded: hostile padding must not decompress or stream forever.
+	if err := drainBounded(gz, budget.remaining()); err != nil {
+		return fmt.Errorf("reading archive: %w", err)
+	}
+	if err := drainBounded(tee, maxTrailingBytes); err != nil {
+		return fmt.Errorf("reading layer: %w", err)
+	}
 	if !verifier.Verified() {
 		return fmt.Errorf("layer content does not match %s", dig)
+	}
+	return nil
+}
+
+// drainBounded reads and discards at most limit bytes from r; more input
+// after that fails (the caller decides what "too much" means).
+func drainBounded(r io.Reader, limit int64) error {
+	n, err := io.Copy(io.Discard, io.LimitReader(r, limit+1))
+	if err != nil {
+		return err
+	}
+	if n > limit {
+		return fmt.Errorf("more than %d trailing bytes", limit)
 	}
 	return nil
 }
@@ -78,9 +111,9 @@ type extractBudget struct {
 	files int
 }
 
-// add accounts one entry against the budget, failing once a cap is
-// exceeded.
-func (b *extractBudget) add(written int64, isFile bool) error {
+// commit accounts one written entry against the caps, failing once a cap
+// is exceeded.
+func (b *extractBudget) commit(written int64, isFile bool) error {
 	if !isFile {
 		return nil
 	}
@@ -93,6 +126,12 @@ func (b *extractBudget) add(written int64, isFile bool) error {
 		return fmt.Errorf("archive expands beyond %d bytes", int64(maxExtractBytes))
 	}
 	return nil
+}
+
+// remaining reports the uncompressed bytes still allowed by the byte cap
+// (the post-archive drains run on this residue).
+func (b *extractBudget) remaining() int64 {
+	return maxExtractBytes - b.total
 }
 
 // extractEntry materializes one tar entry under root and reports how many

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -190,5 +191,76 @@ func TestSafeEntryName(t *testing.T) {
 				t.Fatalf("safeEntryName(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
 			}
 		})
+	}
+}
+
+// tarGzBytesPadded builds a tar.gz whose tar archive is padded with zero
+// blocks after the end marker (GNU tar pads to 10240-byte records) and
+// optionally trailing junk inside the gzip member — both legal for the
+// digest but unread by the tar loop.
+func tarGzBytesPadded(t *testing.T, pad int, junk string, hdrs []*tar.Header, contents map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for _, hdr := range hdrs {
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("header %q: %v", hdr.Name, err)
+		}
+		if c, ok := contents[hdr.Name]; ok && hdr.Typeflag == tar.TypeReg {
+			if _, err := tw.Write([]byte(c)); err != nil {
+				t.Fatalf("write %q: %v", hdr.Name, err)
+			}
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// GNU tar zero padding after the end-of-archive marker.
+	if _, err := gz.Write(make([]byte, pad)); err != nil {
+		t.Fatal(err)
+	}
+	// Non-tar junk still inside the gzip member.
+	if _, err := gz.Write([]byte(junk)); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestExtractTarGz_GNUTarPaddingVerified(t *testing.T) {
+	// 10240-byte record padding after the end marker: the tar loop never
+	// reads it, yet the digest covers it — the drain must feed it to the
+	// verifier or a valid layer fails.
+	blob := tarGzBytesPadded(t, 9216, "", []*tar.Header{regHdr("f.txt", 3)}, map[string]string{"f.txt": "abc"})
+	dst := t.TempDir()
+	if err := extractTarGz(bytes.NewReader(blob), descFor(blob, false), dst); err != nil {
+		t.Fatalf("a GNU-padded layer must extract and verify: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dst, "f.txt")); string(got) != "abc" {
+		t.Errorf("content mismatch: %q", got)
+	}
+}
+
+func TestExtractTarGz_TrailingJunkInsideGzipAccepted(t *testing.T) {
+	// Bytes after the tar end-of-archive marker but inside the gzip
+	// member: not tar content, but part of the digest — accepted (same
+	// tolerance as Flux's untar).
+	blob := tarGzBytesPadded(t, 0, "JUNKJUNK-not-a-tar-block", []*tar.Header{regHdr("f.txt", 3)}, map[string]string{"f.txt": "abc"})
+	dst := t.TempDir()
+	if err := extractTarGz(bytes.NewReader(blob), descFor(blob, false), dst); err != nil {
+		t.Fatalf("junk after the tar end marker must not fail the layer: %v", err)
+	}
+}
+
+func TestExtractTarGz_SlowReaderVerified(t *testing.T) {
+	// A reader yielding one byte at a time (worst-case chunking) must not
+	// affect the digest check.
+	blob := tarGzBytesPadded(t, 9216, "", []*tar.Header{regHdr("f.txt", 3)}, map[string]string{"f.txt": "abc"})
+	dst := t.TempDir()
+	if err := extractTarGz(iotest.OneByteReader(bytes.NewReader(blob)), descFor(blob, false), dst); err != nil {
+		t.Fatalf("one-byte reads must verify like any other chunking: %v", err)
 	}
 }
